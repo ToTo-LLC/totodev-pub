@@ -56,7 +56,6 @@ Base install guarantees:
 - `llm`: LangChain/OpenAI/Gemini-oriented LLM integration utilities
 - `git`: Git-backed utilities
 - `sweep`: repository sweep/pathspec tooling
-- `logging`: colorized logging helpers
 - `all`: all runtime extras
 - `dev`: development/test/lint dependencies
 
@@ -74,6 +73,28 @@ pip install "totodev-pub[connectors,llm]"
 
 # Everything runtime-related
 pip install "totodev-pub[all]"
+```
+
+### Quick Import Example
+
+Use the package name `totodev-pub` for installation, but `totodev_pub` for Python imports:
+
+```python
+from totodev_pub.forgetful_reader import ForgetfulReader
+
+
+def load_user(user_id: int) -> str:
+    # Placeholder for a high-cost call (API/database/etc.)
+    return f"profile:{user_id}"
+
+
+cache = ForgetfulReader(
+    value_retriever=lambda key: load_user(key[0]),
+    expiration_seconds=30,
+)
+
+print(cache.get((42,)))  # first call retrieves and caches
+print(cache.get((42,)))  # second call uses cache until expiry
 ```
 
 ### Module-to-Extra Guidance

@@ -31,13 +31,14 @@ from langchain_core.language_models import BaseChatModel
 from inspect import signature, Parameter
 from functools import wraps
 import logging
-from .protocol_registry import LLMProtocolRegistry, DEFAULT_LLM_TIMEOUT, logger
+from .protocol_registry import LLMProtocolRegistry, DEFAULT_LLM_TIMEOUT
 from .base_protocols import *
 from .fake_llm import FakeLLM  # Add this import
 
-from totodev_pub.logger import MyLogger
 from totodev_pub.llm.self_throttle import SelfBandwidthThrottle
 import random
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CACHED_PROMPT_EXPIRATION_MINUTES = 30*24*60  # 30 days
 

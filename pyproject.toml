@@ -54,9 +54,6 @@ git = [
 sweep = [
   "pathspec",
 ]
-logging = [
-  "colorlog",
-]
 all = [
   "luigi",
   "networkx",
@@ -80,7 +77,6 @@ all = [
   "openai",
   "GitPython",
   "pathspec",
-  "colorlog",
 ]
 dev = [
   "mypy",

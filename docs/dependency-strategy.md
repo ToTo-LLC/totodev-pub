@@ -29,7 +29,6 @@ Feature groups are organized by user intent (what a user wants to do), not by in
 - `llm`: language-model protocols, providers, and prompt tooling
 - `git`: Git-backed helpers
 - `sweep`: pathspec-driven repository sweep utilities
-- `logging`: colored logging formatter support
 - `all`: all runtime extras
 - `dev`: development and test tooling
 
@@ -73,7 +72,6 @@ Rationale:
 | `openai` | Extra | `llm` | OpenAI client usage in assistant sync paths. |
 | `GitPython` | Extra | `git` | `git` module import source for versioning helpers. |
 | `pathspec` | Extra | `sweep` | Ignore/path matching support for sweep utilities. |
-| `colorlog` | Extra | `logging` | Optional colorized log formatting. |
 | `pytest`, `pytest-asyncio`, `mypy`, `ruff` | Extra | `dev` | Development-only verification toolchain. |
 
 ## 4) Import Boundary Guidelines

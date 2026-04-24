@@ -680,3 +680,58 @@ def test_exclude_batches(tmp_dbpath):
     assert '0001-00-00' not in labels
     assert '0002-00-00' in labels
     dbj.close_db()
+
+
+def test_sqlite_default_pragmas_enable_wal_and_concurrency(tmp_dbpath):
+    """DbJig should apply WAL-oriented defaults on managed connections."""
+    dbj = DbJig(tmp_dbpath, {'<<test>>/0000-00-00_init.sql': 'CREATE TABLE t1 (x TEXT);'})
+    conn = dbj.db()
+
+    journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+    busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+
+    assert str(journal_mode).lower() == "wal"
+    assert int(synchronous) == 1  # NORMAL
+    assert int(busy_timeout) == 5000
+    assert int(foreign_keys) == 1
+    dbj.close_db()
+
+
+def test_sqlite_pragmas_override_defaults(tmp_dbpath):
+    """Caller-provided pragmas should override DbJig defaults."""
+    dbj = DbJig(
+        tmp_dbpath,
+        {'<<test>>/0000-00-00_init.sql': 'CREATE TABLE t1 (x TEXT);'},
+        sqlite_pragmas={
+            "journal_mode": "DELETE",
+            "synchronous": "FULL",
+            "busy_timeout": 1234,
+            "foreign_keys": "OFF",
+        },
+    )
+    conn = dbj.db()
+
+    assert str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "delete"
+    assert int(conn.execute("PRAGMA synchronous").fetchone()[0]) == 2  # FULL
+    assert int(conn.execute("PRAGMA busy_timeout").fetchone()[0]) == 1234
+    assert int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) == 0
+    dbj.close_db()
+
+
+def test_copy_preserves_sqlite_pragmas(tmp_dbpath):
+    """DbJig.copy() should preserve effective pragma configuration."""
+    dbj = DbJig(
+        tmp_dbpath,
+        {'<<test>>/0000-00-00_init.sql': 'CREATE TABLE t1 (x TEXT);'},
+        sqlite_pragmas={"busy_timeout": 3210, "journal_mode": "DELETE"},
+    )
+
+    dbj_copy = dbj.copy()
+    copy_conn = dbj_copy.db()
+    assert int(copy_conn.execute("PRAGMA busy_timeout").fetchone()[0]) == 3210
+    assert str(copy_conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "delete"
+
+    dbj_copy.close_db()
+    dbj.close_db()

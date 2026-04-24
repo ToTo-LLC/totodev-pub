@@ -8,9 +8,6 @@ from collections import defaultdict
 import re
 import sys
 import os
-#from totodev_pub.logger import MyLogger
-
-#logger = MyLogger.shared_logger()
 
 class FlexArgs:
     """

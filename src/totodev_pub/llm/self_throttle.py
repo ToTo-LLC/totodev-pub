@@ -2,14 +2,14 @@
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
 import time
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 from collections import deque
 import asyncio
-from totodev_pub.logger import MyLogger
 from totodev_pub.dbjig import DbJig
 
-logger = MyLogger.shared_logger()
+logger = logging.getLogger(__name__)
 
 
 class _CharUsageLogBase(ABC):

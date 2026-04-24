@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field
 from jinja2 import Template as J2Template
 import click
+import logging
 import sys
 import glob
 import yaml
@@ -17,12 +18,11 @@ import time
 from time import strftime, gmtime
 from datetime import datetime
 import requests
-from totodev_pub.logger import MyLogger
 from io import BytesIO
 # from Langfuse import Langfuse   # don't need this, go directly against restful API
 
 
-logger = MyLogger.shared_logger()
+logger = logging.getLogger(__name__)
 
 # For YAML/dict format, these are the keys that will be searched for the prompt string(s)
 USER_PROMPT_KEYS = ('user_prompt', 'template','prompt','prompty_prompt')

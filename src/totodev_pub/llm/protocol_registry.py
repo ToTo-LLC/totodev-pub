@@ -4,9 +4,6 @@
 from typing import Optional, Callable, Dict, List, Any, Tuple, Set, TypeVar
 from inspect import signature, Parameter
 from functools import wraps
-from totodev_pub.logger import MyLogger
-
-logger = MyLogger.shared_logger()
 
 DEFAULT_LLM_TIMEOUT = 90  # seconds.  Arbitrary
 

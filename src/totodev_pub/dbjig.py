@@ -3,7 +3,7 @@
 
 import sqlite3
 import argparse
-from typing import Optional,List,Tuple,Dict,Generator,Callable,Any,Iterator,Iterable,Self,Union,IO
+from typing import Optional,List,Tuple,Dict,Generator,Callable,Any,Iterator,Iterable,Self,Union,IO,Mapping
 import os
 import csv
 import sys
@@ -78,6 +78,12 @@ class DbJig:
     VALID_LOADFILE_EXTENSIONS = ['.csv','.tsv','.yaml','.json','.sql'] # in order of application
 
     DEFAULT_PQUERY_ALIAS_SUFFIX = "pq_" # used to create method aliases for parameterized queries
+    DEFAULT_SQLITE_PRAGMAS: Dict[str, Any] = {
+        "foreign_keys": "ON",
+        "journal_mode": "WAL",
+        "synchronous": "NORMAL",
+        "busy_timeout": 5000,
+    }
 
     def __init__(self, 
                  db_file: str,
@@ -85,6 +91,7 @@ class DbJig:
                  Dict[str,str]] = [],
                  exclude_batches: Optional[Union[str, re.Pattern]] = None,
                  alias_pqueries: bool = False, # if True, will create a method for each pquery prefixed with "pq_"
+                 sqlite_pragmas: Optional[Mapping[str, Any]] = None,  # merged over defaults
                 ):
         """
         Constructor for DbJig.
@@ -92,6 +99,7 @@ class DbJig:
         :param db_file: File path to the SQLite database.
         :loadsources: List of filepaths that define the structure/content of the db.  Or else, a set of pseudo-files in a dict where key is the pseudo-filename and value is the pseudo-file content.
         :exclude_batches: very much a dev tool... causes it to skip any batch that matches the regex pattern
+        :sqlite_pragmas: Optional pragma overrides merged over DEFAULT_SQLITE_PRAGMAS.
         
         If the SQLite file doesn't already exist, it is created by this method.
         Several "special" tables are created in the database including a 
@@ -114,6 +122,7 @@ class DbJig:
         self._cached_pk_tuples : Dict[str,Tuple[List[str],List[str]]] = {} # table name -> (pk_cols,non_pk_cols)
         self._cached_pqueries : Dict[str,str] = {}  # name -> sql
         self._retained_autonum: Optional[int] = None  # stores the most recently generated auto number
+        self._sqlite_pragmas: Dict[str, Any] = self._merge_sqlite_pragmas(sqlite_pragmas)
 
         # Build a reader from loadsources (supports list of paths/globs, dict, or single path)
         reader = self._build_reader(loadsources)
@@ -133,6 +142,39 @@ class DbJig:
 
         if alias_pqueries:
             self.alias_pqueries(method_name_suffux=self.__class__.DEFAULT_PQUERY_ALIAS_SUFFIX)
+
+    @classmethod
+    def _merge_sqlite_pragmas(cls, sqlite_pragmas: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        """Return effective pragma map after applying optional caller overrides."""
+        merged = {k.lower(): v for k, v in cls.DEFAULT_SQLITE_PRAGMAS.items()}
+        if sqlite_pragmas:
+            for k, v in sqlite_pragmas.items():
+                merged[str(k).lower()] = v
+        return merged
+
+    @staticmethod
+    def _sqlite_pragma_sql_value(value: Any) -> str:
+        """Render a pragma value as SQL-safe literal/token."""
+        if isinstance(value, bool):
+            return "ON" if value else "OFF"
+        if isinstance(value, (int, float)):
+            return str(value)
+        txt = str(value).strip()
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", txt):
+            return txt
+        return "'" + txt.replace("'", "''") + "'"
+
+    def _open_sqlite_connection(self, db_filepath: str, isolation_level: Optional[str] = "DEFERRED") -> sqlite3.Connection:
+        """Open and configure a SQLite connection using DbJig defaults and overrides."""
+        if isolation_level == "DEFERRED":
+            conn = sqlite3.connect(db_filepath)
+        else:
+            conn = sqlite3.connect(db_filepath, isolation_level=isolation_level)
+
+        for pragma_name, pragma_value in self._sqlite_pragmas.items():
+            pragma_sql = self._sqlite_pragma_sql_value(pragma_value)
+            conn.execute(f"PRAGMA {pragma_name} = {pragma_sql}")
+        return conn
 
     def _build_reader(self, loadsources) -> Optional[DbMigrationFileReader]:
         """Build a DbMigrationFileReader from the given load sources.
@@ -294,12 +336,11 @@ class DbJig:
     def _create_new_database(self,db_filepath) -> None:
         """Create a new SQLite database and initialize tables."""
         try:
-            conn = sqlite3.connect(db_filepath)
+            conn = self._open_sqlite_connection(db_filepath)
         except Exception as e:
             sys.stderr.write(f"Failed attempting to open SQL DB at {db_filepath}\n")
             raise e
         try:
-            conn.execute('PRAGMA foreign_keys = ON')  # Enable foreign key constraints
             cursor = conn.cursor()
 
             # Begin a transaction
@@ -353,7 +394,7 @@ class DbJig:
 
     def _validate_existing_database(self,db_filepath) -> None:
         """Validate an existing dbjig SQLite file.  Incredibly minimal verification.  See exceptions for more thorough validation."""
-        with sqlite3.connect(db_filepath) as conn:
+        with self._open_sqlite_connection(db_filepath) as conn:
             cursor = conn.cursor()
             # Check if __dbjig_params table exists and has rows
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='__dbjig_params'")
@@ -460,7 +501,7 @@ class DbJig:
             return self._db_conn
         
         # Create a new connection if we don't have one
-        self._db_conn = sqlite3.connect(self.db_file, isolation_level=None)
+        self._db_conn = self._open_sqlite_connection(self.db_file, isolation_level=None)
         self._db_conn_thread_id = current_thread_id
         return self._db_conn
 
@@ -508,7 +549,8 @@ class DbJig:
             self._db_file,
             self._initial_load_sources,
             exclude_batches=None,  # We don't need to re-run upgrades
-            alias_pqueries=False   # We don't need to re-create aliases
+            alias_pqueries=False,   # We don't need to re-create aliases
+            sqlite_pragmas=self._sqlite_pragmas,
         )
         
         # Copy over any cached data that doesn't involve connections
@@ -652,7 +694,7 @@ class DbJig:
         used, tracked, or managed by this object after it is created.  Caller takes responsibility
         for closing/managing the connection.
         """
-        return sqlite3.connect(self.db_file)
+        return self._open_sqlite_connection(self.db_file)
 
     def bound_dict(self,table_name: str, cache_expiration_seconds: int = 0) -> TableBackedDict:
         """Returns a TableBackedDict instance for the specified table.

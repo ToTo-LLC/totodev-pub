@@ -14,6 +14,11 @@ tmp.*
 *.pyc
 *.pyo
 __pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 **/.ipynb_checkpoints/
 
 # macOS system files

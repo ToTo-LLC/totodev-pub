@@ -8,9 +8,13 @@ Each protocol is registered using the LLMProtocolRegistry decorator.
 """
 
 from typing import Optional, Callable, Union, Any, Coroutine
-from .protocol_registry import LLMProtocolRegistry, DEFAULT_LLM_TIMEOUT, logger
+import logging
+
+from .protocol_registry import LLMProtocolRegistry, DEFAULT_LLM_TIMEOUT
 from .fake_llm import FakeLLM
 from totodev_pub.optional_dependencies import raise_missing_dependency
+
+logger = logging.getLogger(__name__)
 
 @LLMProtocolRegistry.register_protocol('fake')
 def create_fake_llm(
