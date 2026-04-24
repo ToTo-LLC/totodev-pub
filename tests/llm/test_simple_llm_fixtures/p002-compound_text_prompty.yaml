@@ -1,0 +1,6 @@
+name: p002 prompty format
+ignored_key: ignored_value
+---
+You are a math helper.
+---
+What is 1+1?

@@ -1,0 +1,63 @@
+name: Dependency Install Matrix
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install core package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: Core import smoke
+        run: python -c "import totodev_pub"
+
+  extras:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [pipes, lucidspark, connectors, llm, git, sweep, logging]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install profile
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[${{ matrix.extra }}]"
+      - name: Profile smoke check
+        run: |
+          python -c "import totodev_pub"
+          case "${{ matrix.extra }}" in
+            pipes) python -c "import totodev_pub.pipes.toto_pipe_base" ;;
+            lucidspark) python -c "import totodev_pub.lucidspark.lucidspark_collection" ;;
+            connectors) python -c "import totodev_pub.cached_file_folders_support.file_proxy_gmail" ;;
+            llm) python -c "import totodev_pub.llm.simplified_llm" ;;
+            git) python -c "import totodev_pub.cached_file_folders_support.cached_folders_versioner" ;;
+            sweep) python -c "import totodev_pub.minor.sweep" ;;
+            logging) python -c "import totodev_pub.logger" ;;
+          esac
+
+  all-extras:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install all runtime extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+      - name: Full test run
+        run: pytest -q

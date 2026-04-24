@@ -1,0 +1,22 @@
+# Expected configuration values for pytest scenario tests
+
+TESTUNIT:
+  TEST_MODE: "true"
+  USE_MOCK_DATABASE: "true"
+  MOCK_EXTERNAL_APIS: "true"
+  LOG_LEVEL: "DEBUG"
+  SIMPLE_VALUE: "unit_test_value"
+  SHARED_TEST_VALUE: "shared_across_all_tests"
+  DATABASE_URL: "sqlite:///:memory:"
+  API_ENDPOINT: "mock://api.example.com"
+
+TESTINTEGRATION:
+  TEST_MODE: "true"
+  USE_MOCK_DATABASE: "false"
+  TEST_DATABASE_URL: "postgresql://localhost/test_integration_db"
+  TEST_API_KEY: "integration_test_key_12345"
+  EXTERNAL_SERVICE_URL: "http://localhost:8888"
+  LOG_LEVEL: "INFO"
+  INTEGRATION_VALUE: "integration_test_value"
+  OVERRIDE_FROM_LOCAL_CONFIG: "overridden_locally"
+  COMPUTED_VALUE: "integration_integration_test_value"

@@ -1,0 +1,6 @@
+---
+name: p001-simple_test_prompt
+
+ignored_key: ignored_value
+---
+What is 1+1?

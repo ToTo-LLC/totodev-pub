@@ -1,0 +1,4 @@
+
+# Without a config file, all values come from the environment file  
+COMMON_VAL_1: "config file val 1"
+ENV_LABEL: "TEST01"

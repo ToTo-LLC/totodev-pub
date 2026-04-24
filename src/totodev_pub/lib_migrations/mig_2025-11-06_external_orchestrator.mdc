@@ -1,0 +1,163 @@
+---
+alwaysApply: false
+---
+# Migration: External Orchestrator - Optimistic Concurrency
+
+**Date**: 2025-11-06  
+**Breaking Changes**: Yes (parameter removed)
+**Relates to:**: `totodev_pub/cached_file_folders.py` and `CachedFileFolders` class
+
+---
+
+## For Most Users: Minimal Changes
+
+If you don't pass `storage_lock_timeout`, **your code works as-is**:
+
+```python
+# These still work identically
+async with cache.resync_sweep(grouping_key) as session:
+    session.upsert_file(proxy)
+
+result = await cache.resync_bulk(proxies, grouping_key)
+```
+
+---
+
+## What Actually Changed
+
+### REMOVED - Breaking Changes:
+
+**1. Internal APIs** (probably not using these):
+- `start_updates()` 
+- `end_updates()`
+- `is_locked()`
+- `_assert_unlocked()`
+
+**2. `storage_lock_timeout` parameter REMOVED** (will cause TypeError if used):
+- From `resync_sweep(grouping_key, storage_lock_timeout=...)`
+- From `resync_bulk(proxies, grouping_key, storage_lock_timeout=...)`
+- From `CacheGrouping.resync_sweep(storage_lock_timeout=...)`
+- From `CacheGrouping.resync_bulk(storage_lock_timeout=...)`
+
+### Changed Internally (but same external behavior):
+- `resync_sweep()` → now uses `ResyncOrchestrator` internally
+- `resync_bulk()` → now uses `BulkResyncOrchestrator` internally
+- Locking removed, replaced with optimistic concurrency (mtime-based)
+
+---
+
+## Do You Need to Change Anything?
+
+**Check 1:** Are you calling `start_updates()` or `end_updates()` directly?
+- **No** → Continue ✅
+- **Yes** → Switch to `ResyncOrchestrator` (see below)
+
+**Check 2:** Are you passing `storage_lock_timeout` parameter?
+- **No** → You're done ✅
+- **Yes** → **Remove the parameter from your calls** (see fix below)
+
+---
+
+## If You Were Using storage_lock_timeout
+
+The parameter has been **completely removed** because the new implementation doesn't use locks.
+
+**Before (will now fail with TypeError):**
+```python
+# ❌ This will raise: TypeError: got an unexpected keyword argument 'storage_lock_timeout'
+await cache.resync_sweep(grouping_key, storage_lock_timeout=60.0)
+await cache.resync_bulk(proxies, grouping_key, storage_lock_timeout=60.0)
+```
+
+**After (simple fix - just remove it):**
+```python
+# ✅ Works - just remove the parameter
+await cache.resync_sweep(grouping_key)
+await cache.resync_bulk(proxies, grouping_key)
+```
+
+**Why was it removed?**
+- The new implementation uses **optimistic concurrency** (mtime verification) instead of locks
+- No locks means no timeout concept
+- Multiple sweeps can now run concurrently (better performance)
+- Files modified during sweep are automatically preserved
+
+**If you were using it to serialize sweeps:**
+- Sweeps can now run concurrently (this is a feature!)
+- If you truly need serialization, use external coordination (asyncio locks, semaphores, etc.)
+- Most use cases won't need this - the optimistic approach is safer
+
+---
+
+## If You Used Internal APIs (Rare)
+
+**Before:**
+```python
+session_state = cache.start_updates(grouping_key)
+# ... work ...
+await cache.end_updates(session_state)
+```
+
+**After:**
+```python
+from totodev_pub.cached_file_folders_support.resync_orchestrator import ResyncOrchestrator
+
+async with ResyncOrchestrator(cache, grouping_key) as session:
+    session.upsert_file(proxy)
+    await session.wait_for_completion()
+```
+
+---
+
+## Key Behavioral Changes
+
+### Concurrency
+- **Before:** File locks prevented concurrent sweeps
+- **After:** Multiple sweeps can run simultaneously (lock-free)
+
+### File Safety  
+- **Before:** Lock prevented modifications during sweep
+- **After:** Files modified during sweep are automatically preserved (mtime detection)
+
+### Blocking Behavior
+- **Before:** Regular operations could be blocked by sweep locks
+- **After:** No blocking - all operations are lock-free
+
+---
+
+## Technical Details
+
+### Optimistic Concurrency Implementation
+
+The new implementation uses **mtime-based verification** instead of locking:
+
+1. **Snapshot** all files at sweep start (capture mtime_ns + size)
+2. Allow concurrent operations (no locks)
+3. At sweep end, only delete untouched files if their mtime_ns and size are unchanged
+4. Preserve any files modified during the sweep
+
+This ensures:
+- ✅ New files added during sweep are preserved
+- ✅ Files modified during sweep are preserved  
+- ✅ Only truly stale/untouched files are removed
+- ✅ Multiple sweeps can run concurrently
+
+**Important:** FileProxy implementations must preserve mtime correctly in their `deploy()` method.
+
+---
+
+## Benefits
+
+- **Better concurrency** - Multiple sweeps run in parallel
+- **No blocking** - Regular operations never wait for sweeps
+- **Cleaner architecture** - Cache does storage, orchestrator does coordination
+- **Safer** - Files modified during sweep are automatically preserved
+
+---
+
+## Bottom Line
+
+**Public API:** No changes needed  
+**Internal API:** Removed (use `ResyncOrchestrator` if you need it)  
+**Concurrency:** Better (lock-free)  
+**Safety:** Same (optimistic instead of pessimistic)

@@ -1,0 +1,7 @@
+
+
+ENV_LABEL: DEV01
+ENV_TYPE: DEV
+
+COMMON_VAL_1: "config file val 1"
+XYZ: xyz

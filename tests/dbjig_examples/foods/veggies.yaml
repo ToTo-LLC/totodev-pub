@@ -1,0 +1,9 @@
+- name: carrot
+  color: orange
+  shape: long
+- name: tomato
+  color: red
+  shape: round
+- name: cucumber
+  color: green
+  shape: long

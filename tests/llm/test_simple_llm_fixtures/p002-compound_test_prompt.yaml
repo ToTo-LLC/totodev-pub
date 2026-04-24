@@ -1,0 +1,6 @@
+---
+name: p002 compound test prompt
+sys_prompt: You are a math helper.
+prompt: What is 1+1?
+
+ignored_key: ignored_value

@@ -1,0 +1,32 @@
+_THIS_IS_*_ENV_
+db/*
+logs/*
+tmp/*
+venv*
+*.tmp
+tmp.*
+*.swp
+.python-version
+*.sqlite
+
+# VSC, Python, and Mac-centric items follow
+*.pyc
+*.pyo
+__pycache__/
+**/.ipynb_checkpoints/
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+**/.DS-Store
+
+.venv
+aws_rootkey_confidential.csv
+**/tmp*.pdf
+.chainlit/*
+
+# Python package build artifacts
+*.egg-info/
+*.egg-info/*

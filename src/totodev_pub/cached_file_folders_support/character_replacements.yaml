@@ -1,0 +1,25 @@
+# Character replacements for filesystem safety
+# Only includes characters that are actually problematic on Windows/Mac/Linux filesystems
+
+# Windows reserved characters
+"<": "_lt_"
+">": "_gt_"
+":": "_colon_"
+"\"": "_quote_"
+"|": "_pipe_"
+"?": "_qmark_"
+"*": "_star_"
+
+# Path separators
+"\\": "_bslash_"
+"/": "_slash_"
+
+# Whitespace and control characters (allowed but problematic)
+" ": "_space_"
+"\t": "_tab_"
+"\n": "_newline_"
+"\r": "_cr_"
+
+# The following are safe in modern filesystems and have been removed:
+# @ % # ! $ ^ + = [ ] { } ; ' , ~ ` &
+# These only have special meaning in shells, not in filesystem APIs

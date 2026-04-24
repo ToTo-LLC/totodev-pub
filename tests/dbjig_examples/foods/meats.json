@@ -1,0 +1,8 @@
+[{"name": "ham","source":"pig"},
+{"name": "bacon","source":"pig"},
+{"name": "pork","source":"pig"},
+{"name": "beef","source":"cow"},
+{"name": "steak","source":"cow"},
+{"name": "chicken","source":"chicken"},
+{"name": "turkey","source":"turkey"}
+]

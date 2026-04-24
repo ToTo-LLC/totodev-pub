@@ -1,0 +1,3 @@
+[tools.totodev_pub.project_file_patterns]
+tmp = "volatile/tmp/*"
+logs = "volatile/logs/*" 

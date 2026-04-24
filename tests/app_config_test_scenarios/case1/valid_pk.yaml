@@ -1,0 +1,15 @@
+
+# contains key value pairs that should result for this test case
+
+COMMON_VAL_1: 'config file val 1'
+COMMON_VAL_1_TYPENAME: 'str'
+COMMON_VAL_2: 'beta'
+ENV_FILE_VAL_1: 'Scuppernong'
+
+ENV_LABEL: TEST01
+ENV_TYPE: TEST
+CONFIG_CLASS_NAME: 'AppConfigTEST01'
+
+VEHICLE_PKD:
+    make: Toyota
+    model: Corolla

@@ -1,0 +1,101 @@
+[project]
+name = "totodev-pub"
+version = "0.1.0"
+description = "Public snapshot of the totodev utility library."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ToTo LLC" }]
+dependencies = [
+  "pydantic>=2",
+  "pyyaml",
+  "portalocker",
+  "click",
+  "python-dotenv",
+  "sqlitedict",
+  "tomli-w",
+  "xxhash",
+]
+
+[project.optional-dependencies]
+pipes = [
+  "luigi",
+]
+lucidspark = [
+  "networkx",
+  "treelib",
+]
+connectors = [
+  "aiofiles",
+  "aiohttp",
+  "google-api-python-client",
+  "google-auth",
+  "google-auth-httplib2",
+  "google-auth-oauthlib",
+  "msal",
+  "paramiko",
+  "requests",
+]
+llm = [
+  "google-auth",
+  "jinja2",
+  "json-repair",
+  "langchain",
+  "langchain-community",
+  "langchain-core",
+  "langchain-google-genai",
+  "nest-asyncio",
+  "openai",
+  "requests",
+]
+git = [
+  "GitPython",
+]
+sweep = [
+  "pathspec",
+]
+logging = [
+  "colorlog",
+]
+all = [
+  "luigi",
+  "networkx",
+  "treelib",
+  "aiofiles",
+  "aiohttp",
+  "google-api-python-client",
+  "google-auth",
+  "google-auth-httplib2",
+  "google-auth-oauthlib",
+  "msal",
+  "paramiko",
+  "requests",
+  "jinja2",
+  "json-repair",
+  "langchain",
+  "langchain-community",
+  "langchain-core",
+  "langchain-google-genai",
+  "nest-asyncio",
+  "openai",
+  "GitPython",
+  "pathspec",
+  "colorlog",
+]
+dev = [
+  "mypy",
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["totodev_pub*"]

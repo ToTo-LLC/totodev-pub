@@ -1,0 +1,46 @@
+---
+alwaysApply: false
+---
+## Applies To
+Only applies to codebases that are using the CachedFileFolders (`totodev_pub.cached_file_folders`) class or its derivitives such as CacheGrouping (`totodev_pub.cache_grouping`). 
+
+## Change and Updates Needed
+
+### 1. CachedFileRef Internal Structure Modified
+On 2025-11-05 a breaking change was introduced to the class named CachedFileRef in the totodeve library. The internal structure of that class was modified. Functionality is preserved but the syntax for accessing the data is altered. Any code that used CachedFileRef should be inspected and updated to reflect this change. Some documentation in the comments of the cached_file_ref file. Explain the change.
+
+### 2. Removed: CachedFileFolders.grouping_keys() Method
+The `grouping_keys()` method has been completely removed from `CachedFileFolders`. This method was deprecated and replaced by `groupings()`.
+
+**Migration Instructions:**
+
+Use `groupings()` instead, which returns `CacheGrouping` facet objects. To get raw tuples, access the `.grouping_key` property.
+
+**Old code:**
+```python
+for key in cache.grouping_keys():
+    print(key)
+    count = cache.files_count(key)
+```
+
+**New code - Option 1 (recommended):**
+```python
+for grouping in cache.groupings():
+    print(grouping.grouping_key)
+    count = grouping.files_count()  # Cleaner!
+```
+
+**New code - Option 2 (minimal change):**
+```python
+for grouping in cache.groupings():
+    key = grouping.grouping_key
+    print(key)
+    count = cache.files_count(key)
+```
+
+**New code - Option 3 (just get all keys):**
+```python
+keys = [g.grouping_key for g in cache.groupings()]
+```
+
+The `CacheGrouping` facet provides the same functionality with a cleaner API. See documentation for `CacheGrouping` and `groupings()` for details.

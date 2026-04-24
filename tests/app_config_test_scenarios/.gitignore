@@ -1,0 +1,2 @@
+# Exception for specific config files
+!config._THIS_IS_*_ENV_.sh 
