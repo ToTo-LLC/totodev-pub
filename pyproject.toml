@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Public snapshot of the totodev utility library."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "ToTo LLC" }]
 dependencies = [
   "pydantic>=2",
@@ -95,3 +96,12 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["totodev_pub*"]
+
+[tool.setuptools.package-data]
+"totodev_pub" = [
+  "**/*.yaml",
+  "**/*.yml",
+  "**/*.csv",
+  "**/*.md",
+  "**/*.mdc",
+]

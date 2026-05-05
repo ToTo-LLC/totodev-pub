@@ -39,3 +39,5 @@ aws_rootkey_confidential.csv
 
 # Accidental nested git metadata (must never be part of the package tree)
 src/totodev_pub/.git/
+
+pypi_token
