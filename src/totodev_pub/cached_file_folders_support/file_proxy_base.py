@@ -143,6 +143,14 @@ class FileProxyBase(ABC):
         deploy process should result in the temp file being deleted.
         On this subject, it's worth mentioning that CachedFileFolders always
         offers a temporary directory for materialization files.
+
+        TIP ON mtime: The source modification time is often only available here
+        (e.g. a remote API returns the file's modified date when you fetch it),
+        not later in deploy(). If a meaningful source timestamp is available,
+        capture it during materialization (store it on the instance, or stamp
+        the temp file) so deploy() can apply it to the deployed file. The
+        authoritative mtime guarantee still belongs to deploy() because that is
+        the file the cache observes—see deploy() for details.
         """
         raise NotImplementedError("Not implemented")
 
