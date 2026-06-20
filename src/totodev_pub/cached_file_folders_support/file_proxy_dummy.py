@@ -17,7 +17,7 @@ import tempfile
 import asyncio
 import random
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 
 
 class FileProxyDummyMockFailureError(RuntimeError):
@@ -277,6 +277,19 @@ class FileProxyDummy(FileProxyBase):
         except (OSError, IOError, ValueError):
             return None
     
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        """Report the dummy file's cheap metadata for testing body-retention / truncation flows.
+
+        Dummy content is deterministic: the version number padded to 1KB, so size
+        is known up front (1024) and mtime is whatever was configured via init_mtime
+        or touch(). This makes the dummy useful for exercising truncation and
+        change-detection paths without materializing.
+        """
+        return OriginMetadata(size=1024, mtime=self._file_mtime)
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        return {"source": "dummy", "version_num": self.version_num}
+
     def _pre_materialize_for_comparison(self, temp_dir: Path) -> Optional[str]:
         """
         Pre-materialize this file for comparison purposes and return the temp file path.

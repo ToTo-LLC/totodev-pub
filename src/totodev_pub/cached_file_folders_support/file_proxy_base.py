@@ -35,9 +35,58 @@ See concrete implementations such as `LocalFileProxy` in `file_proxy_local_file.
 for reference patterns when authoring new proxies.
 """
 
-from typing import Optional, Dict, Any, Generator
+from typing import Optional, Dict, Any, Generator, NamedTuple
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
+
+
+class BodyRetentionRecommendation(Enum):
+    """A proxy's recommendation for how the cache should retain a file's body.
+
+    The "body" is the file's content bytes, as distinguished from the small
+    sidecar of metadata the cache can keep when the body is truncated away. This
+    is a *recommendation* only: the cache (CachedFileFolders) has the final say
+    and may override it via its own policy. Derived classes can implement simple,
+    explicit rules (based on size, type, path, etc.) to express intent.
+
+    Members:
+        FULL: Fetch the body and keep it on disk in full. This is the default and
+            matches the library's long-standing behavior.
+        TRUNCATED: Record authoritative metadata (size/mtime, optionally a hash)
+            but do not keep the body. The cached file is truncated to zero bytes
+            and a sidecar records the details. See the truncated-entries design notes.
+        IGNORE: Do not bring the file into the cache at all. IGNORE is treated as
+            "not touched" during a resync sweep, which means an entry that was
+            previously cached but now recommends IGNORE becomes eligible for the
+            sweep's deletion pass. It exists to make an otherwise-implicit
+            "skip this file" decision explicit and testable.
+    """
+
+    FULL = "full"
+    TRUNCATED = "truncated"
+    IGNORE = "ignore"
+
+
+class OriginMetadata(NamedTuple):
+    """Cheap, source-side facts about a file, returned by `peek_metadata()`.
+
+    All fields are optional because different sources can cheaply learn different
+    things: a local file knows size and mtime, an object store may only offer an
+    ETag, a generated payload may know nothing until it is materialized. A proxy
+    returns whatever it can determine cheaply and leaves the rest as None.
+
+    Fields:
+        size: Size in bytes, if cheaply known.
+        mtime: Source modification time as a POSIX timestamp, if cheaply known.
+        content_tag: An opaque, cheaply-available source-side version token such as
+            an ETag or version id. This is NEVER a locally computed hash (computing
+            a hash requires the bytes, which defeats the purpose of a cheap peek).
+    """
+
+    size: Optional[int] = None
+    mtime: Optional[float] = None
+    content_tag: Optional[str] = None
 
 
 class FileProxyBase(ABC):
@@ -163,6 +212,63 @@ class FileProxyBase(ABC):
         """
         raise NotImplementedError("Not implemented")
     
+    def body_retention_recommendation(self) -> BodyRetentionRecommendation:
+        """Recommend how the cache should retain this file's body.
+
+        Returns one of:
+        - `BodyRetentionRecommendation.FULL` (default): fetch and keep the body.
+        - `BodyRetentionRecommendation.TRUNCATED`: record metadata only, no body.
+        - `BodyRetentionRecommendation.IGNORE`: do not bring the file into the cache.
+
+        This is a recommendation; the cache may override it with its own policy.
+        Override this in derived classes to express simple, explicit rules (for
+        example: ignore files over a size threshold, or truncate everything under an
+        archive path). The default keeps the library's historical behavior.
+
+        IMPORTANT (IGNORE semantics): IGNORE is treated as "not touched" during a
+        resync sweep. If a file was previously cached and now recommends IGNORE, it
+        will be swept (deleted) on the next sweep just like any untouched entry.
+        """
+        return BodyRetentionRecommendation.FULL
+
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        """Cheaply probe source-side metadata (size/mtime/content_tag) without materializing.
+
+        This is the *cheap* metadata tier. It must not download or generate the
+        file. Return an `OriginMetadata` with whatever is cheaply known (any field
+        may be None), or return `None` to indicate "nothing is cheaply known" - in
+        which case the cache falls back to the normal materialize-and-compare path.
+        This mirrors the `looks_same() -> Optional[bool]` philosophy where None
+        means "I can't tell; do it the expensive way."
+
+        Implementations that perform I/O (for example, a metadata API call) should
+        memoize the result: proxies are short-lived, single-use objects and
+        `peek_metadata()` may be consulted more than once during a sync.
+
+        The base implementation returns None. It deliberately does NOT materialize
+        the file to measure it; when a truncated entry must be produced for a proxy
+        that cannot peek cheaply, the cache is responsible for measuring the bytes it
+        already materializes to a temporary location.
+
+        Relationship to `looks_same()`: `looks_same()` remains the authoritative
+        cheap comparison hook today. A future base-class `looks_same()` expressed in
+        terms of `peek_metadata()` is anticipated but not implemented here.
+        """
+        return None
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        """Return an arbitrary, JSON-serializable blob describing how the original could be re-fetched.
+
+        This is purely informational. It does NOT implement re-materialization; it
+        merely *facilitates* it by recording where the file came from so future
+        tooling (or a human) could reconstruct a proxy and re-fetch the bytes. It is
+        the natural place to stash an origin path, URL, message id, drive id, etc.
+
+        The default returns the proxy's own reference path. Override to provide
+        richer, source-specific retrieval information.
+        """
+        return {"ref_path": self.ref_path()}
+
     def nested_proxies(self) -> Generator['FileProxyBase', None, None]:
         """
         Yield nested file proxies (e.g., email attachments, archive contents).

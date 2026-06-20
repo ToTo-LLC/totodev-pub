@@ -88,7 +88,7 @@ from pathlib import Path
 import shutil
 import os
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 
 
 class LocalFileProxy(FileProxyBase):
@@ -141,6 +141,19 @@ class LocalFileProxy(FileProxyBase):
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:
         # LocalFileProxy doesn't need materialization - file already exists locally
         return True
+
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        # Local files expose size and mtime cheaply via a single stat() call.
+        try:
+            st = os.stat(self._local_path)
+            return OriginMetadata(size=st.st_size, mtime=st.st_mtime)
+        except (OSError, IOError):
+            return None
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        # The origin is a local filesystem path; record it so the file can be
+        # re-fetched later (subject to the file still existing).
+        return {"path": self._local_path}
 
     def get_context_info(self) -> Dict[str, Any]:
         return {

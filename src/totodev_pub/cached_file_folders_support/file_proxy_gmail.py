@@ -92,7 +92,7 @@ except ImportError:
         extra="connectors",
     )
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -1326,6 +1326,15 @@ class GmailEmailProxy(FileProxyBase):
             'receiver': self._receiver_email, 'received': self._received_datetime.isoformat(),
             'ref_path': self._ref_path
         }
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        """Record the Gmail message coordinates needed to re-fetch this email later.
+
+        The serialized .eml size is not known until the body is fetched and the
+        placeholder-rewriting runs, so peek_metadata() is left at its default
+        (None) for emails; this hint still records how to retrieve the original.
+        """
+        return {"source": "gmail", "kind": "email", "msg_id": self._msg_id, "thread_id": self._thread_id}
     
     def nested_proxies(self) -> Iterator[FileProxyBase]:
         """
@@ -1568,6 +1577,23 @@ class GmailAttachmentProxy(FileProxyBase):
             logger.error(f"Failed to materialize attachment {self._sequence_number} for {self._msg_id}: {e}")
             return False
     
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        """Report the attachment size cheaply (known from email metadata).
+
+        Attachment size is provided by the Gmail metadata without downloading the
+        bytes. mtime is left None (attachments don't carry an independent
+        modification time; the parent email's received time is not the file's).
+        """
+        return OriginMetadata(size=self._size_bytes)
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        return {
+            "source": "gmail",
+            "kind": "attachment",
+            "msg_id": self._msg_id,
+            "sequence_number": self._sequence_number,
+        }
+
     def get_context_info(self) -> Dict[str, Any]:
         """Return safe logging context (no sensitive data)."""
         return {

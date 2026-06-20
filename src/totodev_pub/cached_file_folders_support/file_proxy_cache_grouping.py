@@ -31,7 +31,7 @@ from typing import Callable, Generator, Iterator, List, Optional
 import os
 import shutil
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 from .cached_file_ref import CachedFileRef  # type: ignore
 from .cache_operations_protocol import ChangeNotice  # type: ignore
 from .cache_grouping import CacheGrouping
@@ -88,6 +88,18 @@ class CacheGroupingFileProxy(FileProxyBase):
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:
         # Already local; nothing to fetch.
         return True
+
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        # The source is an on-disk file in another grouping; stat it cheaply.
+        try:
+            st = os.stat(self._source_file_path)
+            return OriginMetadata(size=st.st_size, mtime=st.st_mtime)
+        except (OSError, IOError):
+            return None
+
+    def retrieval_hint(self) -> dict:
+        # Record the source grouping file location for potential re-cloning.
+        return {"source": "cache_grouping", "source_file_path": str(self._source_file_path)}
 
     def get_context_info(self) -> dict:
         return {
