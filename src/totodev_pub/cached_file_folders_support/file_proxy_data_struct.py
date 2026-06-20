@@ -27,10 +27,10 @@ class SerializableDataProxy(FileProxyBase):
     which allows simple file comparison tools (hashing, diff, etc.) to reliably detect
     changes in the data rather than just key ordering differences.
 
-    Body-retention note: this proxy generates its content, so there is no cheap
+    Local-retention note: this proxy generates its content, so there is no cheap
     source-side metadata to report. It therefore keeps the FileProxyBase default
-    `peek_metadata()` (returns None) and the default `body_retention_recommendation()`
-    (FULL). Generated proxies like this are full-body by nature: the size is only
+    `peek_metadata()` (returns None) and the default `local_retention_recommendation()`
+    (KEEP). Generated proxies like this are full-body by nature: the size is only
     known after serialization, and there is no remote origin to truncate against.
     """
     

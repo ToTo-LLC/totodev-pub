@@ -41,31 +41,40 @@ from enum import Enum
 from pathlib import Path
 
 
-class BodyRetentionRecommendation(Enum):
-    """A proxy's recommendation for how the cache should retain a file's body.
+class LocalRetentionRecommendation(Enum):
+    """A proxy's recommendation for how much of a file to retain locally.
 
-    The "body" is the file's content bytes, as distinguished from the small
-    sidecar of metadata the cache can keep when the body is truncated away. This
-    is a *recommendation* only: the cache (CachedFileFolders) has the final say
-    and may override it via its own policy. Derived classes can implement simple,
-    explicit rules (based on size, type, path, etc.) to express intent.
+    The three members are points on a single axis -- how much of the file the
+    cache keeps locally: the full body, only metadata (truncated), or nothing at
+    all. The members are imperative *advice*: the type is a recommendation only,
+    so the cache (CachedFileFolders) has the final say and may override it via its
+    own policy. Derived classes can implement simple, explicit rules (based on
+    size, type, path, etc.) to express intent.
+
+    The members map to resulting entry states: KEEP -> a full entry, TRUNCATE ->
+    a truncated entry (zero-byte file plus a metadata sidecar), EXCLUDE -> no
+    entry. Here the "body" is the file's content bytes, as distinguished from the
+    small sidecar of metadata the cache can keep when the body is truncated away.
 
     Members:
-        FULL: Fetch the body and keep it on disk in full. This is the default and
+        KEEP: Fetch the body and keep it on disk in full. This is the default and
             matches the library's long-standing behavior.
-        TRUNCATED: Record authoritative metadata (size/mtime, optionally a hash)
+        TRUNCATE: Record authoritative metadata (size/mtime, optionally a hash)
             but do not keep the body. The cached file is truncated to zero bytes
             and a sidecar records the details. See the truncated-entries design notes.
-        IGNORE: Do not bring the file into the cache at all. IGNORE is treated as
-            "not touched" during a resync sweep, which means an entry that was
-            previously cached but now recommends IGNORE becomes eligible for the
-            sweep's deletion pass. It exists to make an otherwise-implicit
-            "skip this file" decision explicit and testable.
+        EXCLUDE: Do not bring the file into the cache at all. EXCLUDE is a
+            sweep-*membership* signal honored at the driver layer, not inside the
+            per-file upsert path: resync_bulk filters EXCLUDE proxies out of the
+            stream before upsert (so any previously cached copy falls to the
+            sweep's deletion pass), while resync_sweep leaves it to the caller
+            (docstring guidance) and it is never acted on inside upsert_file().
+            It exists to make an otherwise-implicit "skip this file" decision
+            explicit and testable.
     """
 
-    FULL = "full"
-    TRUNCATED = "truncated"
-    IGNORE = "ignore"
+    KEEP = "keep"
+    TRUNCATE = "truncate"
+    EXCLUDE = "exclude"
 
 
 class OriginMetadata(NamedTuple):
@@ -234,24 +243,27 @@ class FileProxyBase(ABC):
         """
         raise NotImplementedError("Not implemented")
     
-    def body_retention_recommendation(self) -> BodyRetentionRecommendation:
-        """Recommend how the cache should retain this file's body.
+    def local_retention_recommendation(self) -> LocalRetentionRecommendation:
+        """Recommend how much of this file the cache should retain locally.
 
         Returns one of:
-        - `BodyRetentionRecommendation.FULL` (default): fetch and keep the body.
-        - `BodyRetentionRecommendation.TRUNCATED`: record metadata only, no body.
-        - `BodyRetentionRecommendation.IGNORE`: do not bring the file into the cache.
+        - `LocalRetentionRecommendation.KEEP` (default): fetch and keep the body.
+        - `LocalRetentionRecommendation.TRUNCATE`: record metadata only, no body.
+        - `LocalRetentionRecommendation.EXCLUDE`: do not bring the file into the cache.
 
         This is a recommendation; the cache may override it with its own policy.
         Override this in derived classes to express simple, explicit rules (for
-        example: ignore files over a size threshold, or truncate everything under an
+        example: exclude files over a size threshold, or truncate everything under an
         archive path). The default keeps the library's historical behavior.
 
-        IMPORTANT (IGNORE semantics): IGNORE is treated as "not touched" during a
-        resync sweep. If a file was previously cached and now recommends IGNORE, it
-        will be swept (deleted) on the next sweep just like any untouched entry.
+        IMPORTANT (EXCLUDE semantics): EXCLUDE is a sweep-membership signal honored
+        at the driver layer, not inside the per-file upsert path. resync_bulk filters
+        EXCLUDE proxies out before upsert, so a previously cached entry that now
+        recommends EXCLUDE is left untouched and is swept (deleted) on the next sweep
+        just like any untouched entry. resync_sweep does not act on it automatically
+        (the caller decides), and it is never acted on inside upsert_file().
         """
-        return BodyRetentionRecommendation.FULL
+        return LocalRetentionRecommendation.KEEP
 
     async def peek_metadata(self) -> Optional[OriginMetadata]:
         """Cheaply probe source-side metadata (size/mtime/content_tag) without materializing.
