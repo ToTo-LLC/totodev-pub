@@ -147,7 +147,7 @@ class FileProxyBase(ABC):
         raise NotImplementedError("Not implemented")
 
     @abstractmethod
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Provides a quick (but not perfect) comparison of the file proxy with another file.  
         For example, it may look at the size and modify time of the file and conclude they are the same.
@@ -170,6 +170,28 @@ class FileProxyBase(ABC):
         IMPORTANT: Even if your looks_same() implementation doesn't use mtime, you should still
         preserve mtime in deploy() because the cache system relies on it for other operations
         (sweep safety, change detection, concurrency control, etc.).
+
+        Args:
+            other_fpath: Path to the existing cached file to compare against.
+            override_byte_count: Optional substitute for the on-disk size of
+                `other_fpath`. When the cache compares against a *truncated* entry,
+                the file at `other_fpath` has been shrunk to zero bytes while its
+                mtime is preserved as the recorded source mtime. In that case the
+                cache passes the recorded (pre-truncation) size here so that
+                size-based comparisons remain correct without materializing the
+                body -- the mtime read from disk is already authoritative, so size
+                is the only input that needs substituting. When None (the default),
+                implementations use the actual on-disk size.
+
+                Notes on applicability:
+                - Proxies that compare by size (and/or mtime) should honor this and
+                  use it in place of `os.stat(other_fpath).st_size`.
+                - Proxies that compare by *content* rather than size (e.g. email
+                  proxies that parse an injected header) cannot be compared cheaply
+                  while the body is truncated; they may ignore this argument and
+                  will naturally report a difference, prompting re-materialization.
+                - It is irrelevant under `use_xxhash=True`, where comparison hashes
+                  bytes that a truncated entry does not have on disk.
         """
         raise NotImplementedError("Not implemented")
 

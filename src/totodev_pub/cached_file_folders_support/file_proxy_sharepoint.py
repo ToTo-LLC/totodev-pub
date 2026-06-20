@@ -1311,7 +1311,7 @@ class SharepointFileProxy(FileProxyBase):
             "file_path": self.file_path,
         }
 
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Check if this SharePoint file is the same as the other file using file size and modify time.
         Returns:
@@ -1321,12 +1321,15 @@ class SharepointFileProxy(FileProxyBase):
             # If we have cached file info, use that for comparison
             if self.file_size is not None and self.last_modified is not None:
                 other_stat = os.stat(other_fpath)
-                return (self.file_size == other_stat.st_size and 
+                # For a truncated entry the on-disk size is zero but the mtime is
+                # still authoritative; use the recorded size when supplied.
+                other_size = other_stat.st_size if override_byte_count is None else override_byte_count
+                return (self.file_size == other_size and
                         self.last_modified.timestamp() == other_stat.st_mtime)
-            
+
             # If we don't have metadata, return None to let the system handle it
             return None
-                
+
         except (OSError, IOError):
             return None
 

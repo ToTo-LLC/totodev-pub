@@ -1154,9 +1154,14 @@ class OutlookEmailProxy(FileProxyBase):
             )
             raise
     
-    def looks_same(self, cached_file_path: str) -> Optional[bool]:
+    def looks_same(self, cached_file_path: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Quick comparison: file exists + follow-up flag matches.
+
+        Note: this proxy compares by parsing an injected header rather than by size,
+        so `override_byte_count` does not apply. A truncated (zero-byte) cached file
+        has no header to parse, so it will report a difference and trigger
+        re-materialization -- which is the correct outcome for flag-change detection.
         
         Microsoft 365 emails are immutable in content, but follow-up flags are mutable.
         Since cached_file_path is derived from ref_path() which includes the msg_id hash,
@@ -1450,14 +1455,18 @@ class OutlookAttachmentProxy(FileProxyBase):
         (Path(target_dir) / self.file_name()).write_bytes(content)
         logger.debug(f"Deployed attachment to {Path(target_dir) / self.file_name()}")
     
-    def looks_same(self, cached_file_path: str) -> Optional[bool]:
+    def looks_same(self, cached_file_path: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Quick comparison using file size.
-        
+
         Attachments are immutable when parent email is immutable, so size match is reliable.
         """
         cached_path = Path(cached_file_path)
-        return cached_path.stat().st_size == self._size_bytes if cached_path.exists() else False
+        if not cached_path.exists():
+            return False
+        # For a truncated entry the on-disk size is zero; use the recorded size when supplied.
+        cached_size = cached_path.stat().st_size if override_byte_count is None else override_byte_count
+        return cached_size == self._size_bytes
     
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:
         """
@@ -1568,8 +1577,8 @@ class OutlookEmailErrorProxy(FileProxyBase):
         target_path.write_text(json.dumps(error_doc, indent=2, default=str), encoding='utf-8')
         logger.debug(f"Deployed error placeholder to {target_path}")
     
-    def looks_same(self, cached_file_path: str) -> Optional[bool]:
-        """Error files should be re-attempted on next sync."""
+    def looks_same(self, cached_file_path: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
+        """Error files should be re-attempted on next sync (override_byte_count is ignored)."""
         return False  # Always consider different to trigger retry
     
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:

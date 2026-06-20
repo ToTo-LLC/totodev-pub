@@ -130,11 +130,14 @@ class LocalFileProxy(FileProxyBase):
         if self._delete_after_deploy and os.path.exists(self._local_path):
             os.remove(self._local_path)
 
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         try:
             local_stat = os.stat(self._local_path)
             other_stat = os.stat(other_fpath)
-            return (local_stat.st_size == other_stat.st_size and local_stat.st_mtime == other_stat.st_mtime)
+            # For a truncated entry the on-disk size is zero but the mtime is still
+            # authoritative; use the recorded size when supplied.
+            other_size = other_stat.st_size if override_byte_count is None else override_byte_count
+            return (local_stat.st_size == other_size and local_stat.st_mtime == other_stat.st_mtime)
         except (OSError, IOError):
             return None
 

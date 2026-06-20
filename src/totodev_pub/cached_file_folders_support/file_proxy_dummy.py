@@ -241,7 +241,7 @@ class FileProxyDummy(FileProxyBase):
                 os.remove(temp_path)
             raise e
     
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Provides a quick comparison of this dummy file with another file.
         
@@ -251,6 +251,9 @@ class FileProxyDummy(FileProxyBase):
         
         Args:
             other_fpath: Path to the other file to compare
+            override_byte_count: Ignored here. The dummy compares by reading the
+                version number embedded in the file content rather than by size, so
+                a truncated (zero-byte) file will simply report a difference.
             
         Returns:
             Optional[bool]: True if the files are the same, False if different, 
