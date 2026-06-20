@@ -88,14 +88,16 @@ class OriginMetadata(NamedTuple):
     Fields:
         size: Size in bytes, if cheaply known.
         mtime: Source modification time as a POSIX timestamp, if cheaply known.
-        content_tag: An opaque, cheaply-available source-side version token such as
-            an ETag or version id. This is NEVER a locally computed hash (computing
-            a hash requires the bytes, which defeats the purpose of a cheap peek).
+        origin_version: An opaque, cheaply-available source-side version token such
+            as an ETag or version id. Compare it; never interpret it. This is NEVER
+            a locally computed hash (computing a hash requires the bytes, which
+            defeats the purpose of a cheap peek). Many sources have no such token
+            and leave it None.
     """
 
     size: Optional[int] = None
     mtime: Optional[float] = None
-    content_tag: Optional[str] = None
+    origin_version: Optional[str] = None
 
 
 class FileProxyBase(ABC):
@@ -266,7 +268,7 @@ class FileProxyBase(ABC):
         return LocalRetentionRecommendation.KEEP
 
     async def peek_metadata(self) -> Optional[OriginMetadata]:
-        """Cheaply probe source-side metadata (size/mtime/content_tag) without materializing.
+        """Cheaply probe source-side metadata (size/mtime/origin_version) without materializing.
 
         This is the *cheap* metadata tier. It must not download or generate the
         file. Return an `OriginMetadata` with whatever is cheaply known (any field
