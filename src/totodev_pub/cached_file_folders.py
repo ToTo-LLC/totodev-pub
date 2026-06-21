@@ -162,7 +162,11 @@ from totodev_pub.cached_file_folders_support.cached_file_ref import (
 from totodev_pub.cached_file_folders_support.change_notice import (
     ChangeNotice,  # Re-exported for backward compatibility
 )
-from totodev_pub.cached_file_folders_support.file_proxy_base import FileProxyBase
+from totodev_pub.cached_file_folders_support.file_proxy_base import (
+    FileProxyBase,
+    LocalRetentionRecommendation,
+)
+from totodev_pub.cached_file_folders_support import truncation_support as _ts
 from totodev_pub.cached_file_folders_support.resync_sweep import (
     AsyncSyncSession as SharedAsyncSyncSession,
 )
@@ -742,14 +746,161 @@ class CachedFileFolders:
             existing_file_ref,
             force,
         )
-        return self._finalize_change_notice(notice, change_receiver, source_file)
-    
-    async def _upsert_file_core(self, source_file: FileProxyBase, ref_path: str, grouping_key: Optional[GroupingKey], 
-                         target_file_path: Path, target_slave_dir_path: Path, existing_file_ref: Optional[CachedFileRef], 
+        return await self._finalize_change_notice(notice, change_receiver, source_file)
+
+    async def _upsert_file_core(self, source_file: FileProxyBase, ref_path: str, grouping_key: Optional[GroupingKey],
+                         target_file_path: Path, target_slave_dir_path: Path, existing_file_ref: Optional[CachedFileRef],
                          force: bool = False) -> Optional[ChangeNotice]:
-        return (await self._insert_file(source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path) 
-                if existing_file_ref is None 
-                else await self._update_file_optimized(source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path, existing_file_ref, force))
+        # Determine effective retention (proxy recommendation + manual override from sidecar)
+        effective = source_file.local_retention_recommendation()
+        existing_is_truncated = False
+        sidecar = None
+
+        if existing_file_ref is not None:
+            existing_is_truncated = _ts.is_truncated(
+                existing_file_ref.file_path, existing_file_ref.slave_dir_path)
+            if existing_is_truncated:
+                sidecar = _ts.read_truncation_info(existing_file_ref.slave_dir_path)
+                if sidecar and sidecar.manual_override == "FORCE_TRUNCATE":
+                    effective = LocalRetentionRecommendation.TRUNCATE
+
+        if effective == LocalRetentionRecommendation.TRUNCATE:
+            if existing_file_ref is None:
+                return await self._insert_truncated_entry(
+                    source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path)
+            elif existing_is_truncated:
+                return await self._update_truncated_in_place(
+                    source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path,
+                    existing_file_ref, sidecar, force)
+            else:
+                return await self._demote_to_truncated(
+                    source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path,
+                    existing_file_ref, force)
+        else:  # KEEP
+            if existing_is_truncated and not force:
+                # Truncated-vs-KEEP mismatch is the "needs restore" signal regardless of source change
+                notice = await self._update_file_with_temporary_materialization(
+                    source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path,
+                    existing_file_ref, force=True)
+                if notice is not None and notice.old is not None:
+                    notice.old._is_truncated_memo = True
+                return notice
+            elif existing_file_ref is None:
+                return await self._insert_file(
+                    source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path)
+            else:
+                return await self._update_file_optimized(
+                    source_file, ref_path, grouping_key, target_file_path, target_slave_dir_path,
+                    existing_file_ref, force)
+
+    async def _insert_truncated_entry(self, source_file: FileProxyBase, ref_path: str,
+                                       grouping_key: Optional[GroupingKey],
+                                       target_file_path: Path,
+                                       target_slave_dir_path: Path) -> ChangeNotice:
+        """Insert a new truncated entry: write sidecar (fsync), create zero-byte body, update DB."""
+        origin_meta = await source_file.peek_metadata()
+        size = origin_meta.size if origin_meta else None
+        mtime = origin_meta.mtime if origin_meta else None
+
+        # Crash-safe write order: dir → slave dir → sidecar (fsync) → body → DB
+        target_file_path.parent.mkdir(parents=True, exist_ok=True)
+        self._storage.create_slave_directory(target_file_path)
+
+        _ts.write_truncation_info(target_slave_dir_path,
+            _ts.TruncationInfo(size=size, mtime=mtime,
+                               retrieval_hint=source_file.retrieval_hint()))
+
+        target_file_path.touch()
+        if mtime is not None:
+            os.utime(target_file_path, (mtime, mtime))
+
+        db = self._storage.get_database(grouping_key)
+        stored_path = self._storage._serialize_path_for_storage(target_file_path, grouping_key)
+        self._storage._db_operation_with_retry(lambda: db.__setitem__(ref_path, stored_path))
+
+        cur = CachedFileRef(ref_path=ref_path, grouping_key=grouping_key,
+                            file_path=target_file_path, slave_dir_path=target_slave_dir_path)
+        cur._is_truncated_memo = True
+        cur._metadata_filename = self.metadata_filename
+        notice = ChangeNotice(file_name=target_file_path.name, cur=cur)
+        return notice
+
+    async def _update_truncated_in_place(self, source_file: FileProxyBase, ref_path: str,
+                                          grouping_key: Optional[GroupingKey],
+                                          target_file_path: Path, target_slave_dir_path: Path,
+                                          existing_file_ref: CachedFileRef,
+                                          sidecar, force: bool) -> Optional[ChangeNotice]:
+        """Existing truncated entry, same TRUNCATE recommendation. Cheap no-op if source unchanged."""
+        if not force and not self._storage.use_xxhash:
+            override = sidecar.size if sidecar else None
+            if source_file.looks_same(str(existing_file_ref.file_path),
+                                       override_byte_count=override) is True:
+                return None  # source unchanged; orchestrator already marked it touched
+
+        # Source changed (or force=True): peek new metadata and rewrite sidecar in-place
+        origin_meta = await source_file.peek_metadata()
+        size = origin_meta.size if origin_meta else None
+        mtime = origin_meta.mtime if origin_meta else None
+
+        _ts.write_truncation_info(target_slave_dir_path,
+            _ts.TruncationInfo(size=size, mtime=mtime,
+                               retrieval_hint=source_file.retrieval_hint(),
+                               manual_override=sidecar.manual_override if sidecar else None))
+        if mtime is not None:
+            os.utime(target_file_path, (mtime, mtime))
+
+        cur = CachedFileRef(ref_path=ref_path, grouping_key=grouping_key,
+                            file_path=target_file_path, slave_dir_path=target_slave_dir_path)
+        cur._is_truncated_memo = True
+        cur._metadata_filename = self.metadata_filename
+        # Explicitly UPDATE: no `old` ref (in-place rewrite; the slave dir is never moved)
+        return ChangeNotice(change_type=ChangeType.UPDATE, file_name=target_file_path.name, cur=cur)
+
+    async def _demote_to_truncated(self, source_file: FileProxyBase, ref_path: str,
+                                    grouping_key: Optional[GroupingKey],
+                                    target_file_path: Path, target_slave_dir_path: Path,
+                                    existing_file_ref: CachedFileRef,
+                                    force: bool) -> Optional[ChangeNotice]:
+        """Demote an existing full entry to truncated in-place. No slave dir move."""
+        # Check whether the source changed to decide whether to emit an UPDATE notice.
+        # "origin-unchanged demotion" emits no notice per design.
+        source_changed = True
+        if not force and not self._storage.use_xxhash:
+            comparison = source_file.looks_same(str(existing_file_ref.file_path))
+            if comparison is True:
+                source_changed = False
+
+        if source_changed:
+            # Source changed: record new source metadata from peek
+            origin_meta = await source_file.peek_metadata()
+            size = origin_meta.size if origin_meta else None
+            mtime = origin_meta.mtime if origin_meta else None
+        else:
+            # Source unchanged: measure the existing local file (most accurate)
+            try:
+                st = existing_file_ref.file_path.stat()
+                size, mtime = st.st_size, st.st_mtime
+            except OSError:
+                size, mtime = None, None
+
+        # Crash-safe: sidecar written and fsync'd BEFORE zeroing the body
+        _ts.write_truncation_info(target_slave_dir_path,
+            _ts.TruncationInfo(size=size, mtime=mtime,
+                               retrieval_hint=source_file.retrieval_hint()))
+
+        target_file_path.write_bytes(b"")
+        if mtime is not None:
+            os.utime(target_file_path, (mtime, mtime))
+
+        if not source_changed:
+            return None  # origin-unchanged demotion: no notice
+
+        cur = CachedFileRef(ref_path=ref_path, grouping_key=grouping_key,
+                            file_path=target_file_path, slave_dir_path=target_slave_dir_path)
+        cur._is_truncated_memo = True
+        cur._metadata_filename = self.metadata_filename
+        # Explicitly UPDATE: in-place zeroing; no `old` ref (the slave dir is never moved)
+        return ChangeNotice(change_type=ChangeType.UPDATE, file_name=target_file_path.name, cur=cur)
     
     async def _insert_file(self, source_file: FileProxyBase, ref_path: str, grouping_key: Optional[GroupingKey], 
                     target_file_path: Path, target_slave_dir_path: Path) -> ChangeNotice:
@@ -833,10 +984,12 @@ class CachedFileFolders:
                 self._storage.delete_path_safely(temp_file_path)
             self._handle_materialization_error(source_file, ref_path, e)
     
-    def _complete_update_with_materialized_file(self, materialized_file_path: Path, ref_path: str, 
-                                               grouping_key: Optional[GroupingKey], target_file_path: Path, 
+    def _complete_update_with_materialized_file(self, materialized_file_path: Path, ref_path: str,
+                                               grouping_key: Optional[GroupingKey], target_file_path: Path,
                                                target_slave_dir_path: Path, existing_file_ref: CachedFileRef) -> ChangeNotice:
         old_file_path, old_slave_dir_path = existing_file_ref.file_path, existing_file_ref.slave_dir_path
+        # Capture truncation state BEFORE the files are moved to retained storage
+        old_was_truncated = _ts.is_truncated(old_file_path, old_slave_dir_path)
         metadata = {"change": "UPDATE", "ref_path": ref_path, "grouping_key": list(grouping_key) if grouping_key else None}
 
         temp_old_file = self._storage.move_to_retained(old_file_path, "old_file", metadata=metadata)
@@ -850,24 +1003,23 @@ class CachedFileFolders:
         stored_path = self._storage._serialize_path_for_storage(target_file_path, grouping_key)
         self._storage._db_operation_with_retry(lambda: db.__setitem__(ref_path, stored_path))
         
-        notice = ChangeNotice(
-            file_name=target_file_path.name,
-            cur=CachedFileRef(
-                ref_path=ref_path,
-                grouping_key=grouping_key,
-                file_path=target_file_path,
-                slave_dir_path=target_slave_dir_path
-            ),
-            old=CachedFileRef(
-                ref_path=ref_path,
-                grouping_key=grouping_key,
-                file_path=temp_old_file,
-                slave_dir_path=temp_old_slave_dir
-            )
+        cur_ref = CachedFileRef(
+            ref_path=ref_path,
+            grouping_key=grouping_key,
+            file_path=target_file_path,
+            slave_dir_path=target_slave_dir_path
         )
+        old_ref = CachedFileRef(
+            ref_path=ref_path,
+            grouping_key=grouping_key,
+            file_path=temp_old_file,
+            slave_dir_path=temp_old_slave_dir
+        )
+        old_ref._is_truncated_memo = old_was_truncated
+        notice = ChangeNotice(file_name=target_file_path.name, cur=cur_ref, old=old_ref)
         notice._metadata_filename = self.metadata_filename
         return notice
-    
+
 
     async def delete_file(
         self,
@@ -893,44 +1045,45 @@ class CachedFileFolders:
             return None
         
         notice = await self._delete_file_core(ref_path, grouping_key, existing_file_ref)
-        return self._finalize_change_notice(notice, change_receiver, None)
+        return await self._finalize_change_notice(notice, change_receiver, None)
     
-    async def _delete_file_core(self, ref_path: str, grouping_key: Optional[GroupingKey], 
+    async def _delete_file_core(self, ref_path: str, grouping_key: Optional[GroupingKey],
                          existing_file_ref: CachedFileRef) -> ChangeNotice:
         old_file_path, old_slave_dir_path = existing_file_ref.file_path, existing_file_ref.slave_dir_path
+        # Capture truncation state BEFORE the files are moved to retained storage
+        old_was_truncated = _ts.is_truncated(old_file_path, old_slave_dir_path)
         metadata = {"change": "DELETE", "ref_path": ref_path, "grouping_key": list(grouping_key) if grouping_key else None}
-        
+
         temp_old_file = self._storage.move_to_retained(old_file_path, "deleted_file", metadata=metadata)
         temp_old_slave_dir = self._storage.move_to_retained(old_slave_dir_path, "deleted_slave", metadata=metadata)
-        
+
         # Clean up empty directories left behind after file deletion
         self._storage.cleanup_empty_directories(old_file_path, grouping_key)
-        
+
         db = self._storage.get_database(grouping_key)
         if ref_path in db:
             self._storage._db_operation_with_retry(lambda: db.__delitem__(ref_path))
-        
-        notice = ChangeNotice(
-            file_name=existing_file_ref.file_path.name,
-            old=CachedFileRef(
-                ref_path=ref_path,
-                grouping_key=grouping_key,
-                file_path=temp_old_file,
-                slave_dir_path=temp_old_slave_dir
-            )
+
+        old_ref = CachedFileRef(
+            ref_path=ref_path,
+            grouping_key=grouping_key,
+            file_path=temp_old_file,
+            slave_dir_path=temp_old_slave_dir
         )
+        old_ref._is_truncated_memo = old_was_truncated
+        notice = ChangeNotice(file_name=existing_file_ref.file_path.name, old=old_ref)
         notice._metadata_filename = self.metadata_filename
         return notice
 
-    def _finalize_change_notice(
+    async def _finalize_change_notice(
         self,
         notice: Optional[ChangeNotice],
-        change_receiver: Optional[Callable[[ChangeNotice, Optional[FileProxyBase]], None]],
+        change_receiver,
         source_file: Optional[FileProxyBase],
     ) -> Optional[ChangeNotice]:
         """
-        Deliver the change notice to any registered receiver and immediately
-        dispose of staged artifacts associated with the change.
+        Deliver the change notice to any registered receiver (sync or async) and
+        immediately dispose of staged artifacts associated with the change.
         """
         if notice is None:
             return None
@@ -944,7 +1097,10 @@ class CachedFileFolders:
 
         try:
             if change_receiver is not None:
-                change_receiver(notice, source_file)
+                if asyncio.iscoroutinefunction(change_receiver):
+                    await change_receiver(notice, source_file)
+                else:
+                    change_receiver(notice, source_file)
             return notice
         finally:
             for path in staged_paths:
@@ -1227,7 +1383,61 @@ class CachedFileFolders:
         file_ref._metadata_filename = self.metadata_filename
         return file_ref
 
-    def get_slave_dir(self, grouping_key: Optional[GroupingKey], 
+    def force_truncation(self, ref_path: str, grouping_key: Optional[GroupingKey] = None,
+                         enabled: bool = True) -> None:
+        """Persistently pin an entry's local retention against the proxy's recommendation.
+
+        enabled=True: set a FORCE_TRUNCATE override. If the entry is currently full, it is
+            immediately measured, its sidecar is written (fsynced), and the body is zeroed.
+            If already truncated, the sidecar is updated with the override.
+        enabled=False: clear the override, reverting to the proxy's recommendation. The body
+            is NOT restored here; restoration happens on the next sync when a proxy is supplied
+            and the effective retention becomes KEEP.
+
+        Raises ValueError if the entry does not exist.
+        """
+        grouping_key = self._storage.normalize_grouping_key(grouping_key)
+        file_ref = self.find_file(ref_path, grouping_key)
+        if file_ref is None:
+            raise ValueError(f"File not found in cache: ref_path={ref_path!r}, "
+                             f"grouping_key={grouping_key!r}")
+        slave_dir = file_ref.slave_dir_path
+
+        if enabled:
+            if not _ts.is_truncated(file_ref.file_path, slave_dir):
+                # Full file: measure, write sidecar with FORCE_TRUNCATE, then zero the body
+                try:
+                    st = file_ref.file_path.stat()
+                    size: Optional[int] = st.st_size
+                    mtime: Optional[float] = st.st_mtime
+                except OSError:
+                    size, mtime = None, None
+                # Crash-safe: sidecar fsync'd BEFORE zeroing the body
+                _ts.write_truncation_info(slave_dir,
+                    _ts.TruncationInfo(size=size, mtime=mtime,
+                                       manual_override="FORCE_TRUNCATE"))
+                file_ref.file_path.write_bytes(b"")
+                if mtime is not None:
+                    os.utime(file_ref.file_path, (mtime, mtime))
+            else:
+                # Already truncated: update sidecar to add/preserve override
+                existing = _ts.read_truncation_info(slave_dir) or _ts.TruncationInfo()
+                _ts.write_truncation_info(slave_dir,
+                    _ts.TruncationInfo(size=existing.size, mtime=existing.mtime,
+                                       hash=existing.hash,
+                                       retrieval_hint=existing.retrieval_hint,
+                                       manual_override="FORCE_TRUNCATE"))
+        else:
+            # Clear override; restore body on next sync if recommendation is KEEP
+            existing = _ts.read_truncation_info(slave_dir)
+            if existing and existing.manual_override:
+                _ts.write_truncation_info(slave_dir,
+                    _ts.TruncationInfo(size=existing.size, mtime=existing.mtime,
+                                       hash=existing.hash,
+                                       retrieval_hint=existing.retrieval_hint,
+                                       manual_override=None))
+
+    def get_slave_dir(self, grouping_key: Optional[GroupingKey],
                       ref_path: Optional[str] = None) -> Path:
         """
         Get slave directory for a file or grouping key.

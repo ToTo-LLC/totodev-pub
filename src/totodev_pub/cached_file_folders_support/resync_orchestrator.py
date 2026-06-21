@@ -28,7 +28,7 @@ import os
 from .cache_operations_protocol import CacheOperations
 from .sync_types import ChangeType, UpsertFailure
 from .change_notice import ChangeNotice
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, LocalRetentionRecommendation
 from .cached_file_ref import CachedFileRef
 
 # Type aliases for better readability
@@ -263,7 +263,10 @@ class ResyncOrchestrator:
                     if notice:
                         self._changes.append(notice)
                         if self.change_receiver:
-                            self.change_receiver(notice, None)
+                            if asyncio.iscoroutinefunction(self.change_receiver):
+                                await self.change_receiver(notice, None)
+                            else:
+                                self.change_receiver(notice, None)
                         deleted_count += 1
                     
                 except FileNotFoundError:
@@ -481,8 +484,10 @@ class ResyncOrchestrator:
             changed_parent_refs = set()
             proxy_map = {}
             
-            # Phase 1: Upsert all parent proxies
+            # Phase 1: Upsert all parent proxies (skip EXCLUDE-recommended ones)
             for file_proxy in remaining_files:
+                if file_proxy.local_retention_recommendation() == LocalRetentionRecommendation.EXCLUDE:
+                    continue  # not touched; prior cached entry falls to sweep deletion
                 self.upsert_file(file_proxy)
                 proxy_map[file_proxy.ref_path()] = file_proxy
             
@@ -506,6 +511,8 @@ class ResyncOrchestrator:
                 for proxy in proxies_to_expand:
                     try:
                         for nested_proxy in proxy.nested_proxies():
+                            if nested_proxy.local_retention_recommendation() == LocalRetentionRecommendation.EXCLUDE:
+                                continue
                             self.upsert_file(nested_proxy)
                     except Exception as e:
                         logger.warning(

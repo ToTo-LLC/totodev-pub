@@ -823,10 +823,11 @@ class CachedFileStorageManager:
                 # Skip folders that don't match the pattern
                 continue
 
-    def existing_cached_files(self, 
+    def existing_cached_files(self,
                              grouping_key_filters: Optional[Union[Dict[str, str], List[str]]] = None,
                              ref_path_glob: Optional[str] = None,
-                             reverse: bool = False) -> Iterator['CachedFileRef']:
+                             reverse: bool = False,
+                             include_truncated: bool = True) -> Iterator['CachedFileRef']:
         """
         Find existing cached files with optional glob-style filters.
         
@@ -898,7 +899,12 @@ class CachedFileStorageManager:
                 # Verify the file still exists on disk
                 if file_path.exists():
                     slave_dir_path = self.get_slave_dir_path(file_path)
-                    
+
+                    if not include_truncated:
+                        from .truncation_support import is_truncated as _is_truncated
+                        if _is_truncated(file_path, slave_dir_path):
+                            continue
+
                     file_ref = CachedFileRef(
                         ref_path=ref_path,
                         grouping_key=grouping_key,
