@@ -8,6 +8,107 @@ Contains:
 - MockNetworkError
 - MockNetworkFileProxy
 - MockNetworkFileProxyFactory
+
+--------------------------------------------------------------------
+PURPOSE
+--------------------------------------------------------------------
+This module exists solely for library testing. It lets you build a
+local directory of ordinary files and have each file behave like a
+remote network resource when processed by CachedFileFolders. Test
+parameters — latency, size, failure count, retention recommendation —
+are encoded directly in the filename so a plain directory of fixture
+files is self-describing and requires no per-proxy constructor code.
+
+--------------------------------------------------------------------
+FILENAME ENCODING REFERENCE
+--------------------------------------------------------------------
+All patterns are case-insensitive and may be combined freely.
+
+  _RL<N>[d|c|m]s   Retrieval latency before content is available.
+                   Unit suffix: (none)=seconds, d=deciseconds,
+                   c=centiseconds, m=milliseconds.
+                   Examples: _RL2s  _RL500ms  _RL3ds  _RL50cs
+
+  _FS<N>[K|M]B     Override the materialized file size.
+                   Unit suffix: (none)=bytes, K=kibibytes, M=mebibytes.
+                   Content is b'X' * override_size instead of the
+                   source file's actual bytes.
+                   Examples: _FS500B  _FS100KB  _FS2MB
+
+  _FF<N>           Forced failure count. materialize() raises
+                   MockNetworkError this many times, then succeeds.
+                   Counter is per-instance and decrements each call.
+                   Example: _FF3
+
+  _LR<REC>         LocalRetentionRecommendation override.
+                   Values: TRUNCATE, KEEP, EXCLUDE (full words).
+                   Examples: _LRTRUNCATE  _LRKEEP  _LREXCLUDE
+
+  _FAILS           Content-driven failure toggle. materialize() reads
+                   the first 30 bytes of the source file at call time.
+                   If those bytes contain "FAIL" (all caps), it raises
+                   MockNetworkError. Edit the file to flip behavior
+                   without renaming it. The check fires after the _RL
+                   sleep, before the _FF counter check.
+
+_DIR_MTIME.txt     Place this sentinel file in a fixture directory to
+                   pin all proxies sourced from that directory to a
+                   stable mtime. Write a POSIX timestamp (float or int)
+                   as the first line. Solves the git-checkout mtime
+                   instability problem for change-detection tests.
+
+--------------------------------------------------------------------
+FIXTURE DIRECTORY NOTATION
+--------------------------------------------------------------------
+Use this tree notation to document fixture states in test docstrings
+and comments. It works in any monospace context.
+
+Structure uses standard tree symbols:
+
+    fixtures/
+    ├── _DIR_MTIME.txt          {T=1700000000}
+    ├── slow_RL200ms.txt
+    └── toggle_FAILS.txt        ["FAIL - server down"]
+
+Annotations after the filename:
+  {T=...}     mtime value pinned by _DIR_MTIME.txt
+  ["..."]     significant file content (first ~30 chars, or a hint)
+  <- new      file added in this state
+  <- edited   file content or mtime changed in this state
+  <- deleted  file removed in this state
+
+For tests with multiple fixture states, separate snapshots with a
+labelled horizontal rule and annotate expected outcomes with ->:
+
+    -- State 1 --------------------------------------------------
+    fixtures/
+    ├── _DIR_MTIME.txt          {T=1700000000}
+    └── toggle_FAILS.txt        ["FAIL - server down"]
+
+        -> upsert_file()  raises MockNetworkError
+
+    -- State 2 (flip file content) ------------------------------
+    fixtures/
+    ├── _DIR_MTIME.txt          {T=1700000000}
+    └── toggle_FAILS.txt        ["OK - service restored"]  <- edited
+
+        -> upsert_file()  returns INSERT notice
+
+--------------------------------------------------------------------
+QUICK START
+--------------------------------------------------------------------
+    from totodev_pub.cached_file_folders_support.file_proxy_mock_network import (
+        MockNetworkFileProxy, MockNetworkFileProxyFactory,
+    )
+
+    # Single proxy
+    proxy = MockNetworkFileProxy("fixtures/report_RL100ms_LRTRUNCATE.txt")
+    await cache.upsert_file(proxy, ["my_group"])
+
+    # Factory scan
+    factory = MockNetworkFileProxyFactory()
+    proxies = list(factory.scan_files("fixtures/*.txt"))
+    result = await cache.resync_bulk(proxies, ["my_group"])
 """
 
 import asyncio
