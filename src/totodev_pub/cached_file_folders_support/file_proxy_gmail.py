@@ -64,10 +64,12 @@ This implementation:
 from typing import Optional, Dict, Any, Iterator, List, Literal
 from datetime import datetime
 from pathlib import Path
+import asyncio
 import base64
 import json
 import hashlib
 import logging
+import threading
 import time
 import traceback
 from email import message_from_bytes
@@ -597,6 +599,9 @@ class _GmailDataHandler:
         self._modified_email_bytes: Optional[bytes] = None
         self._attachments: Optional[List[Dict[str, Any]]] = None
         self._fetch_attempted = False
+        # Guards the lazy fetch so the memoization stays atomic when materialize()
+        # runs the handler on worker threads (see the proxies' materialize()).
+        self._fetch_lock = threading.Lock()
     
     def _fetch_email_if_needed(self) -> bool:
         """
@@ -608,34 +613,39 @@ class _GmailDataHandler:
         if self._fetch_attempted:
             return self._raw_email_bytes is not None
         
-        self._fetch_attempted = True
-        
-        try:
-            self._raw_email_bytes = self._api_client.fetch_email_mime(self.msg_id)
-            self._parsed_mime = message_from_bytes(self._raw_email_bytes)
-            self._process_attachments()  # Extract and replace with placeholders
+        with self._fetch_lock:
+            # Double-checked: another thread may have completed the fetch while we waited.
+            if self._fetch_attempted:
+                return self._raw_email_bytes is not None
             
-            logger.debug(f"Successfully fetched email {self.msg_id} ({len(self._raw_email_bytes)} bytes, "
-                        f"{len(self._attachments) if self._attachments else 0} attachments)")
-            return True
+            self._fetch_attempted = True
             
-        except HttpError as e:
-            # Log detailed API error but return False to indicate failure
-            logger.error(
-                f"Failed to fetch email from Gmail API: {e}. "
-                f"Message ID: {self.msg_id}, User: {self.user_email}",
-                exc_info=True
-            )
-            return False
-            
-        except Exception as e:
-            # Unexpected error during parsing - log and return False
-            logger.error(
-                f"Unexpected error processing email {self.msg_id}: {e}. "
-                f"Content size: {len(self._raw_email_bytes) if self._raw_email_bytes else 0} bytes",
-                exc_info=True
-            )
-            return False
+            try:
+                self._raw_email_bytes = self._api_client.fetch_email_mime(self.msg_id)
+                self._parsed_mime = message_from_bytes(self._raw_email_bytes)
+                self._process_attachments()  # Extract and replace with placeholders
+                
+                logger.debug(f"Successfully fetched email {self.msg_id} ({len(self._raw_email_bytes)} bytes, "
+                            f"{len(self._attachments) if self._attachments else 0} attachments)")
+                return True
+                
+            except HttpError as e:
+                # Log detailed API error but return False to indicate failure
+                logger.error(
+                    f"Failed to fetch email from Gmail API: {e}. "
+                    f"Message ID: {self.msg_id}, User: {self.user_email}",
+                    exc_info=True
+                )
+                return False
+                
+            except Exception as e:
+                # Unexpected error during parsing - log and return False
+                logger.error(
+                    f"Unexpected error processing email {self.msg_id}: {e}. "
+                    f"Content size: {len(self._raw_email_bytes) if self._raw_email_bytes else 0} bytes",
+                    exc_info=True
+                )
+                return False
     
     def _process_attachments(self):
         """
@@ -1316,8 +1326,12 @@ class GmailEmailProxy(FileProxyBase):
         
         Returns True if successful, False otherwise. Uses lazy loading from shared handler.
         """
+        # The handler does blocking, synchronous network I/O (and rate-limit sleeps).
+        # Pro: running it on a worker thread frees the event loop, so other downloads
+        # progress in parallel. Con: costs a thread-pool thread per call and requires
+        # the shared handler's fetch to be thread-safe (see _fetch_lock).
         try:
-            return self._handler.get_email_body() is not None
+            return await asyncio.to_thread(self._handler.get_email_body) is not None
         except Exception as e:
             logger.error(f"Failed to materialize email {self._msg_id}: {e}")
             return False
@@ -1580,8 +1594,12 @@ class GmailAttachmentProxy(FileProxyBase):
         
         Returns True if successful, False otherwise. Uses lazy loading from shared handler.
         """
+        # On a cache miss the handler does blocking, synchronous network I/O (and
+        # rate-limit sleeps). Pro: running it on a worker thread frees the event loop
+        # for parallel downloads. Con: costs a thread-pool thread per call and requires
+        # the shared handler's fetch to be thread-safe (see _fetch_lock).
         try:
-            return self._handler.get_attachment(self._sequence_number) is not None
+            return await asyncio.to_thread(self._handler.get_attachment, self._sequence_number) is not None
         except Exception as e:
             logger.error(f"Failed to materialize attachment {self._sequence_number} for {self._msg_id}: {e}")
             return False
