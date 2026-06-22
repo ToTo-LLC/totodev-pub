@@ -22,6 +22,7 @@ Understanding the relationship between these two objects is central to how Cache
 | **Lifecycle** | Temporary - used during sync | Persistent - lives in cache until deleted |
 
 **The Transformation:**
+
 ```python
 # Start: File Proxy (promise)
 proxy = SharepointFileProxy(...)
@@ -43,12 +44,14 @@ print(cached_ref.slave_dir_path)  # Slave directory for processing artifacts
 ## The Problem File Proxies Solve
 
 Imagine you're building a document processing system that needs to:
+
 - Download files from SharePoint
 - Retrieve emails from Gmail (as saved .eml files)
 - Process uploaded user files
 - Cache API responses as JSON files
 
 **Without proxies**, you'd write different code for each source:
+
 ```python
 # Messy: Different code for each source
 sharepoint_files = download_from_sharepoint()
@@ -64,6 +67,7 @@ for gmail in gmail_files:
 ```
 
 **With proxies**, they all look the same:
+
 ```python
 # Clean: Uniform interface
 proxies = []
@@ -118,6 +122,7 @@ sequenceDiagram
 ### 1. File Proxy = A Handle to a Potential File
 
 A file proxy is **not** the file itself - it's a lightweight object that knows:
+
 - How to identify the file (`ref_path`)
 - How to check if it's changed (`looks_same()`)
 - How to retrieve it when needed (`materialize()` and `deploy()`)
@@ -140,6 +145,7 @@ print(f"Scanned: 1000, Downloaded: {len(result.changes)}")  # Maybe only 3 chang
 ### 3. Source Abstraction
 
 Different sources have different APIs and authentication mechanisms:
+
 - SharePoint uses Microsoft Graph API with OAuth tokens
 - Gmail uses Google API with service accounts
 - Local files use filesystem operations
@@ -170,7 +176,9 @@ never need to override them, but they let a proxy express richer intent and meta
 - **`peek_metadata()`** (async) - Cheaply probe source-side `size`/`mtime`/`origin_version` *without* downloading. Returns `None` when nothing is cheaply known (the cache then falls back to materialize-and-compare), mirroring `looks_same()`'s `Optional` philosophy.
 - **`retrieval_hint()`** - Return an informational blob (origin path, URL, message id, etc.) describing how the original could be re-fetched later. It facilitates, but does not implement, re-materialization.
 
-See `docs/truncated-entries.md` for the full design direction.
+See **Briefing 10** ([`briefing_10_truncated_entries.md`](briefing_10_truncated_entries.md)) for the full
+design direction and a worked example, plus the authoritative docstrings in
+[`../file_proxy_base.py`](../file_proxy_base.py).
 
 ---
 
@@ -267,6 +275,7 @@ class LocalFileProxy(FileProxyBase):
 ```
 
 **Example with ref_path override:**
+
 ```python
 # User uploads "IMG_20250107.jpg" but you want to organize by date
 uploaded = Path("/tmp/uploads/IMG_20250107.jpg")
@@ -369,7 +378,18 @@ Putting files into the cache—regardless of source—gives you access to all ca
 
 ---
 
+## Related Code Examples
+
+Concrete proxy implementations in this directory show the interface applied to real sources:
+
+- [`sharepoint_tutorial.py`](sharepoint_tutorial.py) - a SharePoint document proxy + factory using Microsoft Graph.
+- [`gmail_sync.py`](gmail_sync.py) - Gmail message proxies (including nested attachment proxies).
+- [`local_file_tree_sync.py`](local_file_tree_sync.py) - the `LocalFileProxy` pattern for putting local files into the cache.
+- [`zoho_workdrive_sync.py`](zoho_workdrive_sync.py) - a full proxy + factory that also implements the optional retention/peek extensions (`local_retention_recommendation()`, `peek_metadata()`, `retrieval_hint()`).
+- [`../file_proxy_base.py`](../file_proxy_base.py) - the `FileProxyBase` interface itself, with authoritative docstrings.
+
+---
+
 ## What's Next?
 
 **Briefing 3** will cover **Synchronization** - how CachedFileFolders keeps the cache current by detecting changes (INSERT, UPDATE, DELETE) and how to process files as they're synchronized.
-

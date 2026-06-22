@@ -48,6 +48,7 @@ graph LR
 ```
 
 **Sync actions needed:**
+
 - 🔵 **INSERT** (`quarterly-plan.docx`) - New file on remote, not in cache yet
 - 🟠 **UPDATE** (`budget.xlsx`) - File changed on remote (larger size, newer date)
 - 🔴 **DELETE** (`old-notes.txt`) - File in cache but removed from remote source
@@ -62,6 +63,7 @@ Synchronization detects these mismatches and brings the cache current automatica
 One of the most valuable aspects of CachedFileFolders' synchronization is architectural: it **separates infrastructure concerns from business logic**.
 
 **Infrastructure concerns handled by sync:**
+
 - Change detection (what's new, modified, or deleted?)
 - Retrieval (downloading files from external sources)
 - Authentication (OAuth tokens, API keys, credentials)
@@ -69,6 +71,7 @@ One of the most valuable aspects of CachedFileFolders' synchronization is archit
 - Serialization (converting data to files)
 
 **Your business logic:**
+
 - Process files as a simple filesystem walk
 - Read cached files, analyze content, generate outputs
 - Store results in slave directories
@@ -108,6 +111,7 @@ change.old         # None - didn't exist before
 ```
 
 **Typical actions:**
+
 - Process the new file (OCR, parsing, indexing)
 - Store processing artifacts in slave directory
 - Queue background jobs using slave_dir
@@ -124,6 +128,7 @@ change.old         # CachedFileRef - the old version (briefly available)
 ```
 
 **Typical actions:**
+
 - Reprocess the updated file
 - Update processing artifacts
 - Preserve selected metadata from old version
@@ -140,6 +145,7 @@ change.old         # CachedFileRef - the deleted file (briefly available)
 ```
 
 **Typical actions:**
+
 - Remove from search indexes or databases
 - Look up identifiers stored in slave_dir for cleanup
 - Cancel queued jobs
@@ -169,6 +175,7 @@ for change in result.changes:
 ```
 
 **How mark-and-sweep works:**
+
 1. **Mark phase**: Each proxy in the batch marks its cache entry as "seen"
 2. **Upsert phase**: New/changed files are downloaded and cached
 3. **Sweep phase**: Any files NOT marked as "seen" are deleted (removed from source)
@@ -204,6 +211,7 @@ for cached_ref in cache_grouping.files():
 ```
 
 **When to use individual management:**
+
 - Event-driven systems (webhook notifications of changes)
 - User uploads (one file at a time)
 - Selective caching (not mirroring entire source)
@@ -231,6 +239,7 @@ class ChangeNotice:
 ```
 
 **Key properties:**
+
 - `cur` - The current file (present for INSERT and UPDATE, None for DELETE)
 - `old` - The old file (present for UPDATE and DELETE, None for INSERT)
 - Both `cur` and `old` provide access to `file_path`, `slave_dir_path`, etc.
@@ -244,6 +253,7 @@ class ChangeNotice:
 Slave directories can play important roles during synchronization, though this requires custom coding:
 
 **For new files (INSERT):**
+
 ```python
 if change.change_type == ChangeType.INSERT:
     # Queue analysis job and save the job ID
@@ -252,6 +262,7 @@ if change.change_type == ChangeType.INSERT:
 ```
 
 **For deleted files (DELETE):**
+
 ```python
 if change.change_type == ChangeType.DELETE:
     # Read database keys from slave_dir before cleanup
@@ -262,6 +273,7 @@ if change.change_type == ChangeType.DELETE:
 ```
 
 **For updated files (UPDATE):**
+
 ```python
 if change.change_type == ChangeType.UPDATE:
     # Check if reprocessing is needed
@@ -311,6 +323,7 @@ if result.failures:
 ```
 
 **Failure policies:**
+
 - `"RETAIN_OLD"` - Keep existing cached file if download fails (safe default)
 - `"DELETE"` - Remove cached file if download fails (enforce source-of-truth)
 
@@ -373,6 +386,19 @@ for cached_ref in cache_grouping.files():
 
 ---
 
+## Related Code Examples
+
+These examples in this directory drive synchronization (`resync_bulk()` / mark-and-sweep) against real sources:
+
+- [`sharepoint_tutorial.py`](sharepoint_tutorial.py) - bulk sync of a SharePoint document library.
+- [`sharepoint_daily_tree_sync.py`](sharepoint_daily_tree_sync.py) - recursive tree sync with daily grouping.
+- [`gmail_sync.py`](gmail_sync.py) - a dual-mode synchronizer (fast checks + periodic sweeps).
+- [`outlook_email_sync.py`](outlook_email_sync.py) - mailbox sync via Microsoft Graph.
+- [`zoho_workdrive_sync.py`](zoho_workdrive_sync.py) - recursive mirror that passes an async `change_receiver`.
+- [`summary_indexer.py`](summary_indexer.py) - an async `change_receiver` that processes INSERT/UPDATE/DELETE during sync.
+
+---
+
 ## Key Takeaways
 
 1. **Three Change Types** = INSERT, UPDATE, DELETE
@@ -407,4 +433,3 @@ for cached_ref in cache_grouping.files():
 ## What's Next?
 
 **Briefing 4** will cover **Real-World Patterns** - the CacheGrouping facet for cleaner code, metadata and event logging conveniences, and when to use CachedFileFolders versus alternative approaches.
-

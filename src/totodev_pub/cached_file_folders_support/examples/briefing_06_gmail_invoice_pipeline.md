@@ -34,6 +34,7 @@ flowchart LR
 Before wiring up the sync job, decide how this cache will be organized on disk. The `grouping_pattern` is fixed for the lifetime of the cache, so choose one that keeps operations intuitive while supporting retention policies and reporting.
 
 **Grouping pattern ideas:**
+
 - `"{mailbox}/{label}/"` keeps data separated by Gmail label, so finance can rotate or retire labels without touching other flows.
 - `"clients/{client_code}/mailboxes/{mailbox}/"` is handy when one service account serves multiple clients; purging a client’s history becomes one grouping delete.
 - `"pipelines/invoice-intake/runs/{run_date}/"` lets you create short-lived groupings per day; a cleanup job can drop the previous day in one call.
@@ -43,6 +44,7 @@ Before wiring up the sync job, decide how this cache will be organized on disk. 
 Ref paths can evolve, but consistent conventions make querying, monitoring, and cleanup painless.
 
 **Ref_path patterns to consider:**
+
 - Emails: `"emails/{yyyy}/{mm}/{dd}/{gmail_id}.eml"` keeps directories shallow while preserving Gmail’s immutable ID.
 - Attachments: `"emails/{gmail_id}/attachments/{sequence:02d}-{safe_filename}"` mirrors Gmail’s structure and avoids filename collisions.
 - Derived OCR artifacts: `"emails/{gmail_id}/artifacts/ocr/{attachment_id}.json"` so processed data sits beside its source.
@@ -187,3 +189,12 @@ current_stage = log.latest_values().get("ENTER_STATE")
 4. **Retention job:** enforces storage limits and ensures only relevant emails stay on disk.
 
 With these components, the Gmail invoice pipeline remains observable, maintainable, and scalable.
+
+---
+
+## Related Code Examples
+
+The sync layer for this scenario maps onto these examples in this directory:
+
+- [`gmail_sync.py`](gmail_sync.py) - a dual-mode Gmail synchronizer (fast checks + periodic sweeps) built on the Gmail FileProxy factory; the closest concrete match for this briefing.
+- [`outlook_email_sync.py`](outlook_email_sync.py) - the same mailbox-intake shape for Microsoft 365 / Outlook.
