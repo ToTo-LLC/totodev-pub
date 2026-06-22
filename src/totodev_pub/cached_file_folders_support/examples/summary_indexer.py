@@ -38,11 +38,9 @@ import asyncio
 import json
 import logging
 import re
-import shutil
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Protocol
 
 from totodev_pub.cached_file_folders_support import ChangeNotice, ChangeType
 from totodev_pub.cached_file_folders_support.file_proxy_base import FileProxyBase
@@ -67,7 +65,7 @@ _TEXT_EXTS = frozenset({
 _YEAR_RE = re.compile(r"(?<!\d)(19[5-9]\d|20[0-4]\d)(?!\d)")
 
 
-def _human_size(size: Optional[int]) -> str:
+def _human_size(size: int | None) -> str:
     if size is None:
         return "unknown size"
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -79,15 +77,28 @@ def _human_size(size: Optional[int]) -> str:
     return f"{size} B"
 
 
+class _CacheLike(Protocol):
+    """The minimal CachedFileFolders surface SummaryIndexer actually uses.
+
+    Declaring it as a Protocol (instead of typing the cache as ``Any``) keeps the indexer
+    decoupled from the concrete cache class while making the dependency explicit: the only
+    things needed are the grouping-level slave dir and the swept temp-directory root.
+    """
+
+    def get_slave_dir(self, grouping_key: Any) -> str: ...
+
+    def get_temp_directory_root(self) -> str: ...
+
+
 class SummaryIndexer:
     """Async change-receiver that derives a dumb summary + stub index per file."""
 
     def __init__(
         self,
-        cache: Any,
-        grouping_key: Optional[Any] = None,
-        policy: Optional[RetentionPolicy] = None,
-        vector_index: Optional[StubVectorIndex] = None,
+        cache: _CacheLike,
+        grouping_key: Any | None = None,
+        policy: RetentionPolicy | None = None,
+        vector_index: StubVectorIndex | None = None,
         source: str = "cachedfilefolders",
         materialize_blocking_secs: float = 30.0,
     ) -> None:
@@ -119,7 +130,7 @@ class SummaryIndexer:
     # change_receiver entry point                                         #
     # ------------------------------------------------------------------ #
 
-    async def on_change(self, notice: ChangeNotice, proxy: Optional[FileProxyBase]) -> None:
+    async def on_change(self, notice: ChangeNotice, proxy: FileProxyBase | None) -> None:
         if notice.change_type == ChangeType.DELETE:
             await self._on_delete(notice)
             return
@@ -131,14 +142,14 @@ class SummaryIndexer:
             async with self._index_lock:
                 self.vector_index.remove(old.ref_path)
 
-    async def _on_upsert(self, notice: ChangeNotice, proxy: Optional[FileProxyBase]) -> None:
+    async def _on_upsert(self, notice: ChangeNotice, proxy: FileProxyBase | None) -> None:
         cur = notice.cur
         if cur is None:
             return
 
         ref_path = cur.ref_path
         name = cur.file_path.name
-        ext = Path(name).suffix.lower()
+        ext = cur.file_path.suffix.lower()
         size = await self._effective_size(notice, proxy)
         is_truncated = cur.is_truncated()
         media_kind = self.policy.media_kind(name)
@@ -169,7 +180,7 @@ class SummaryIndexer:
             body_inspected = False
 
         year_hint = self._year_hint(f"{name} {ref_path}")
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "ref_path": ref_path,
             "file_name": name,
             "ext": ext,
@@ -210,44 +221,60 @@ class SummaryIndexer:
         proxy: FileProxyBase,
         ref_path: str,
         name: str,
-        size: Optional[int],
-        media_kind: Optional[str],
-    ) -> Tuple[str, str, bool]:
-        """Materialize+deploy the pristine proxy into a throwaway temp dir, summarize, discard.
+        size: int | None,
+        media_kind: str | None,
+    ) -> tuple[str, str, bool]:
+        """Materialize+deploy the pristine proxy into the cache's temp area, summarize, discard.
 
         Falls back to a metadata-only summary if the transient fetch fails for any reason
         -- "no body available" is an ordinary outcome, never an exception out of here.
+
+        TEMP-FILE HYGIENE (worth copying into your own receivers): the borrowed body is a
+        loose file inside the cache's *designated, swept* temp area, and it is removed in a
+        ``finally`` on EVERY exit path. That gives two independent guarantees -- (1) the
+        ``finally`` deletes it in-process even on error/cancellation, and (2) because it is a
+        plain file in the swept temp area, the library's periodic temp sweep reaps it as a
+        backstop even if the process is hard-killed before the ``finally`` runs. (This mirrors
+        how the core library stages its own transient materializations.)
         """
         temp_root = Path(self.cache.get_temp_directory_root())
         temp_root.mkdir(parents=True, exist_ok=True)
-        deploy_dir = Path(tempfile.mkdtemp(dir=str(temp_root)))
+        body_path: Path | None = None
         try:
             ready = await proxy.materialize(self.materialize_blocking_secs, temp_root)
             if not ready:
                 summary, method = self._metadata_only_summary(ref_path, name, size, media_kind)
                 return summary, method, False
-            proxy.deploy(str(deploy_dir))
-            files = [p for p in deploy_dir.iterdir() if p.is_file()]
-            if not files:
+            # deploy() lands the body at <temp_root>/<file_name()> (the same flat-temp
+            # pattern the core library uses for its own transient materialization).
+            proxy.deploy(str(temp_root))
+            body_path = temp_root / Path(proxy.file_name()).name
+            if not body_path.is_file():
                 summary, method = self._metadata_only_summary(ref_path, name, size, media_kind)
                 return summary, method, False
-            summary, method = self._summarize_body(files[0], ref_path, name, size, media_kind)
+            summary, method = self._summarize_body(body_path, ref_path, name, size, media_kind)
             return summary, method, True
         except Exception as exc:  # transient fetch is best-effort; degrade gracefully
             logger.warning("Transient body fetch failed for %s: %s", ref_path, exc)
             summary, method = self._metadata_only_summary(ref_path, name, size, media_kind)
             return summary, method, False
         finally:
-            shutil.rmtree(deploy_dir, ignore_errors=True)
+            # Always discard the borrowed body; the cache entry stays a zero-byte truncated
+            # file. We only ever borrowed the bytes.
+            if body_path is not None:
+                try:
+                    body_path.unlink()
+                except OSError:
+                    pass
 
     def _summarize_body(
         self,
         body_path: Path,
         ref_path: str,
         name: str,
-        size: Optional[int],
-        media_kind: Optional[str],
-    ) -> Tuple[str, str]:
+        size: int | None,
+        media_kind: str | None,
+    ) -> tuple[str, str]:
         """Dumb summary from a body on disk: text/pandoc -> first ~2 KB, else filepath sentence."""
         text, method = self._extract_text(body_path)
         if text is not None:
@@ -268,10 +295,10 @@ class SummaryIndexer:
         self,
         ref_path: str,
         name: str,
-        size: Optional[int],
-        media_kind: Optional[str],
+        size: int | None,
+        media_kind: str | None,
         is_native_doc: bool = False,
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
         """Summary from filename/path/size only -- no body access at all."""
         parts = [self._filepath_sentence(ref_path, name)]
         if media_kind:
@@ -295,7 +322,7 @@ class SummaryIndexer:
     # Dumb extraction helpers                                            #
     # ------------------------------------------------------------------ #
 
-    def _extract_text(self, body_path: Path) -> Tuple[Optional[str], Optional[str]]:
+    def _extract_text(self, body_path: Path) -> tuple[str | None, str | None]:
         """Return (text, method). Text files read directly; others via pandoc; None if neither works."""
         ext = body_path.suffix.lower()
         if ext in _TEXT_EXTS:
@@ -317,7 +344,7 @@ class SummaryIndexer:
             return None, None
 
     @staticmethod
-    def _is_native_doc(proxy: Optional[FileProxyBase]) -> bool:
+    def _is_native_doc(proxy: FileProxyBase | None) -> bool:
         """Duck-typed: does the proxy advertise itself as a native doc (Zoho Writer/Sheet/Show)?
 
         Kept generic so the summarizer stays source-agnostic -- a proxy may expose an
@@ -330,7 +357,7 @@ class SummaryIndexer:
         return f"File {name} is found on the server at {ref_path}."
 
     @staticmethod
-    def _year_hint(text: str) -> Optional[int]:
+    def _year_hint(text: str) -> int | None:
         match = _YEAR_RE.search(text or "")
         return int(match.group(1)) if match else None
 
@@ -338,8 +365,7 @@ class SummaryIndexer:
     # Artifact writers                                                   #
     # ------------------------------------------------------------------ #
 
-    def _write_artifacts(self, slave_dir: Path, record: Dict[str, Any]) -> None:
-        slave_dir = Path(slave_dir)
+    def _write_artifacts(self, slave_dir: Path, record: dict[str, Any]) -> None:
         slave_dir.mkdir(parents=True, exist_ok=True)
         (slave_dir / INDEX_FILENAME).write_text(
             json.dumps(record, indent=2, sort_keys=True), encoding="utf-8"
@@ -347,7 +373,7 @@ class SummaryIndexer:
         (slave_dir / SUMMARY_FILENAME).write_text(self._render_summary_md(record), encoding="utf-8")
 
     @staticmethod
-    def _render_summary_md(record: Dict[str, Any]) -> str:
+    def _render_summary_md(record: dict[str, Any]) -> str:
         lines = [
             f"# Summary: {record['file_name']}",
             "",
@@ -364,7 +390,7 @@ class SummaryIndexer:
         lines += ["", "## Summary", "", record["summary"], ""]
         return "\n".join(lines)
 
-    def _update_metadata(self, notice: ChangeNotice, record: Dict[str, Any]) -> None:
+    def _update_metadata(self, notice: ChangeNotice, record: dict[str, Any]) -> None:
         meta = notice.metadata()
         if meta is None:
             return
@@ -387,8 +413,8 @@ class SummaryIndexer:
     # ------------------------------------------------------------------ #
 
     async def _effective_size(
-        self, notice: ChangeNotice, proxy: Optional[FileProxyBase]
-    ) -> Optional[int]:
+        self, notice: ChangeNotice, proxy: FileProxyBase | None
+    ) -> int | None:
         """Cheapest reliable size: proxy peek -> truncation sidecar -> on-disk stat."""
         if proxy is not None:
             try:

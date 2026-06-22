@@ -58,6 +58,9 @@ class _PolicyMockProxy(MockNetworkFileProxy):
         self.materialize_calls = 0
 
     def _size(self) -> int:
+        # Deliberately reads MockNetworkFileProxy's internal `_override_size` (the size
+        # encoded in the `_FS<n>KB/MB` filename) so OUR policy sees the same simulated size
+        # the cache does. Coupled to the base mock on purpose; this is test-only code.
         if self._override_size is not None:
             return self._override_size
         return os.stat(self._source_path).st_size
@@ -164,7 +167,7 @@ class TestRetentionPolicy:
 
 
 # ---------------------------------------------------------------------------
-# StubVectorIndex unit coverage
+# extract_root_folder_id URL parsing
 # ---------------------------------------------------------------------------
 
 class TestExtractRootFolderId:
@@ -202,6 +205,10 @@ class TestExtractRootFolderId:
     def test_singular_folder_path(self):
         assert self._fn()("https://workdrive.zoho.com/folder/ID789?a=b") == "ID789"
 
+
+# ---------------------------------------------------------------------------
+# StubVectorIndex unit coverage
+# ---------------------------------------------------------------------------
 
 class TestStubVectorIndex:
     def test_upsert_remove_query(self, tmp_path):
@@ -425,3 +432,38 @@ async def test_non_text_uses_pandoc(tmp_path):
     record = _read_index_json(cache, ref)
     assert record["summary_method"] == "pandoc_first_2k"
     assert record["body_inspected"] is True
+
+
+class _NativeDocMockProxy(_PolicyMockProxy):
+    """A proxy that advertises itself as a Zoho-native doc via the duck-typed flag.
+
+    SummaryIndexer._is_native_doc() reads `is_native_doc` off the proxy (getattr), so a
+    proxy only has to expose the attribute -- this exercises that source-agnostic seam.
+    """
+
+    is_native_doc = True
+
+
+@pytest.mark.asyncio
+async def test_native_doc_summarized_by_filename_only_never_materialized(tmp_path):
+    cache = _new_cache(tmp_path)
+    indexer = _new_indexer(cache, tmp_path / "vec.json")
+    policy = RetentionPolicy()
+    ref = "zohowd://demo/proposal.zwriter"
+    # Sized over the truncate threshold so the cache truncates (peek only, no fetch).
+    proxy = _NativeDocMockProxy(_make_source(tmp_path, "proposal_FS60KB.zwriter"),
+                                policy, ref_path=ref, init_mtime=1700000000.0)
+
+    await _sync(cache, indexer, [proxy])
+
+    cached = cache.find_file(ref, GROUP)
+    assert cached is not None and cached.is_truncated()
+
+    record = _read_index_json(cache, ref)
+    assert record["is_native_doc"] is True
+    assert record["body_inspected"] is False
+    assert record["summary_method"] == "metadata_only"
+    assert "native" in record["summary"].lower()
+    # the crux: a native doc is never downloaded -- not even to measure it
+    assert proxy.materialize_calls == 0
+    assert ref in indexer.vector_index

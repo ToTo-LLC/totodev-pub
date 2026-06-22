@@ -27,9 +27,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DIM = 64
 
@@ -44,7 +47,7 @@ class StubEmbedder:
     def __init__(self, dim: int = DEFAULT_DIM) -> None:
         self.dim = dim
 
-    def embed(self, text: str) -> List[float]:
+    def embed(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
         for token in (text or "").lower().split():
             digest = hashlib.sha1(token.encode("utf-8")).digest()
@@ -57,7 +60,7 @@ class StubEmbedder:
         return [v / norm for v in vec]
 
 
-def _cosine(a: List[float], b: List[float]) -> float:
+def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
@@ -71,15 +74,21 @@ def _cosine(a: List[float], b: List[float]) -> float:
 class StubVectorIndex:
     """A tiny JSON-backed "vector index" over summary text (a documented stub)."""
 
-    def __init__(self, path: Path | str, embedder: Optional[StubEmbedder] = None) -> None:
+    def __init__(self, path: Path | str, embedder: StubEmbedder | None = None) -> None:
         self.path = Path(path)
         self.embedder = embedder or StubEmbedder()
-        self._entries: Dict[str, Dict[str, Any]] = self._load()
+        self._entries: dict[str, dict[str, Any]] = self._load()
 
-    def _load(self) -> Dict[str, Dict[str, Any]]:
+    def _load(self) -> dict[str, dict[str, Any]]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError:
+            # Missing file (or unreadable) is the normal first-run case -- start empty.
+            return {}
+        except ValueError as exc:
+            # Corrupt JSON is NOT expected: surface it (at debug) so accidental data loss
+            # is at least traceable, then start empty rather than crash.
+            logger.debug("Ignoring corrupt vector index at %s: %s", self.path, exc)
             return {}
         if isinstance(raw, dict) and isinstance(raw.get("entries"), dict):
             return raw["entries"]
@@ -94,7 +103,7 @@ class StubVectorIndex:
         }
         self.path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    def upsert(self, doc_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def upsert(self, doc_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
         """Index (or re-index) a document by id. The document IS the summary text."""
         self._entries[doc_id] = {
             "vector": self.embedder.embed(text),
@@ -110,7 +119,7 @@ class StubVectorIndex:
             self._save()
         return existed
 
-    def query(self, text: str, k: int = 5) -> List[Tuple[str, float]]:
+    def query(self, text: str, k: int = 5) -> list[tuple[str, float]]:
         """Return up to k (doc_id, cosine_score) pairs, best first (meaningless scores)."""
         q = self.embedder.embed(text)
         scored = [

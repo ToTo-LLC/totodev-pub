@@ -41,7 +41,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from totodev_pub.cached_file_folders_support.file_proxy_base import (
     LocalRetentionRecommendation,
@@ -113,7 +112,7 @@ class RetentionPolicy:
         """
         return self.is_audio_video(name) or self.is_opaque_binary(name)
 
-    def media_kind(self, name: str) -> Optional[str]:
+    def media_kind(self, name: str) -> str | None:
         """Return "video", "audio", or None for the given filename."""
         ext = self._ext(name)
         if ext in VIDEO_EXTS:
@@ -122,7 +121,7 @@ class RetentionPolicy:
             return "audio"
         return None
 
-    def recommend(self, name: str, size: Optional[int]) -> LocalRetentionRecommendation:
+    def recommend(self, name: str, size: int | None) -> LocalRetentionRecommendation:
         """What the cache should retain locally for this file."""
         if self.is_audio_video(name):
             return LocalRetentionRecommendation.TRUNCATE
@@ -130,7 +129,7 @@ class RetentionPolicy:
             return LocalRetentionRecommendation.TRUNCATE
         return LocalRetentionRecommendation.KEEP
 
-    def may_materialize(self, name: str, size: Optional[int]) -> bool:
+    def may_materialize(self, name: str, size: int | None) -> bool:
         """Whether the summary step may fetch (transiently) the body of a TRUNCATE entry.
 
         Conservative by construction:
@@ -149,7 +148,7 @@ class RetentionPolicy:
             return False
         return True
 
-    def classify_media_size(self, size: Optional[int]) -> Optional[str]:
+    def classify_media_size(self, size: int | None) -> str | None:
         """Rough small/medium/large class for media, from size alone."""
         if size is None:
             return None

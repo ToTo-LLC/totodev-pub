@@ -126,15 +126,21 @@ import sys
 import tempfile
 import time
 from collections import deque
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any
 
 import click
 
-# Add src to path for direct execution (mirrors the other examples).
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+# Add src to path ONLY for direct execution (`python zoho_workdrive_sync.py`). When this
+# module is imported as part of the package, src is already importable and we must not
+# mutate sys.path. `__name__` is already "__main__" at module-load time during direct
+# execution, so this guard runs the insert before the package imports below need it, while
+# skipping it entirely on package import. (Mirrors the other examples' intent.)
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from totodev_pub.cached_file_folders import CachedFileFolders
 from totodev_pub.cached_file_folders_support import ChangeNotice
@@ -155,15 +161,27 @@ logger = logging.getLogger(__name__)
 
 GROUPING_PATTERN = "key-{dir_key}/"
 
+# Environment variable names -- a single source of truth that doubles as the key set for
+# the config dict returned by validate_environment() (no silent name transformation).
+_ENV_CLIENT_ID = "ZOHO_WD_CLIENT_ID"
+_ENV_CLIENT_SECRET = "ZOHO_WD_CLIENT_SECRET"
+_ENV_REFRESH_TOKEN = "ZOHO_WD_REFRESH_TOKEN"
+_ENV_DC = "ZOHO_WD_DC"
+_ENV_API_HOST = "ZOHO_WD_API_HOST"
+_ENV_DOWNLOAD_HOST = "ZOHO_WD_DOWNLOAD_HOST"
+_ENV_ROOT_FOLDER_ID = "ZOHO_WD_ROOT_FOLDER_ID"
+
 
 def configure_logging(debug_enabled: bool = False) -> None:
-    level = logging.DEBUG if debug_enabled else logging.WARNING
-    for logger_name in ["urllib3", "requests", "asyncio"]:
-        logging.getLogger(logger_name).setLevel(level)
+    # Configure the root logger FIRST: basicConfig is a no-op once handlers exist, so it
+    # must run before we tune individual library loggers below.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+    level = logging.DEBUG if debug_enabled else logging.WARNING
+    for logger_name in ["urllib3", "requests", "asyncio"]:
+        logging.getLogger(logger_name).setLevel(level)
 
 
 def _require_requests():
@@ -195,26 +213,27 @@ class ZohoOAuth:
         client_secret: str,
         refresh_token: str,
         dc: str = "com",
-        accounts_host: Optional[str] = None,
+        accounts_host: str | None = None,
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
         self.dc = dc
         self.accounts_host = (accounts_host or f"https://accounts.zoho.{dc}").rstrip("/")
-        self._access_token: Optional[str] = None
+        self._access_token: str | None = None
+        # 0.0 is in the past, so the first get_access_token() call always refreshes.
         self._expiry_epoch: float = 0.0
-        self.api_domain: Optional[str] = None
+        self.api_domain: str | None = None
 
-    def access_token(self) -> str:
+    def get_access_token(self) -> str:
         if self._access_token is not None and time.time() < (self._expiry_epoch - 60):
             return self._access_token
         self._refresh()
         assert self._access_token is not None
         return self._access_token
 
-    def auth_header(self) -> Dict[str, str]:
-        return {"Authorization": f"Zoho-oauthtoken {self.access_token()}"}
+    def auth_header(self) -> dict[str, str]:
+        return {"Authorization": f"Zoho-oauthtoken {self.get_access_token()}"}
 
     def _refresh(self) -> None:
         requests = _require_requests()
@@ -253,7 +272,7 @@ class _ZohoWorkDriveApiClient:
         self.api_host = api_host.rstrip("/")
         self.download_host = download_host.rstrip("/")
 
-    def get_folder_children(self, folder_id: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+    def get_folder_children(self, folder_id: str, offset: int = 0, limit: int = 50) -> dict[str, Any]:
         """GET /files/{folder_id}/files -- one JSON:API page of child records."""
         requests = _require_requests()
         url = f"{self.api_host}/files/{folder_id}/files"
@@ -268,7 +287,7 @@ class _ZohoWorkDriveApiClient:
             raise RuntimeError(f"WorkDrive list failed (HTTP {resp.status_code}): {resp.text[:300]}")
         return resp.json()
 
-    def download_file(self, file_id: str, out_path: str, download_url: Optional[str] = None) -> None:
+    def download_file(self, file_id: str, out_path: str, download_url: str | None = None) -> None:
         """Stream a file body to out_path (blocking).
 
         Prefers the per-file ``download_url`` returned in the listing (it points at the
@@ -289,7 +308,7 @@ class _ZohoWorkDriveApiClient:
                         fh.write(chunk)
 
 
-def _parse_modified(attrs: Dict[str, Any]) -> Optional[datetime]:
+def _parse_modified(attrs: dict[str, Any]) -> datetime | None:
     """Extract a modified-time datetime from WorkDrive JSON:API attributes.
 
     WorkDrive returns the numeric epoch under ``modified_time_in_millisecond`` (the
@@ -312,7 +331,7 @@ _SIZE_UNITS = {"byte": 1, "bytes": 1, "b": 1, "kb": 1024, "mb": 1024**2,
                "gb": 1024**3, "tb": 1024**4}
 
 
-def _parse_size(attrs: Dict[str, Any]) -> Optional[int]:
+def _parse_size(attrs: dict[str, Any]) -> int | None:
     """Extract a byte count from WorkDrive attributes.
 
     Prefers the numeric ``storage_info.size_in_bytes``; falls back to parsing the
@@ -350,7 +369,7 @@ _NATIVE_TYPES = frozenset({"writer", "zohosheet", "zohoshow", "zohowriter"})
 _NATIVE_SERVICE_TYPES = frozenset({"zw", "zs", "zp"})
 
 
-def _is_native_doc(attrs: Dict[str, Any]) -> bool:
+def _is_native_doc(attrs: dict[str, Any]) -> bool:
     """True if the record is a Zoho-native doc (Writer/Sheet/Show)."""
     extn = (attrs.get("extn") or "").lower()
     dtype = (attrs.get("type") or "").lower()
@@ -385,7 +404,7 @@ def extract_root_folder_id(value: str) -> str:
     path = urlparse(value).path if "://" in value else value
     segments = [seg for seg in path.split("/") if seg]
 
-    def _after(marker: str) -> Optional[str]:
+    def _after(marker: str) -> str | None:
         if marker in segments:
             idx = segments.index(marker)
             if idx + 1 < len(segments):
@@ -415,11 +434,11 @@ class ZohoWorkDriveFileProxy(FileProxyBase):
         file_id: str,
         name: str,
         folder_path: str,
-        size: Optional[int],
-        modified_time: Optional[datetime],
+        size: int | None,
+        modified_time: datetime | None,
         policy: RetentionPolicy,
         workspace_name: str = "workdrive",
-        download_url: Optional[str] = None,
+        download_url: str | None = None,
         is_native_doc: bool = False,
     ) -> None:
         self._api_client = api_client
@@ -435,7 +454,7 @@ class ZohoWorkDriveFileProxy(FileProxyBase):
         # constants block for the rationale.
         self._is_native_doc = is_native_doc
 
-        self._temp_path: Optional[str] = None
+        self._temp_path: str | None = None
         self._was_deployed = False
         self._materialization_started = False
         self._materialization_completed = False
@@ -448,13 +467,13 @@ class ZohoWorkDriveFileProxy(FileProxyBase):
     def file_name(self) -> str:
         return self._name
 
-    async def peek_metadata(self) -> Optional[OriginMetadata]:
+    async def peek_metadata(self) -> OriginMetadata | None:
         if self._size is None and self._modified_time is None:
             return None
         mtime = self._modified_time.timestamp() if self._modified_time is not None else None
         return OriginMetadata(size=self._size, mtime=mtime)
 
-    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: int | None = None) -> bool | None:
         if self._modified_time is None:
             return None
         try:
@@ -470,7 +489,7 @@ class ZohoWorkDriveFileProxy(FileProxyBase):
         other_size = st.st_size if override_byte_count is None else override_byte_count
         return self._size == other_size and self._modified_time.timestamp() == st.st_mtime
 
-    async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:
+    async def materialize(self, blocking_secs: float, temp_dir: Path | None = None) -> bool:
         if temp_dir is None or not str(temp_dir).strip():
             raise ValueError("temp_dir must be provided and non-blank for ZohoWorkDriveFileProxy")
         if self._materialization_completed:
@@ -480,25 +499,37 @@ class ZohoWorkDriveFileProxy(FileProxyBase):
                 await asyncio.sleep(min(0.1, blocking_secs))
             return self._materialization_completed
         self._materialization_started = True
+        # Create the scratch file FIRST, then guard the failure-prone network download in a
+        # try so a raised error or a partial download can never orphan it -- and so a retry
+        # never accumulates a fresh orphan each time. (BaseException so cancellation is
+        # covered too.) Copy this care into any proxy you write: the temp file must die on
+        # every failure path, not only on success.
+        fd, temp_path = tempfile.mkstemp(suffix=Path(self._name).suffix, dir=str(temp_dir))
+        os.close(fd)
         try:
-            fd, temp_path = tempfile.mkstemp(suffix=Path(self._name).suffix, dir=str(temp_dir))
-            os.close(fd)
             # Offload blocking network I/O so the event loop keeps serving other upserts.
             await asyncio.to_thread(
                 self._api_client.download_file, self._file_id, temp_path, self._download_url
             )
-            self._temp_path = temp_path
-            self._materialization_completed = True
-            return True
-        except Exception:
+        except BaseException:
+            try:
+                os.remove(temp_path)  # best-effort; never mask the original error
+            except OSError:
+                pass
             self._materialization_started = False
             raise
+        self._temp_path = temp_path
+        self._materialization_completed = True
+        return True
 
     def deploy(self, target_dir: str) -> None:
         if self._was_deployed:
             raise RuntimeError("File has already been deployed")
         if not self._materialization_completed or self._temp_path is None:
             raise RuntimeError("File must be materialized before deployment")
+        # "/dev/null" is the shared "materialize-then-discard" sentinel used across the
+        # proxy family (sharepoint/local_file/data_struct/dummy/mock_network): the caller
+        # wants the body fetched but not kept, so we drop the temp file and report deployed.
         if target_dir == "/dev/null":
             if os.path.exists(self._temp_path):
                 os.remove(self._temp_path)
@@ -522,7 +553,7 @@ class ZohoWorkDriveFileProxy(FileProxyBase):
     def is_native_doc(self) -> bool:
         return self._is_native_doc
 
-    def retrieval_hint(self) -> Dict[str, Any]:
+    def retrieval_hint(self) -> dict[str, Any]:
         hint = {
             "source": "zoho_workdrive",
             "file_id": self._file_id,
@@ -533,7 +564,7 @@ class ZohoWorkDriveFileProxy(FileProxyBase):
             hint["is_native_doc"] = True
         return hint
 
-    def get_context_info(self) -> Dict[str, Any]:
+    def get_context_info(self) -> dict[str, Any]:
         return {
             "proxy_type": "ZohoWorkDriveFileProxy",
             "file_id": self._file_id,
@@ -570,8 +601,8 @@ class ZohoWorkDriveFileProxyFactory:
         self,
         folder_id: str,
         include_subfolders: bool = True,
-        max_files: Optional[int] = None,
-        file_extensions: Optional[set[str]] = None,
+        max_files: int | None = None,
+        file_extensions: set[str] | None = None,
     ) -> Generator[ZohoWorkDriveFileProxy, None, None]:
         """Breadth-first descent from folder_id, yielding a proxy per file."""
         queue: deque = deque([(folder_id, "")])
@@ -630,9 +661,9 @@ class SyncResult:
     insert_count: int
     update_count: int
     delete_count: int
-    changes: List[ChangeNotice]
-    failures: List[UpsertFailure]
-    total_files_scanned: int
+    changes: list[ChangeNotice]
+    failures: list[UpsertFailure]
+    files_changed_or_failed: int
 
 
 class SimpleZohoWorkDriveSync:
@@ -660,7 +691,7 @@ class SimpleZohoWorkDriveSync:
         self.workspace_name = workspace_name
         self.max_concurrent_requests = max_concurrent_requests
 
-    async def sync(self, max_files: Optional[int] = None) -> SyncResult:
+    async def sync(self, max_files: int | None = None) -> SyncResult:
         # Use a tuple grouping key: CachedFileFolders.files() treats a list as a pattern
         # filter (which silently breaks mark-and-sweep deletes), but an exact tuple key
         # takes the correct lookup path.
@@ -697,7 +728,7 @@ class SimpleZohoWorkDriveSync:
             delete_count=stats["delete"],
             changes=result.changes,
             failures=result.failures,
-            total_files_scanned=len(result.changes) + len(result.failures),
+            files_changed_or_failed=len(result.changes) + len(result.failures),
         )
 
 
@@ -705,8 +736,8 @@ class SimpleZohoWorkDriveSync:
 # ENV VALIDATION + HOST RESOLUTION
 # =============================================================================
 
-def validate_environment() -> Dict[str, str]:
-    required = ["ZOHO_WD_CLIENT_ID", "ZOHO_WD_CLIENT_SECRET", "ZOHO_WD_REFRESH_TOKEN", "ZOHO_WD_DC"]
+def validate_environment() -> dict[str, str]:
+    required = [_ENV_CLIENT_ID, _ENV_CLIENT_SECRET, _ENV_REFRESH_TOKEN, _ENV_DC]
     missing = [var for var in required if not os.getenv(var)]
     if missing:
         click.echo(f"Missing required environment variables: {', '.join(missing)}", err=True)
@@ -715,23 +746,24 @@ def validate_environment() -> Dict[str, str]:
             click.echo(f"  export {var}='your-value-here'", err=True)
         click.echo("\nSee the module docstring for Self Client credential setup.", err=True)
         sys.exit(1)
-    config = {var.lower(): os.getenv(var) for var in required}
-    config["zoho_wd_api_host"] = os.getenv("ZOHO_WD_API_HOST", "")
-    config["zoho_wd_download_host"] = os.getenv("ZOHO_WD_DOWNLOAD_HOST", "")
+    # Keys are the env var names themselves -- no silent lowercasing transformation.
+    config = {var: os.getenv(var) for var in required}
+    config[_ENV_API_HOST] = os.getenv(_ENV_API_HOST, "")
+    config[_ENV_DOWNLOAD_HOST] = os.getenv(_ENV_DOWNLOAD_HOST, "")
     return config
 
 
-def resolve_hosts(oauth: ZohoOAuth, config: Dict[str, str]) -> tuple[str, str]:
-    dc = config["zoho_wd_dc"]
-    api_host = config.get("zoho_wd_api_host") or ""
+def resolve_hosts(oauth: ZohoOAuth, config: dict[str, str]) -> tuple[str, str]:
+    dc = config[_ENV_DC]
+    api_host = config.get(_ENV_API_HOST) or ""
     if not api_host:
         # Prefer the api_domain Zoho returns with the token; fall back to the dc default.
-        oauth.access_token()  # populates api_domain
+        oauth.get_access_token()  # populates api_domain
         if oauth.api_domain:
             api_host = f"{oauth.api_domain.rstrip('/')}/workdrive/api/v1"
         else:
             api_host = f"https://www.zohoapis.{dc}/workdrive/api/v1"
-    download_host = config.get("zoho_wd_download_host") or f"https://download.zoho.{dc}/v1/workdrive"
+    download_host = config.get(_ENV_DOWNLOAD_HOST) or f"https://download.zoho.{dc}/v1/workdrive"
     return api_host, download_host
 
 
@@ -743,16 +775,16 @@ async def _run(
     cache_root: str,
     dir_key: str,
     root_folder_id: str,
-    max_files: Optional[int],
+    max_files: int | None,
     truncate_over_kb: int,
     never_materialize_over_mb: int,
-    config: Dict[str, str],
+    config: dict[str, str],
 ) -> None:
     oauth = ZohoOAuth(
-        client_id=config["zoho_wd_client_id"],
-        client_secret=config["zoho_wd_client_secret"],
-        refresh_token=config["zoho_wd_refresh_token"],
-        dc=config["zoho_wd_dc"],
+        client_id=config[_ENV_CLIENT_ID],
+        client_secret=config[_ENV_CLIENT_SECRET],
+        refresh_token=config[_ENV_REFRESH_TOKEN],
+        dc=config[_ENV_DC],
     )
     api_host, download_host = resolve_hosts(oauth, config)
     policy = RetentionPolicy(
@@ -799,7 +831,7 @@ def main(
     cache_root: str,
     dir_key: str,
     root_folder_id: str,
-    max_files: Optional[int],
+    max_files: int | None,
     truncate_over_kb: int,
     never_materialize_over_mb: int,
     debug: bool,
@@ -809,7 +841,7 @@ def main(
     config = validate_environment()
     # Root folder is config, not a secret: accept it from --root-folder-id OR the
     # ZOHO_WD_ROOT_FOLDER_ID env var (so it can live in the same sourced shell script).
-    raw_root = root_folder_id or os.getenv("ZOHO_WD_ROOT_FOLDER_ID")
+    raw_root = root_folder_id or os.getenv(_ENV_ROOT_FOLDER_ID)
     if not raw_root:
         click.echo(
             "Missing root folder id: pass --root-folder-id <id-or-url> or set "
