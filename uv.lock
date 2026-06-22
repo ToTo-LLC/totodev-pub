@@ -2234,6 +2234,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pypandoc"
+version = "1.17"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/d6/410615fc433e5d1eacc00db2044ae2a9c82302df0d35366fe2bd15de024d/pypandoc-1.17.tar.gz", hash = "sha256:51179abfd6e582a25ed03477541b48836b5bba5a4c3b282a547630793934d799", size = 69071, upload-time = "2026-03-14T22:39:07.21Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/86/e2ffa604eacfbec3f430b1d850e7e04c4101eca1a5828f9ae54bf51dfba4/pypandoc-1.17-py3-none-any.whl", hash = "sha256:01fdbffa61edb9f8e82e8faad6954efcb7b6f8f0634aead4d89e322a00225a67", size = 23554, upload-time = "2026-03-14T22:38:46.007Z" },
+]
+
+[[package]]
 name = "pyparsing"
 version = "3.3.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2577,7 +2586,7 @@ wheels = [
 
 [[package]]
 name = "totodev-pub"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -2612,6 +2621,7 @@ all = [
     { name = "openai" },
     { name = "paramiko" },
     { name = "pathspec" },
+    { name = "pypandoc" },
     { name = "requests" },
     { name = "treelib" },
 ]
@@ -2624,6 +2634,7 @@ connectors = [
     { name = "google-auth-oauthlib" },
     { name = "msal" },
     { name = "paramiko" },
+    { name = "pypandoc" },
     { name = "requests" },
 ]
 dev = [
@@ -2705,6 +2716,8 @@ requires-dist = [
     { name = "pathspec", marker = "extra == 'sweep'" },
     { name = "portalocker" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "pypandoc", marker = "extra == 'all'" },
+    { name = "pypandoc", marker = "extra == 'connectors'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "python-dotenv" },
