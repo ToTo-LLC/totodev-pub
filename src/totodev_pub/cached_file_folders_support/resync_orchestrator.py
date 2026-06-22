@@ -86,7 +86,8 @@ class ResyncOrchestrator:
             upsert_fail_policy: "RETAIN_OLD", "DELETE_OLD", or "FAIL_FAST"
             max_concurrency: Default concurrency limit
             throttle_queue_limits: Per-queue concurrency limits (e.g., {"gmail": 3})
-            change_receiver: Callback(notice, proxy) for change notifications
+            change_receiver: Callback(notice, proxy) for change notifications. May be sync or
+                async; see `ChangeNotice` ("Synchronous vs. async receivers") for guidance.
             record_sweep_timestamp: Whether to record sweep start time
             retry_count: Number of retry attempts for bulk_sync() (default: 0, no retries)
             expand_nested: Whether to auto-expand nested proxies in bulk_sync() (default: True)

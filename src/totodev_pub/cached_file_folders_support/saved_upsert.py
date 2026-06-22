@@ -146,7 +146,8 @@ class SavedUpsert:
             cache: CachedFileFolders instance.
             grouping_key: Grouping key for the upsert (defaults to captured grouping).
             force: Whether to bypass change detection.
-            change_receiver: Optional callback identical to cache.upsert_file.
+            change_receiver: Optional callback identical to cache.upsert_file. May be sync or
+                async; see `ChangeNotice` ("Synchronous vs. async receivers") for guidance.
             preserve_slave_dir: Override whether slave contents are copied (defaults to capture-time flag).
             delete_after: Delete saved artifacts after upsert (defaults to True).
         """

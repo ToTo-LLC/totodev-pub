@@ -309,7 +309,9 @@ class EmailFolderSynchronizer:
         Args:
             change_receiver: Optional callback for change notifications.
                            Called with (ChangeNotice, Optional[FileProxyBase])
-                           for each change detected.
+                           for each change detected. May be sync or async; see
+                           `ChangeNotice` ("Synchronous vs. async receivers") for
+                           guidance on choosing.
             force_full: Force full sweep regardless of timing
             save_sync_timing: If True, save timing info to filesystem after sync.
                             Raises error if sync_info is not bound to a file.

@@ -52,6 +52,33 @@ class ChangeNotice(BaseModel):
     NOTE: The old CachedFileRef is only guaranteed to exist while any change_receiver
     callback provided to the cache is executing. Once the callback returns, the files
     referenced by `old` may already be deleted even though the structure remains.
+
+    Synchronous vs. async receivers -- which to use:
+    ================================================
+    A change_receiver may be a plain `def` or an `async def`; the cache detects
+    which and calls it accordingly. Choose based on what the handler must do:
+
+    - Use `async def` when the handler must `await` something. THE decisive case
+      is fetching content from the `proxy`: `FileProxyBase.materialize()` and
+      `peek_metadata()` are coroutines, so ONLY an async receiver can call them.
+      This is unavoidable for the index/summarize pattern on a TRUNCATE-recommended,
+      peek-only entry: the body was never downloaded, so to index or summarize it
+      the receiver must `await proxy.materialize()` to pull the bytes on demand
+      (then let the cache discard them). A sync receiver runs inline on the
+      event-loop thread and structurally cannot await, so for this case async is
+      the only option.
+
+    - Use a plain `def` for fast, fully synchronous work -- updating stats,
+      logging, writing a small sidecar. It is slightly simpler and is what the
+      bundled examples use.
+
+    Beyond that hard requirement, async only *helps* when the handler spends real
+    time awaiting work that runs off the event-loop thread (remote/network, disk,
+    subprocess, or a thread/process pool via `asyncio.to_thread`); then the sweep's
+    other concurrent upserts proceed meanwhile. Marking a handler `async` does NOT
+    speed up blocking or CPU-bound work that never awaits -- that still stalls the
+    loop, so offload it explicitly. Either way, do the work inline: the staged
+    `old` artifacts and the `proxy` are only valid for the duration of the callback.
     
     Metadata Access:
     ================

@@ -250,7 +250,11 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncSyncSession:
-    """Async session object for managing file resynchronization operations with concurrent processing."""
+    """Async session object for managing file resynchronization operations with concurrent processing.
+
+    A `change_receiver` may be sync or async; see `ChangeNotice` ("Synchronous vs. async
+    receivers") for guidance on choosing.
+    """
 
     def __init__(self, cache: CacheOperations, session_state, auto_delete: bool = True, upsert_fail_policy: str = "RETAIN_OLD", throttle_queue_limits: Optional[Dict[str, int]] = None, change_receiver: Optional[Callable[[ChangeNotice, Optional[FileProxyBase]], None]] = None):
         self.cache = cache

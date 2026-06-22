@@ -371,7 +371,8 @@ class SimpleCacheORM:
           its class name is used to locate a registered binding.
         - infer_params: When True, fills missing required params from `source` fields.
         - force: When True, allows overwriting existing files.
-        - change_receiver: Optional callable invoked with (source, proxy) after write.
+        - change_receiver: Optional callable forwarded to the underlying cache upsert. May be
+          sync or async; see `ChangeNotice` ("Synchronous vs. async receivers") for guidance.
 
         Raises:
         - ValueError if required parameters are still missing after inference/defaults.

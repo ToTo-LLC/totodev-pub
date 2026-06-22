@@ -711,6 +711,11 @@ class CachedFileFolders:
 
         Old artifacts from UPDATEs are retained only for the duration of a `change_receiver` callback.
 
+        `change_receiver` may be a sync `def` or `async def`. To `await` proxy content
+        (`proxy.materialize()` / `peek_metadata()`) -- e.g. to index/summarize a TRUNCATE'd,
+        peek-only entry -- it MUST be `async`. See `ChangeNotice` ("Synchronous vs. async
+        receivers") for the full rationale.
+
         Tip: if the callback needs to reinsert the staged artifact later, see the
         `SavedUpsert` class in `totodev_pub.cached_file_folders_support.saved_upsert`.
         """
@@ -1029,7 +1034,11 @@ class CachedFileFolders:
     ) -> Optional[ChangeNotice]:
         """Delete file and slave directory. Returns ChangeNotice or None if not found.
         
-        Old files are retained only while any change_receiver callback executes."""
+        Old files are retained only while any change_receiver callback executes.
+
+        `change_receiver` may be a sync `def` or `async def`; use `async` when the handler
+        must `await` (e.g. proxy content or off-thread I/O). See `ChangeNotice`
+        ("Synchronous vs. async receivers") for guidance."""
         # TIP: use SavedUpsert.from_change_notice inside change receivers when you need to
         # keep the staged file for a later upsert rather than allowing automatic cleanup.
         # PASSIVE CLEANUP: Delegate to storage manager global policy
@@ -1669,7 +1678,10 @@ class CachedFileFolders:
         
         upsert_fail_policy: "RETAIN_OLD" (default), "DELETE_OLD", or "FAIL_FAST"
         throttle_queue_limits: Optional dict mapping queue names to concurrency limits
-        change_receiver: Optional callback(notice, proxy) for change notifications
+        change_receiver: Optional callback(notice, proxy) for change notifications. May be a
+            sync `def` or `async def`. To `await` proxy content (`proxy.materialize()` /
+            `peek_metadata()`) -- e.g. to index/summarize a TRUNCATE'd, peek-only entry -- it
+            MUST be `async`. See `ChangeNotice` ("Synchronous vs. async receivers") for guidance.
         """
         from .cached_file_folders_support.resync_orchestrator import ResyncOrchestrator
         
@@ -1703,6 +1715,11 @@ class CachedFileFolders:
         
         **LIMITATION**: Clears the `old` CachedFileRef from returned notices. Use resync_sweep() if you need old file access.
         Retries failed files up to retry_count times. Total attempts = retry_count + 1.
+
+        `change_receiver` may be a sync `def` or `async def`. To `await` proxy content
+        (`proxy.materialize()` / `peek_metadata()`) -- e.g. to index/summarize a TRUNCATE'd,
+        peek-only entry -- it MUST be `async`. See `ChangeNotice` ("Synchronous vs. async
+        receivers") for the full rationale.
         """
         from .cached_file_folders_support.resync_orchestrator import ResyncOrchestrator
         

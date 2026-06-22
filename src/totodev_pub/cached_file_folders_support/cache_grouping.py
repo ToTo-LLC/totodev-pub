@@ -259,6 +259,8 @@ class CacheGrouping:
         """Start a resync sweep session with concurrent file processing and mark-and-sweep cleanup.
         
         See CachedFileFolders.resync_sweep() for details on parameters and usage.
+        `change_receiver` may be sync or async; see `ChangeNotice` ("Synchronous vs. async
+        receivers") for guidance on choosing.
         """
         async with self._parent.resync_sweep(
             self._grouping_key, auto_delete, 
@@ -276,6 +278,8 @@ class CacheGrouping:
         """Bulk synchronization with concurrent processing and automatic retries.
         
         See CachedFileFolders.resync_bulk() for details on parameters and usage.
+        `change_receiver` may be sync or async; see `ChangeNotice` ("Synchronous vs. async
+        receivers") for guidance on choosing.
         """
         return await self._parent.resync_bulk(
             file_proxies, self._grouping_key, auto_delete,

@@ -195,6 +195,10 @@ class CacheGroupingFileProxyFactory:
         If copy_slave_dir is True and the proxy passed back to the receiver is a
         CacheGroupingFileProxy with a source slave_dir, the contents are copied
         into the new/current file's slave_dir (notice.cur.slave_dir_path).
+
+        The returned receiver is synchronous: it only copies slave-dir contents and never
+        needs to `await` anything. (See `ChangeNotice` ("Synchronous vs. async receivers")
+        for when a custom receiver should instead be async.)
         """
         def _receiver(notice: ChangeNotice, proxy: Optional[FileProxyBase]) -> None:
             if not copy_slave_dir or proxy is None:
