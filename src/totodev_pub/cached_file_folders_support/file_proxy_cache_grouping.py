@@ -31,7 +31,7 @@ from typing import Callable, Generator, Iterator, List, Optional
 import os
 import shutil
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 from .cached_file_ref import CachedFileRef  # type: ignore
 from .cache_operations_protocol import ChangeNotice  # type: ignore
 from .cache_grouping import CacheGrouping
@@ -74,20 +74,35 @@ class CacheGroupingFileProxy(FileProxyBase):
         shutil.copy2(self._source_file_path, target_path)
         self._was_deployed = True
 
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Rapid comparison using size and mtime between source file and the provided path.
         """
         try:
             src_stat = os.stat(self._source_file_path)
             dst_stat = os.stat(other_fpath)
-            return (src_stat.st_size == dst_stat.st_size) and (src_stat.st_mtime == dst_stat.st_mtime)
+            # For a truncated entry the on-disk size is zero but the mtime is still
+            # authoritative; use the recorded size when supplied.
+            dst_size = dst_stat.st_size if override_byte_count is None else override_byte_count
+            return (src_stat.st_size == dst_size) and (src_stat.st_mtime == dst_stat.st_mtime)
         except (OSError, IOError):
             return None
 
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:
         # Already local; nothing to fetch.
         return True
+
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        # The source is an on-disk file in another grouping; stat it cheaply.
+        try:
+            st = os.stat(self._source_file_path)
+            return OriginMetadata(size=st.st_size, mtime=st.st_mtime)
+        except (OSError, IOError):
+            return None
+
+    def retrieval_hint(self) -> dict:
+        # Record the source grouping file location for potential re-cloning.
+        return {"source": "cache_grouping", "source_file_path": str(self._source_file_path)}
 
     def get_context_info(self) -> dict:
         return {

@@ -160,6 +160,18 @@ All proxies implement the `FileProxyBase` interface, which defines four key meth
 
 These four methods are all the cache needs to work with any data source.
 
+### Optional Extensions (Body Retention and Truncated Entries)
+
+`FileProxyBase` also provides three optional, safe-defaulted methods that support
+body-retention tiering (keeping a file's metadata while truncating its body). You
+never need to override them, but they let a proxy express richer intent and metadata:
+
+- **`local_retention_recommendation()`** - Recommend how much of this file the cache should retain locally: `KEEP` (default, keep the body), `TRUNCATE` (record metadata only, no body), or `EXCLUDE` (don't cache at all). A recommendation only; the cache has final say.
+- **`peek_metadata()`** (async) - Cheaply probe source-side `size`/`mtime`/`origin_version` *without* downloading. Returns `None` when nothing is cheaply known (the cache then falls back to materialize-and-compare), mirroring `looks_same()`'s `Optional` philosophy.
+- **`retrieval_hint()`** - Return an informational blob (origin path, URL, message id, etc.) describing how the original could be re-fetched later. It facilitates, but does not implement, re-materialization.
+
+See `docs/truncated-entries.md` for the full design direction.
+
 ---
 
 ## Concrete Examples

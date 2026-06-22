@@ -35,9 +35,69 @@ See concrete implementations such as `LocalFileProxy` in `file_proxy_local_file.
 for reference patterns when authoring new proxies.
 """
 
-from typing import Optional, Dict, Any, Generator
+from typing import Optional, Dict, Any, Generator, NamedTuple
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
+
+
+class LocalRetentionRecommendation(Enum):
+    """A proxy's recommendation for how much of a file to retain locally.
+
+    The three members are points on a single axis -- how much of the file the
+    cache keeps locally: the full body, only metadata (truncated), or nothing at
+    all. The members are imperative *advice*: the type is a recommendation only,
+    so the cache (CachedFileFolders) has the final say and may override it via its
+    own policy. Derived classes can implement simple, explicit rules (based on
+    size, type, path, etc.) to express intent.
+
+    The members map to resulting entry states: KEEP -> a full entry, TRUNCATE ->
+    a truncated entry (zero-byte file plus a metadata sidecar), EXCLUDE -> no
+    entry. Here the "body" is the file's content bytes, as distinguished from the
+    small sidecar of metadata the cache can keep when the body is truncated away.
+
+    Members:
+        KEEP: Fetch the body and keep it on disk in full. This is the default and
+            matches the library's long-standing behavior.
+        TRUNCATE: Record authoritative metadata (size/mtime, optionally a hash)
+            but do not keep the body. The cached file is truncated to zero bytes
+            and a sidecar records the details. See the truncated-entries design notes.
+        EXCLUDE: Do not bring the file into the cache at all. EXCLUDE is a
+            sweep-*membership* signal honored at the driver layer, not inside the
+            per-file upsert path: resync_bulk filters EXCLUDE proxies out of the
+            stream before upsert (so any previously cached copy falls to the
+            sweep's deletion pass), while resync_sweep leaves it to the caller
+            (docstring guidance) and it is never acted on inside upsert_file().
+            It exists to make an otherwise-implicit "skip this file" decision
+            explicit and testable.
+    """
+
+    KEEP = "keep"
+    TRUNCATE = "truncate"
+    EXCLUDE = "exclude"
+
+
+class OriginMetadata(NamedTuple):
+    """Cheap, source-side facts about a file, returned by `peek_metadata()`.
+
+    All fields are optional because different sources can cheaply learn different
+    things: a local file knows size and mtime, an object store may only offer an
+    ETag, a generated payload may know nothing until it is materialized. A proxy
+    returns whatever it can determine cheaply and leaves the rest as None.
+
+    Fields:
+        size: Size in bytes, if cheaply known.
+        mtime: Source modification time as a POSIX timestamp, if cheaply known.
+        origin_version: An opaque, cheaply-available source-side version token such
+            as an ETag or version id. Compare it; never interpret it. This is NEVER
+            a locally computed hash (computing a hash requires the bytes, which
+            defeats the purpose of a cheap peek). Many sources have no such token
+            and leave it None.
+    """
+
+    size: Optional[int] = None
+    mtime: Optional[float] = None
+    origin_version: Optional[str] = None
 
 
 class FileProxyBase(ABC):
@@ -98,7 +158,7 @@ class FileProxyBase(ABC):
         raise NotImplementedError("Not implemented")
 
     @abstractmethod
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Provides a quick (but not perfect) comparison of the file proxy with another file.  
         For example, it may look at the size and modify time of the file and conclude they are the same.
@@ -121,6 +181,28 @@ class FileProxyBase(ABC):
         IMPORTANT: Even if your looks_same() implementation doesn't use mtime, you should still
         preserve mtime in deploy() because the cache system relies on it for other operations
         (sweep safety, change detection, concurrency control, etc.).
+
+        Args:
+            other_fpath: Path to the existing cached file to compare against.
+            override_byte_count: Optional substitute for the on-disk size of
+                `other_fpath`. When the cache compares against a *truncated* entry,
+                the file at `other_fpath` has been shrunk to zero bytes while its
+                mtime is preserved as the recorded source mtime. In that case the
+                cache passes the recorded (pre-truncation) size here so that
+                size-based comparisons remain correct without materializing the
+                body -- the mtime read from disk is already authoritative, so size
+                is the only input that needs substituting. When None (the default),
+                implementations use the actual on-disk size.
+
+                Notes on applicability:
+                - Proxies that compare by size (and/or mtime) should honor this and
+                  use it in place of `os.stat(other_fpath).st_size`.
+                - Proxies that compare by *content* rather than size (e.g. email
+                  proxies that parse an injected header) cannot be compared cheaply
+                  while the body is truncated; they may ignore this argument and
+                  will naturally report a difference, prompting re-materialization.
+                - It is irrelevant under `use_xxhash=True`, where comparison hashes
+                  bytes that a truncated entry does not have on disk.
         """
         raise NotImplementedError("Not implemented")
 
@@ -143,6 +225,14 @@ class FileProxyBase(ABC):
         deploy process should result in the temp file being deleted.
         On this subject, it's worth mentioning that CachedFileFolders always
         offers a temporary directory for materialization files.
+
+        TIP ON mtime: The source modification time is often only available here
+        (e.g. a remote API returns the file's modified date when you fetch it),
+        not later in deploy(). If a meaningful source timestamp is available,
+        capture it during materialization (store it on the instance, or stamp
+        the temp file) so deploy() can apply it to the deployed file. The
+        authoritative mtime guarantee still belongs to deploy() because that is
+        the file the cache observes—see deploy() for details.
         """
         raise NotImplementedError("Not implemented")
 
@@ -155,6 +245,66 @@ class FileProxyBase(ABC):
         """
         raise NotImplementedError("Not implemented")
     
+    def local_retention_recommendation(self) -> LocalRetentionRecommendation:
+        """Recommend how much of this file the cache should retain locally.
+
+        Returns one of:
+        - `LocalRetentionRecommendation.KEEP` (default): fetch and keep the body.
+        - `LocalRetentionRecommendation.TRUNCATE`: record metadata only, no body.
+        - `LocalRetentionRecommendation.EXCLUDE`: do not bring the file into the cache.
+
+        This is a recommendation; the cache may override it with its own policy.
+        Override this in derived classes to express simple, explicit rules (for
+        example: exclude files over a size threshold, or truncate everything under an
+        archive path). The default keeps the library's historical behavior.
+
+        IMPORTANT (EXCLUDE semantics): EXCLUDE is a sweep-membership signal honored
+        at the driver layer, not inside the per-file upsert path. resync_bulk filters
+        EXCLUDE proxies out before upsert, so a previously cached entry that now
+        recommends EXCLUDE is left untouched and is swept (deleted) on the next sweep
+        just like any untouched entry. resync_sweep does not act on it automatically
+        (the caller decides), and it is never acted on inside upsert_file().
+        """
+        return LocalRetentionRecommendation.KEEP
+
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        """Cheaply probe source-side metadata (size/mtime/origin_version) without materializing.
+
+        This is the *cheap* metadata tier. It must not download or generate the
+        file. Return an `OriginMetadata` with whatever is cheaply known (any field
+        may be None), or return `None` to indicate "nothing is cheaply known" - in
+        which case the cache falls back to the normal materialize-and-compare path.
+        This mirrors the `looks_same() -> Optional[bool]` philosophy where None
+        means "I can't tell; do it the expensive way."
+
+        Implementations that perform I/O (for example, a metadata API call) should
+        memoize the result: proxies are short-lived, single-use objects and
+        `peek_metadata()` may be consulted more than once during a sync.
+
+        The base implementation returns None. It deliberately does NOT materialize
+        the file to measure it; when a truncated entry must be produced for a proxy
+        that cannot peek cheaply, the cache is responsible for measuring the bytes it
+        already materializes to a temporary location.
+
+        Relationship to `looks_same()`: `looks_same()` remains the authoritative
+        cheap comparison hook today. A future base-class `looks_same()` expressed in
+        terms of `peek_metadata()` is anticipated but not implemented here.
+        """
+        return None
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        """Return an arbitrary, JSON-serializable blob describing how the original could be re-fetched.
+
+        This is purely informational. It does NOT implement re-materialization; it
+        merely *facilitates* it by recording where the file came from so future
+        tooling (or a human) could reconstruct a proxy and re-fetch the bytes. It is
+        the natural place to stash an origin path, URL, message id, drive id, etc.
+
+        The default returns the proxy's own reference path. Override to provide
+        richer, source-specific retrieval information.
+        """
+        return {"ref_path": self.ref_path()}
+
     def nested_proxies(self) -> Generator['FileProxyBase', None, None]:
         """
         Yield nested file proxies (e.g., email attachments, archive contents).

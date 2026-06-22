@@ -261,7 +261,7 @@ import requests
 import fnmatch
 import logging
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 
 
 class _SharePointGraphApiClient:
@@ -1287,7 +1287,31 @@ class SharepointFileProxy(FileProxyBase):
         # Try to fetch metadata asynchronously
         return await self._fetch_file_metadata_async()
 
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        """Cheaply probe SharePoint metadata (size + last-modified) without downloading.
+
+        This unifies the historical "call ensure_metadata_available(), then
+        looks_same()" two-step: it fetches metadata via the Graph API (which is
+        far cheaper than downloading the file) and reports size and mtime. The
+        underlying fetch is cached on the instance, so repeat calls are cheap.
+        Returns None if metadata cannot be obtained.
+        """
+        await self.ensure_metadata_available()
+        if self.file_size is None and self.last_modified is None:
+            return None
+        mtime = self.last_modified.timestamp() if self.last_modified is not None else None
+        return OriginMetadata(size=self.file_size, mtime=mtime)
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        """Record the SharePoint coordinates needed to re-fetch this file later."""
+        return {
+            "source": "sharepoint",
+            "site_id": self.site_id,
+            "drive_id": self.drive_id,
+            "file_path": self.file_path,
+        }
+
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Check if this SharePoint file is the same as the other file using file size and modify time.
         Returns:
@@ -1297,12 +1321,15 @@ class SharepointFileProxy(FileProxyBase):
             # If we have cached file info, use that for comparison
             if self.file_size is not None and self.last_modified is not None:
                 other_stat = os.stat(other_fpath)
-                return (self.file_size == other_stat.st_size and 
+                # For a truncated entry the on-disk size is zero but the mtime is
+                # still authoritative; use the recorded size when supplied.
+                other_size = other_stat.st_size if override_byte_count is None else override_byte_count
+                return (self.file_size == other_size and
                         self.last_modified.timestamp() == other_stat.st_mtime)
-            
+
             # If we don't have metadata, return None to let the system handle it
             return None
-                
+
         except (OSError, IOError):
             return None
 

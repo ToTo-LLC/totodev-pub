@@ -41,8 +41,13 @@ class ChangeNotice(BaseModel):
     | Change Type | cur (CachedFileRef) | old (CachedFileRef) |
     |-------------|---------------------|---------------------|
     | INSERT      | Present             | None                |
-    | UPDATE      | Present             | Present             |
+    | UPDATE      | Present             | Present or None     |
     | DELETE      | None                | Present             |
+
+    UPDATE with old=None represents an in-place change (e.g. a truncated entry whose
+    sidecar was rewritten; the body was never staged, so there is no old artifact to
+    hand to the receiver). UPDATE with old Present is the standard case where the old
+    file is staged for the duration of the change_receiver callback.
 
     NOTE: The old CachedFileRef is only guaranteed to exist while any change_receiver
     callback provided to the cache is executing. Once the callback returns, the files
@@ -132,8 +137,9 @@ class ChangeNotice(BaseModel):
             if self.cur is not None:
                 raise ValueError("DELETE should not have cur")
         elif self.change_type == ChangeType.UPDATE:
-            if self.cur is None or self.old is None:
-                raise ValueError("UPDATE requires both cur and old")
+            if self.cur is None:
+                raise ValueError("UPDATE requires cur")
+            # old may be None for in-place updates (e.g. truncated-entry sidecar rewrite)
         
         # Validate ref_path and grouping_key match when both exist
         if self.cur and self.old:

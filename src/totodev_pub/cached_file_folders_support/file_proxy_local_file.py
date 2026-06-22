@@ -88,7 +88,7 @@ from pathlib import Path
 import shutil
 import os
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 
 
 class LocalFileProxy(FileProxyBase):
@@ -130,17 +130,33 @@ class LocalFileProxy(FileProxyBase):
         if self._delete_after_deploy and os.path.exists(self._local_path):
             os.remove(self._local_path)
 
-    def looks_same(self, other_fpath: str) -> Optional[bool]:
+    def looks_same(self, other_fpath: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         try:
             local_stat = os.stat(self._local_path)
             other_stat = os.stat(other_fpath)
-            return (local_stat.st_size == other_stat.st_size and local_stat.st_mtime == other_stat.st_mtime)
+            # For a truncated entry the on-disk size is zero but the mtime is still
+            # authoritative; use the recorded size when supplied.
+            other_size = other_stat.st_size if override_byte_count is None else override_byte_count
+            return (local_stat.st_size == other_size and local_stat.st_mtime == other_stat.st_mtime)
         except (OSError, IOError):
             return None
 
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:
         # LocalFileProxy doesn't need materialization - file already exists locally
         return True
+
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        # Local files expose size and mtime cheaply via a single stat() call.
+        try:
+            st = os.stat(self._local_path)
+            return OriginMetadata(size=st.st_size, mtime=st.st_mtime)
+        except (OSError, IOError):
+            return None
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        # The origin is a local filesystem path; record it so the file can be
+        # re-fetched later (subject to the file still existing).
+        return {"path": self._local_path}
 
     def get_context_info(self) -> Dict[str, Any]:
         return {

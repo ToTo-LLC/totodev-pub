@@ -46,7 +46,7 @@ class AsyncUpsertOperation:
                 self.existing_file_ref,
                 self.force,
             )
-            return self.cache._finalize_change_notice(
+            return await self.cache._finalize_change_notice(
                 notice,
                 self.session.change_receiver,
                 self.source_file,
@@ -87,7 +87,7 @@ class AsyncDeleteOperation:
             self.grouping_key,
             self.existing_file_ref,
         )
-        return self.cache._finalize_change_notice(
+        return await self.cache._finalize_change_notice(
             notice,
             self.session.change_receiver,
             None,

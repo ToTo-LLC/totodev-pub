@@ -64,10 +64,12 @@ This implementation:
 from typing import Optional, Dict, Any, Iterator, List, Literal
 from datetime import datetime
 from pathlib import Path
+import asyncio
 import base64
 import json
 import hashlib
 import logging
+import threading
 import time
 import traceback
 from email import message_from_bytes
@@ -92,7 +94,7 @@ except ImportError:
         extra="connectors",
     )
 
-from .file_proxy_base import FileProxyBase
+from .file_proxy_base import FileProxyBase, OriginMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -597,6 +599,9 @@ class _GmailDataHandler:
         self._modified_email_bytes: Optional[bytes] = None
         self._attachments: Optional[List[Dict[str, Any]]] = None
         self._fetch_attempted = False
+        # Guards the lazy fetch so the memoization stays atomic when materialize()
+        # runs the handler on worker threads (see the proxies' materialize()).
+        self._fetch_lock = threading.Lock()
     
     def _fetch_email_if_needed(self) -> bool:
         """
@@ -608,34 +613,39 @@ class _GmailDataHandler:
         if self._fetch_attempted:
             return self._raw_email_bytes is not None
         
-        self._fetch_attempted = True
-        
-        try:
-            self._raw_email_bytes = self._api_client.fetch_email_mime(self.msg_id)
-            self._parsed_mime = message_from_bytes(self._raw_email_bytes)
-            self._process_attachments()  # Extract and replace with placeholders
+        with self._fetch_lock:
+            # Double-checked: another thread may have completed the fetch while we waited.
+            if self._fetch_attempted:
+                return self._raw_email_bytes is not None
             
-            logger.debug(f"Successfully fetched email {self.msg_id} ({len(self._raw_email_bytes)} bytes, "
-                        f"{len(self._attachments) if self._attachments else 0} attachments)")
-            return True
+            self._fetch_attempted = True
             
-        except HttpError as e:
-            # Log detailed API error but return False to indicate failure
-            logger.error(
-                f"Failed to fetch email from Gmail API: {e}. "
-                f"Message ID: {self.msg_id}, User: {self.user_email}",
-                exc_info=True
-            )
-            return False
-            
-        except Exception as e:
-            # Unexpected error during parsing - log and return False
-            logger.error(
-                f"Unexpected error processing email {self.msg_id}: {e}. "
-                f"Content size: {len(self._raw_email_bytes) if self._raw_email_bytes else 0} bytes",
-                exc_info=True
-            )
-            return False
+            try:
+                self._raw_email_bytes = self._api_client.fetch_email_mime(self.msg_id)
+                self._parsed_mime = message_from_bytes(self._raw_email_bytes)
+                self._process_attachments()  # Extract and replace with placeholders
+                
+                logger.debug(f"Successfully fetched email {self.msg_id} ({len(self._raw_email_bytes)} bytes, "
+                            f"{len(self._attachments) if self._attachments else 0} attachments)")
+                return True
+                
+            except HttpError as e:
+                # Log detailed API error but return False to indicate failure
+                logger.error(
+                    f"Failed to fetch email from Gmail API: {e}. "
+                    f"Message ID: {self.msg_id}, User: {self.user_email}",
+                    exc_info=True
+                )
+                return False
+                
+            except Exception as e:
+                # Unexpected error during parsing - log and return False
+                logger.error(
+                    f"Unexpected error processing email {self.msg_id}: {e}. "
+                    f"Content size: {len(self._raw_email_bytes) if self._raw_email_bytes else 0} bytes",
+                    exc_info=True
+                )
+                return False
     
     def _process_attachments(self):
         """
@@ -1243,9 +1253,14 @@ class GmailEmailProxy(FileProxyBase):
             )
             raise
     
-    def looks_same(self, cached_file_path: str) -> Optional[bool]:
+    def looks_same(self, cached_file_path: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Quick comparison: file exists + label list matches.
+
+        Note: this proxy compares by parsing an injected header rather than by size,
+        so `override_byte_count` does not apply. A truncated (zero-byte) cached file
+        has no header to parse, so it will report a difference and trigger
+        re-materialization -- which is the correct outcome for label-change detection.
         
         Gmail emails are immutable in content, but labels can be changed by users.
         Since cached_file_path is derived from ref_path() which includes the msg_id hash,
@@ -1311,8 +1326,12 @@ class GmailEmailProxy(FileProxyBase):
         
         Returns True if successful, False otherwise. Uses lazy loading from shared handler.
         """
+        # The handler does blocking, synchronous network I/O (and rate-limit sleeps).
+        # Pro: running it on a worker thread frees the event loop, so other downloads
+        # progress in parallel. Con: costs a thread-pool thread per call and requires
+        # the shared handler's fetch to be thread-safe (see _fetch_lock).
         try:
-            return self._handler.get_email_body() is not None
+            return await asyncio.to_thread(self._handler.get_email_body) is not None
         except Exception as e:
             logger.error(f"Failed to materialize email {self._msg_id}: {e}")
             return False
@@ -1326,6 +1345,15 @@ class GmailEmailProxy(FileProxyBase):
             'receiver': self._receiver_email, 'received': self._received_datetime.isoformat(),
             'ref_path': self._ref_path
         }
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        """Record the Gmail message coordinates needed to re-fetch this email later.
+
+        The serialized .eml size is not known until the body is fetched and the
+        placeholder-rewriting runs, so peek_metadata() is left at its default
+        (None) for emails; this hint still records how to retrieve the original.
+        """
+        return {"source": "gmail", "kind": "email", "msg_id": self._msg_id, "thread_id": self._thread_id}
     
     def nested_proxies(self) -> Iterator[FileProxyBase]:
         """
@@ -1547,14 +1575,18 @@ class GmailAttachmentProxy(FileProxyBase):
         (Path(target_dir) / self.file_name()).write_bytes(content)
         logger.debug(f"Deployed attachment to {Path(target_dir) / self.file_name()}")
     
-    def looks_same(self, cached_file_path: str) -> Optional[bool]:
+    def looks_same(self, cached_file_path: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
         """
         Quick comparison using file size.
-        
+
         Attachments are immutable when parent email is immutable, so size match is reliable.
         """
         cached_path = Path(cached_file_path)
-        return cached_path.stat().st_size == self._size_bytes if cached_path.exists() else False
+        if not cached_path.exists():
+            return False
+        # For a truncated entry the on-disk size is zero; use the recorded size when supplied.
+        cached_size = cached_path.stat().st_size if override_byte_count is None else override_byte_count
+        return cached_size == self._size_bytes
     
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:
         """
@@ -1562,12 +1594,33 @@ class GmailAttachmentProxy(FileProxyBase):
         
         Returns True if successful, False otherwise. Uses lazy loading from shared handler.
         """
+        # On a cache miss the handler does blocking, synchronous network I/O (and
+        # rate-limit sleeps). Pro: running it on a worker thread frees the event loop
+        # for parallel downloads. Con: costs a thread-pool thread per call and requires
+        # the shared handler's fetch to be thread-safe (see _fetch_lock).
         try:
-            return self._handler.get_attachment(self._sequence_number) is not None
+            return await asyncio.to_thread(self._handler.get_attachment, self._sequence_number) is not None
         except Exception as e:
             logger.error(f"Failed to materialize attachment {self._sequence_number} for {self._msg_id}: {e}")
             return False
     
+    async def peek_metadata(self) -> Optional[OriginMetadata]:
+        """Report the attachment size cheaply (known from email metadata).
+
+        Attachment size is provided by the Gmail metadata without downloading the
+        bytes. mtime is left None (attachments don't carry an independent
+        modification time; the parent email's received time is not the file's).
+        """
+        return OriginMetadata(size=self._size_bytes)
+
+    def retrieval_hint(self) -> Dict[str, Any]:
+        return {
+            "source": "gmail",
+            "kind": "attachment",
+            "msg_id": self._msg_id,
+            "sequence_number": self._sequence_number,
+        }
+
     def get_context_info(self) -> Dict[str, Any]:
         """Return safe logging context (no sensitive data)."""
         return {
@@ -1648,8 +1701,8 @@ class GmailEmailErrorProxy(FileProxyBase):
         target_path.write_text(json.dumps(error_doc, indent=2, default=str), encoding='utf-8')
         logger.debug(f"Deployed error placeholder to {target_path}")
     
-    def looks_same(self, cached_file_path: str) -> Optional[bool]:
-        """Error files should be re-attempted on next sync."""
+    def looks_same(self, cached_file_path: str, override_byte_count: Optional[int] = None) -> Optional[bool]:
+        """Error files should be re-attempted on next sync (override_byte_count is ignored)."""
         return False  # Always consider different to trigger retry
     
     async def materialize(self, blocking_secs: float, temp_dir: Optional[Path] = None) -> bool:

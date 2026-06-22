@@ -2,10 +2,15 @@
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
 """
-CachedFileRef - Data structure for cached file references
+CachedFileRef is the per-file handle returned by CachedFileFolders operations.
 
-A lightweight data class representing a file in the cache, with its reference path,
-grouping key, filesystem path, and associated slave directory.
+It carries the two filesystem locations that define every cache entry — the body file
+(file_path) and its companion slave directory (slave_dir_path) — together with the
+logical identity (ref_path, grouping_key) used to look it up. Callers receive it
+inside ChangeNotice (on insert/update/delete) and CachedFileFolders.find_file().
+
+The metadata(), event_log(), is_truncated(), and truncation_info() accessors are thin
+conveniences over the slave directory; none of them require network I/O.
 """
 
 from pathlib import Path
@@ -21,20 +26,20 @@ GroupingKey = Sequence[str]
 
 __all__ = ["CachedFileRef", "GroupingKey"]
 
+# Lazy import to avoid circular imports at module level
+def _truncation_support():
+    from totodev_pub.cached_file_folders_support import truncation_support
+    return truncation_support
+
 
 class CachedFileRef(BaseModel):
-    """
-    A class that represents a record of a file in the cached files folders.
-    
-    Use the metadata() method to access an optional standardized metadata file in the slave
-    directory for tracking processing state and other per-file information. This is completely
-    optional - zero cost if not used.
-    """
+    """A handle to a single entry in a CachedFileFolders cache."""
     ref_path: str # reference path - the original location/identifier of the file before caching
     grouping_key: Optional[GroupingKey] = None
     file_path: Path # actual file on the local filesystem
     slave_dir_path: Path # directory associated with this file for logs, parsing, etc.
     _metadata_filename: str = PrivateAttr(default="metadata.yaml")
+    _is_truncated_memo: Optional[bool] = PrivateAttr(default=None)
     
     def metadata(self, 
                  change_detection_secs: int = 300,
@@ -54,26 +59,10 @@ class CachedFileRef(BaseModel):
         )
     
     def event_log(self, subdir: str = "events") -> PrimitiveEventLog:
-        """
-        Get a PrimitiveEventLog for tracking processing stages of this cached file.
-        
-        Args:
-            subdir: Subdirectory within slave_dir for event log files.
-                   If empty string, uses slave_dir_path directly.
-                   Default: "events"
-        
-        Returns:
-            PrimitiveEventLog instance (created with force=False)
-            
-        Example:
-            # Track document processing stages
-            log = cached_file.event_log()
-            log.create_event("PROCESSING", "OCR-STARTED")
-            log.create_event("PROCESSING", "OCR-COMPLETED", {"pages": 10})
-            
-            # Check current status
-            if log.has_event("PROCESSING") == "OCR-COMPLETED":
-                proceed_to_validation()
+        """Get a PrimitiveEventLog rooted in the slave directory.
+
+        Pass subdir="" to place event files directly in slave_dir_path rather than
+        the default "events" sub-folder.
         """
         if subdir:
             event_dir = self.slave_dir_path / subdir
@@ -81,4 +70,23 @@ class CachedFileRef(BaseModel):
             event_dir = self.slave_dir_path
         
         return PrimitiveEventLog(event_dir=event_dir, force=False)
+
+    def is_truncated(self) -> bool:
+        """Return True if this entry is truncated (zero-byte file with a valid sidecar).
+
+        The first call performs a disk check and memoises the result. Producing
+        code (in CachedFileFolders) pre-seeds `_is_truncated_memo` on INSERT/UPDATE
+        notices so that receivers never touch potentially-transient files.
+        """
+        if self._is_truncated_memo is not None:
+            return self._is_truncated_memo
+        ts = _truncation_support()
+        result = ts.is_truncated(self.file_path, self.slave_dir_path)
+        self._is_truncated_memo = result
+        return result
+
+    def truncation_info(self):
+        """Return the TruncationInfo sidecar for a truncated entry, or None for full entries."""
+        ts = _truncation_support()
+        return ts.read_truncation_info(self.slave_dir_path)
 
