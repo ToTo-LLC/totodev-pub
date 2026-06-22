@@ -1394,6 +1394,21 @@ class CachedFileFolders:
             is NOT restored here; restoration happens on the next sync when a proxy is supplied
             and the effective retention becomes KEEP.
 
+        Asymmetry when called from a change_receiver/event handler during a sync sweep:
+            The two directions behave differently, because enabling acts immediately while
+            disabling is deferred to a future sync.
+            - enabled=True works as expected: the body is zeroed in-call, so truncating an
+              entry from inside a handler takes effect right away. (If the entry is otherwise
+              untouched by the sweep, this mid-sweep size/mtime change is detected by the
+              orchestrator's optimistic-concurrency check, which then preserves it rather
+              than deleting it.)
+            - enabled=False does NOT restore the body during the current sweep. The handler
+              fires only after that entry's upsert has already resolved its retention (the
+              FORCE_TRUNCATE override was still in effect at that point), so clearing it here
+              merely updates the sidecar. The full body is re-materialized on the NEXT sync,
+              when the now-override-free entry resolves to KEEP and the truncated-vs-KEEP
+              mismatch triggers restoration.
+
         Raises ValueError if the entry does not exist.
         """
         grouping_key = self._storage.normalize_grouping_key(grouping_key)
