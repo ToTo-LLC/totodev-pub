@@ -385,3 +385,81 @@ def test_is_truncated_missing_sidecar_returns_false(tmp_path):
     file_path.touch()
 
     assert not ts.is_truncated(file_path, slave_dir)
+
+
+# ---------------------------------------------------------------------------
+# force_truncation() invoked during a bulk rescan (resync_sweep) event handler
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_force_truncation_during_sweep_on_touched_file(tmp_path):
+    """force_truncation() called from a change_receiver mid-sweep is handled gracefully.
+
+    The file being upserted is "touched" by the sweep, so it is exempt from
+    mark-and-sweep deletion. Forcing truncation on it from inside its own change
+    handler must complete without error and leave a valid truncated entry behind.
+    """
+    cache = _make_cache(tmp_path)
+    handler_errors = []
+
+    def receiver(notice: ChangeNotice, proxy):
+        # Errors raised here would be swallowed by the sweep's RETAIN_OLD policy,
+        # so capture them explicitly to assert the call was graceful.
+        try:
+            if notice.cur is not None and notice.cur.ref_path == "docs/a.txt":
+                cache.force_truncation("docs/a.txt")
+        except Exception as e:  # noqa: BLE001 - test wants to surface any failure
+            handler_errors.append(e)
+
+    async with cache.resync_sweep(change_receiver=receiver) as session:
+        session.upsert_file(
+            FileProxyDummy(ref_path="docs/a.txt", version_num=1, materialize_secs=0.0))
+
+    assert handler_errors == []
+    ref = cache.find_file("docs/a.txt")
+    assert ref is not None  # touched file survives the sweep
+    assert ref.file_path.stat().st_size == 0
+    assert ts.is_truncated(ref.file_path, ref.slave_dir_path)
+    sidecar = ts.read_truncation_info(ref.slave_dir_path)
+    assert sidecar is not None and sidecar.manual_override == "FORCE_TRUNCATE"
+
+
+@pytest.mark.asyncio
+async def test_force_truncation_during_sweep_preserves_untouched_file(tmp_path):
+    """force_truncation() on an *untouched* sweep-deletion candidate is graceful.
+
+    "docs/b.txt" is not re-upserted in the sweep, so it would normally be deleted by
+    mark-and-sweep. Forcing its truncation from inside another file's change handler
+    mutates it mid-sweep; the orchestrator's optimistic concurrency check (mtime/size
+    verification) then detects the change and PRESERVES the file instead of deleting
+    it. The end result is a valid truncated entry — no crash, no data loss.
+    """
+    cache = _make_cache(tmp_path)
+    await cache.upsert_file(
+        FileProxyDummy(ref_path="docs/a.txt", version_num=1, materialize_secs=0.0))
+    await cache.upsert_file(
+        FileProxyDummy(ref_path="docs/b.txt", version_num=1, materialize_secs=0.0))
+
+    handler_errors = []
+
+    def receiver(notice: ChangeNotice, proxy):
+        try:
+            if notice.cur is not None and notice.cur.ref_path == "docs/a.txt":
+                # b.txt is intentionally NOT re-upserted: absent this truncation it
+                # would be swept away on context exit.
+                cache.force_truncation("docs/b.txt")
+        except Exception as e:  # noqa: BLE001 - test wants to surface any failure
+            handler_errors.append(e)
+
+    async with cache.resync_sweep(change_receiver=receiver) as session:
+        # Re-upsert only a.txt (version bump → real change → handler fires).
+        session.upsert_file(
+            FileProxyDummy(ref_path="docs/a.txt", version_num=2, materialize_secs=0.0))
+
+    assert handler_errors == []
+    b = cache.find_file("docs/b.txt")
+    assert b is not None, "force-truncated untouched file must be preserved, not swept"
+    assert b.file_path.stat().st_size == 0
+    assert ts.is_truncated(b.file_path, b.slave_dir_path)
+    sidecar = ts.read_truncation_info(b.slave_dir_path)
+    assert sidecar is not None and sidecar.manual_override == "FORCE_TRUNCATE"
