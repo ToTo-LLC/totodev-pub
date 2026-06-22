@@ -62,6 +62,7 @@ Rationale:
 | `google-auth-httplib2` | Extra | `connectors` | Google transport integration for API clients. |
 | `msal` | Extra | `connectors` | Azure/MS365 token and auth flow support. |
 | `paramiko` | Extra | `connectors` | SSH plugin support in connection tests. |
+| `pypandoc` | Extra | `connectors` | Optional document-to-text conversion for the Zoho WorkDrive summarizer example (needs the `pandoc` system binary; degrades to a filepath-fallback summary when absent). |
 | `jinja2` | Extra | `llm` | Template rendering in LLM prompt construction. |
 | `json-repair` | Extra | `llm` | Best-effort malformed JSON recovery in LLM outputs. |
 | `langchain` | Extra | `llm` | Core LangChain APIs. |
