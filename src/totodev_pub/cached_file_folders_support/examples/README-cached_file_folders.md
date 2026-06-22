@@ -33,6 +33,48 @@ A complete tutorial that demonstrates CachedFileFolders integration with SharePo
    python sharepoint_tutorial.py
    ```
 
+### Zoho WorkDrive TRUNCATE Demo (`zoho_workdrive_sync.py`)
+
+A CLI that recursively mirrors a Zoho WorkDrive folder tree and showcases the library's
+**truncated-entries** capability: most files are kept as metadata only (a zero-byte body
+plus a sidecar) so a tree far larger than local disk can still be mirrored and processed.
+
+**What it demonstrates:**
+- Recursive descent from a WorkDrive root folder id
+- A size/type **retention policy** (`retention_policy.py`): 50 KB truncate threshold, a
+  hard 100 MB never-materialize ceiling, audio/video always metadata-only
+- An **async `change_receiver`** (`summary_indexer.py`) that writes `summary.md` +
+  `index.json` per file and upserts the summary into a (stub) vector index, transiently
+  materializing a truncated-but-fetchable body only when policy allows
+- Deliberately simple, documented stubs for summarization (pandoc/text -> first 2 KB)
+  and indexing (`stub_vector_index.py`)
+
+**Supporting modules:** `retention_policy.py`, `stub_vector_index.py`,
+`summary_indexer.py` (all source-agnostic and unit-tested via the mock proxy), plus the
+optional one-time `zoho_workdrive_token_bootstrap.py` (grant code -> refresh token).
+
+**Prerequisites:**
+- Zoho Self Client OAuth credentials and a target folder id
+- Python packages: `requests` (`pip install "totodev-pub[connectors]"`); optional
+  `pypandoc` + the `pandoc` system binary for nicer non-text summaries
+
+**Connecting to a real account:** see the step-by-step
+[Zoho WorkDrive connectivity guide](../../../../docs/zoho-workdrive-connectivity.md) —
+how to acquire each credential, how to find the root folder id, and a recommended
+`volatile/credentials/zoho_workdrive_env.sh` you `source` before running.
+
+**Usage:**
+```bash
+# Credentials + target folder from a sourced env script (recommended):
+source volatile/credentials/zoho_workdrive_env.sh
+python zoho_workdrive_sync.py --cache-root volatile/zoho_wd_sync/ \
+    --dir-key demo --max-files 5
+
+# Or pass the folder explicitly (overrides ZOHO_WD_ROOT_FOLDER_ID):
+python zoho_workdrive_sync.py --cache-root volatile/zoho_wd_sync/ \
+    --dir-key demo --root-folder-id <folder_id> --max-files 5
+```
+
 ## Getting Started
 
 1. **Choose an example** that matches your use case

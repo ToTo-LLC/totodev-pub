@@ -35,6 +35,7 @@ connectors = [
   "google-auth-oauthlib",
   "msal",
   "paramiko",
+  "pypandoc",
   "requests",
 ]
 llm = [
@@ -67,6 +68,7 @@ all = [
   "google-auth-oauthlib",
   "msal",
   "paramiko",
+  "pypandoc",
   "requests",
   "jinja2",
   "json-repair",
