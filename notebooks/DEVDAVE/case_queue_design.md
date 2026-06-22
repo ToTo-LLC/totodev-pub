@@ -155,18 +155,33 @@ should *not* be used). See Section 5.
         = truth; `cached_status` = derived summary (Briefing 5 pattern).
       - "Terminal" status is what makes a case eligible to archive. Which statuses
         are terminal is defined by the (pluggable) status model.
-- [x] **Pluggable FSM (NEW per DEVDAVE)**: DECIDED — separate *transition
-      validation/logic* (in-memory FSM, PLUGGABLE) from *transition
-      record/persistence* (event log, ALWAYS).
-      - Default status model = `PrimitiveStateMachineLog` (zero new deps,
-        file-backed, already aligned with the event log).
-      - Define a thin **status-model protocol** (states, allowed transitions,
-        terminal states, current-state deduction) so downstream implementers can
-        plug a real FSM — candidates: `transitions` (pytransitions, ~6.5k★, MIT,
-        imperative, no structural validation) or `python-statemachine`
-        (declarative, validates unreachable/trap states at definition time).
-      - The chosen FSM validates/drives a transition; the result is recorded as
-        an event and the marker's `cached_status` is updated.
+- [x] **Lifecycle / FSM engine (OPINIONATED per DEVDAVE)**: DECIDED — be
+      opinionated; `CaseQueue` targets *simple* lifecycles (genuinely complex
+      flows should hand-code their own queue). Separate *transition
+      validation/logic* (in-memory FSM) from *transition record/persistence*
+      (event log, ALWAYS-ON).
+      - **Blessed engine = `python-statemachine`** (declarative, class-based,
+        validates the state graph at definition time — catches unreachable/trap
+        states; first-class final/terminal states; model binding). Chosen over
+        `transitions` precisely because definition-time validation is the right
+        guard-rail for a convenience class.
+      - **Two modes:**
+        - *No lifecycle defined* (default, zero extra deps): free-form
+          `record_status()` appends status events; `PrimitiveStateMachineLog` can
+          interpret them. Good enough for trivial linear lifecycles.
+        - *Lifecycle defined* (opinionated): implementer subclasses a
+          `python-statemachine` chart; `CaseInstance` binds it to the marker
+          (current state stored in `cached_status`), validates/drives
+          transitions, and records each transition as an event. Final states map
+          to "terminal => eligible to archive."
+      - **Packaging (default decision — DEVDAVE may veto):** ship
+        `python-statemachine` as an OPTIONAL EXTRA, matching the library's
+        lean-core + extras convention (cf. `pipes`, `connectors`, `llm`). Tentative:
+        `casequeue = ["python-statemachine"]`. The zero-dep free-form mode works
+        without the extra; installing it unlocks the declarative lifecycle.
+      - A thin status-model protocol still wraps the engine so an advanced user
+        could substitute another FSM, but `python-statemachine` is THE documented,
+        supported path.
 - [x] **Delete (clarified per DEVDAVE)**: supported but RARE — typically only for
       open items created in error. Not a hot path; simple removal of marker +
       slave dir from the open grouping.
@@ -206,8 +221,8 @@ should *not* be used). See Section 5.
 IN: create/get; `list_open` (sort + filter by date/priority/status/assignee/
 tags); update; `close` (move to date archive grouping); `reopen`; `delete`
 (rare); per-case asset bundle (attach/list/read/remove); date-bounded archive
-queries; per-case event log; pluggable status/FSM model (default
-`PrimitiveStateMachineLog`).
+queries; per-case event log; opinionated lifecycle engine (`python-statemachine`,
+optional extra) with a zero-dep free-form status fallback.
 
 OUT (v1): external document-source mirroring (proxies/sync); persistent
 secondary indexes; tag-search index; distributed locking.
@@ -230,8 +245,9 @@ Three collaborating pieces:
    - `self.marker: CaseMarker` — the dumb data model (persisted via mixin)
    - the slave-dir **asset bundle** (`attach_file`, `list_assets`, `read_asset`,
      `remove_asset`)
-   - the **event log** (`PrimitiveEventLog` in the slave dir)
-   - the **status model** (default `PrimitiveStateMachineLog`; pluggable)
+   - the **event log** (`PrimitiveEventLog` in the slave dir) — always the record
+   - the **lifecycle engine**: free-form status events by default; a
+     `python-statemachine` chart when a lifecycle is defined (blessed engine)
    - logic hooks (overridable): `archive_grouping_label()`, `is_terminal()`,
      `status()` (deduce from event log), `record_status(new_status, payload)`.
 
@@ -273,8 +289,9 @@ Three collaborating pieces:
   leave a case in two groupings (open is authoritative until move confirmed).
 - **Marker edits** use the mixin lock; `would_conflict()` guards against
   clobbering external edits.
-- **Status/FSM**: invalid transitions raise (when an FSM is plugged in);
-  default `PrimitiveStateMachineLog` records linearly without enforcement.
+- **Lifecycle**: with a `python-statemachine` chart, invalid transitions raise
+  (and bad graphs fail at definition time); free-form mode records status events
+  linearly without enforcement.
 
 ### Testing
 - pytest under `src/totodev_pub/tests/` (per project convention).
@@ -334,3 +351,9 @@ class CaseQueue:
 - Persistent secondary indexes / tag-search index — add only if scale demands.
 - Distributed/multi-host locking — single-host advisory locking only.
 - Relational queries / joins across cases.
+
+## 9. Dependencies
+
+- Core: no new core dependencies (reuses `pydantic>=2`, `pyyaml`, `portalocker`).
+- New optional extra (tentative): `casequeue = ["python-statemachine"]` for the
+  declarative lifecycle. Without it, the zero-dep free-form status mode applies.
