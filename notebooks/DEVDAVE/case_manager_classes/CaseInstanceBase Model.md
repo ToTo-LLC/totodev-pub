@@ -1,26 +1,27 @@
-# Case Management Model
+# CaseInstanceBase — Design Model
 
 > **Status:** DRAFT — illustrative code is design-fidelity, **not** production
 > code. No implementation until approved.
 >
-> **FSM library:** **`transitions`** (pytransitions). `case_queue_design.md` has
-> been updated to match.
+> **FSM library:** **`transitions`** (pytransitions).
+>
+> **Companion document:** `CaseManager Model.md` covers one complete
+> implementation of a collection host built on top of this class family.
 
 ---
 
 ## 1. Background
 
-The class names (`CaseInstanceBase`, `CaseManager`, concrete subclasses), many
-method names, and the FSM-by-composition pattern come from an initial design
-sketch by an external architect. This document grounds that sketch on the
-`totodev-pub` building blocks (`CachedFileFolders`, `FileMappedPydanticMixin`,
-`PrimitiveEventLog`), adds the open/archive partitioning strategy, and
-incorporates all subsequent design decisions. FSM implementation uses
-**`transitions`** (pytransitions) throughout.
+The class names (`CaseInstanceBase`, concrete subclasses), many method names,
+and the FSM-by-composition pattern come from an initial design sketch by an
+external architect. This document grounds that sketch on the `totodev-pub`
+building blocks (`FileMappedPydanticMixin`, `PrimitiveEventLog`) and incorporates
+all subsequent design decisions. FSM implementation uses **`transitions`**
+(pytransitions) throughout.
 
 ---
 
-## 2. The three cooperating pieces
+## 2. The two core pieces
 
 1. **`CaseRecord(BaseModel, FileMappedPydanticMixin)`** — the deliberately
    **skinny**, near-immutable serialized record (`case_record.yaml`, always
@@ -32,35 +33,28 @@ incorporates all subsequent design decisions. FSM implementation uses
    diffs.
 
 2. **`CaseInstanceBase(ABC)`** — the logic base class. It OWNS one `CaseRecord`,
-   hosts an **async-first**
-   `transitions` FSM (`model=self`), owns the per-case file area (its case folder)
-   and a file-based `PrimitiveEventLog`, and exposes `pulse()`, `write_file()`,
-   `read_file()`, `retain_file()`, `is_open`, `is_closed`, `is_idle_for()`, the
-   flat `advance()` / `run_to_completion()` pipeline driver, the `on_closing()`
-   closing-edge hook, and `reclassify_case()`. Concrete subclasses (`TicketCase`,
-   `InboundDocCase`, …) declare `_fsm_states` / `_fsm_transitions` /
-   `_closed_states` (and, for linear pipelines, `_pipeline`) and override hooks.
+   hosts an **async-first** `transitions` FSM (`model=self`), owns the per-case
+   file area (its case folder) and a file-based `PrimitiveEventLog`, and exposes
+   `pulse()`, `write_file()`, `read_file()`, `retain_file()`, `is_open`,
+   `is_closed`, `is_idle_for()`, the flat `advance()` / `run_to_completion()`
+   pipeline driver, the `on_closing()` closing-edge hook, and
+   `reclassify_case()`. Concrete subclasses (`TicketCase`, `InboundDocCase`, …)
+   declare `_fsm_states` / `_fsm_transitions` / `_closed_states` (and, for
+   linear pipelines, `_pipeline`) and override hooks.
 
-3. **`CaseManager`** — host backed by a `CachedFileFolders` cache. It manages
-   an **open** grouping (hot) plus **date-labeled archive groupings**
-   (cold), creates cases, hydrates them via an **explicit, opt-in case-type
-   registry** (§4a), looks them up by `case_id` / `external_key`, lists open and
-   (date-bounded) closed cases via thin **listing cards**, performs the
-   close→archive **move** (of the whole case folder), and drives the `pulse`
-   cycle. A case can also run entirely **without** a manager (§6c).
+For collection management — creating, listing, hydrating, and archiving cases at
+scale — see **`CaseManager Model.md`**.
 
 ---
 
-## 3. Storage layout (totodev-pub grounded) — one **symmetric case folder**
+## 3. The case folder — one symmetric layout
 
 The single most important inspectability rule: **the case folder has the same
 internal shape in every mode**, and `case_record.yaml` always lives *inside* it.
 A human or agent that opens any case folder — whether it was created standalone
 or by a `CaseManager`, whether it's open or archived — sees an identical layout.
-Nothing about the record "moves" relative to its folder.
 
 ```text
-THE CASE FOLDER (identical everywhere):
 <case_folder>/
   case_record.yaml          # the skinny record — ALWAYS here, by a fixed name
   events/                   # PrimitiveEventLog: SOURCE OF TRUTH for status + retention
@@ -70,47 +64,31 @@ THE CASE FOLDER (identical everywhere):
     derived/ text.txt ...   #   retained outputs (survive close, travel to archive)
 ```
 
-In **manager mode**, each case folder is simply the **slave dir** of a thin
-tracked entry in a `CachedFileFolders` grouping. The tracked file itself holds no
-authoritative state — it is an (optionally empty) **listing card** the manager
-uses to enumerate/sort the open set cheaply without descending into every folder:
+This layout is **identical** whether the case is standalone or lives inside a
+`CachedFileFolders` collection. In collection mode the case folder happens to be
+the **slave dir** of a tracked entry; in standalone mode it is any directory you
+hand the constructor. The record never moves within the folder.
 
-```text
-<cache_root>/
-  open/                                       # the hot grouping (bounded ~500)
-    Case/Case-<case_id>.yaml                  # manager listing card (regenerable; or empty touch-file)
-    Case/Case-<case_id>.yaml._slave/          # == THE CASE FOLDER (layout above)
-  2026-08-archive/                            # cold grouping, label from archive_grouping_label()
-    Case/Case-<case_id>.yaml (+ ._slave/ == the case folder)
-  ...
-```
-
-In **standalone mode** (§6c) there is no outer cache/listing card at all — the
-case folder is any directory you hand the constructor, with the exact same
-internal layout.
+In **standalone mode** (§6c) there is no outer collection at all — the case
+folder is any directory you hand the constructor.
 
 Why this layout:
-- **Symmetry / inspectability** — the case folder is self-describing and
-  identical regardless of how it was created; the record never relocates within
-  it.
-- **Open listing is naturally bounded** — `iter_open_cases()` reads the listing
-  cards (or `case_record.yaml`s) in the `open` grouping (≤ ~500), never the
-  (ever-growing) closed history.
-- **Aging out** = dropping a whole archive grouping.
+- **Symmetry / inspectability** — the case folder is self-describing regardless
+  of how it was created; the record never relocates within it.
 - **The whole case folder travels** on archive/reopen, so record + assets +
   event log move atomically.
-- The listing card is a **regenerable convenience**, not a second source of
-  truth — so the `_index.json` race risk never returns for the hot path. An
-  optional cross-archive `external_key` manifest is still discussed in §9.
+- **`CachedFileFolders` fit** — the folder is designed to sit as a slave dir of
+  a tracked entry in a `CachedFileFolders` grouping. The tracked file becomes a
+  thin listing card; the case folder is its slave dir. See `CaseManager Model.md`
+  for the full collection layout.
 
 **Design philosophy — tolerate foreign files.** A case must be a *good neighbor*
 in its own folder: it owns `case_record.yaml`, `events/`, and `assets/`, and it
 must **ignore** anything else it doesn't recognize rather than choking on or
 deleting it. In particular, `CachedFileFolders` may drop its own bookkeeping into
-the tree (e.g. a metadata file alongside the tracked entry), and tools or humans
-may leave notes. Concretely: cleanup is scoped to subtrees the case owns
-(`_purge_ephemeral_files()` only touches `assets/`), and listing/iteration skips
-unknowns. Derived classes are encouraged to honor this (without belaboring it).
+the tree, and tools or humans may leave notes. Concretely: cleanup is scoped to
+subtrees the case owns (`_purge_ephemeral_files()` only touches `assets/`), and
+listing/iteration skips unknowns.
 
 ---
 
@@ -133,8 +111,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):   # BaseModel FIRST (mixin
     closed: datetime | None = None    # stamped once on terminal entry; doubles as "is terminal?" hint
     # Intentionally NOT stored: status/state, last_activity, retained_files,
     # priority/assignee/tags. A denormalized listing field may be added LATER, but
-    # ONLY if a measured listing bottleneck justifies it (same "no premature index"
-    # stance as the open/archive partition).
+    # ONLY if a measured listing bottleneck justifies it.
 ```
 
 - Serialized as **YAML** via the mixin (its dumper uses `sort_keys=False`, so
@@ -145,8 +122,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):   # BaseModel FIRST (mixin
 - **Near-immutable:** the record is written once at create and then touched only
   once more — at close, to stamp `closed`. That near-zero churn minimizes write
   contention and keeps diffs meaningful.
-- **Status is not on the record.** Coarse open-vs-closed is encoded by *which
-  grouping the record lives in* (`open` vs. a `*-archive`), reinforced by the
+- **Status is not on the record.** Coarse open-vs-closed is reinforced by the
   presence of `closed`. The *fine-grained* current status is derived from the
   event log's state-change entries and cached in memory while the case is live
   (see §5). This removes any persisted cache that could drift out of sync.
@@ -515,11 +491,9 @@ Notes:
 A case legitimately owns its **folder, record, event log, FSM, and assets** — all
 intrinsic to a single case. It does **not** own **placement/archival policy**:
 "which grouping should a closed case live in" is a *collection-level* concern that
-belongs to the manager. An earlier draft had the case hold a `self._manager`
-backref and call `manager.on_case_closed(self)` on close. That's a layering smell
-— the lower-level object reaching "up" to its coordinator — and it forced a
-`manager is not None` branch and made closing behavior depend on whether a manager
-exists.
+belongs to the manager. Giving the case a `self._manager` backref would make a
+`manager is not None` branch necessary everywhere and make closing behavior
+depend on whether a manager exists.
 
 So we **invert the dependency**: the case just *emits* lifecycle signals
 (`_notify`), and whoever cares *subscribes*.
@@ -540,8 +514,7 @@ So we **invert the dependency**: the case just *emits* lifecycle signals
   loader). The `closed` stamp makes such cases trivially identifiable.
 
 Net: the case is a clean, standalone-capable unit; the manager is a pure
-*observer/coordinator* layered on top. (Open trade-off — prompt listener-driven
-archival vs. purely lazy sweep-driven — is noted in §11.)
+*observer/coordinator* layered on top.
 
 ---
 
@@ -734,7 +707,7 @@ There are three distinct questions, answered at three different scopes:
      (`next_step` is not `None`); a driver could call `advance()` now.
    - `is_awaiting` — open but **no** forward step applies: it's parked on external
      input or a human (e.g. `TicketCase` in `waiting`, or an in-flight
-     `awaiting_x` state). This is the "idle" you asked about.
+     `awaiting_x` state).
    - `next_step` — the name of that ready forward trigger, or `None`.
 
 3. **"Is a step executing at this instant?"**
@@ -753,214 +726,29 @@ not by the activity signal. Keep the two concerns separate.
 
 ---
 
-## 7. `CaseManager` — host over a CachedFileFolders cache
+## 7. Using with a collection manager
 
-```python
-from totodev_pub.cached_file_folders import CachedFileFolders
+The case folder layout (§3) is deliberately designed to sit as the **slave
+directory** of a tracked entry in a `CachedFileFolders` grouping. A collection
+manager only needs three things from a case:
 
-OPEN_GROUPING = ["open"]
+1. Call `CaseInstanceBase.create_in_folder()` with an allocated folder.
+2. Subscribe via `add_transition_listener()` to react to lifecycle signals.
+3. On `CASE_CLOSED`, move the whole case folder to an archive grouping.
 
-class CaseManager:
-    """Host for a collection of cases, backed by a CachedFileFolders cache.
-    Manages an `open` grouping (hot) + date-labeled archive groupings (cold)."""
-
-    def __init__(self, cache: CachedFileFolders):
-        self.cache = cache
-        self._registry: dict[str, type[CaseInstanceBase]] = {}
-
-    # ---- explicit, opt-in case-type registry (needed ONLY for rehydration) ----
-    def register_case_type(self, case_cls: type[CaseInstanceBase]) -> None:
-        self._registry[case_cls.__name__] = case_cls            # bare name; never automatic
-
-    def register_case_types(self, classes) -> None:
-        for c in classes: self.register_case_type(c)
-
-    # optional convenience: `@manager.register` on a class definition (still explicit)
-    def register(self, case_cls): self.register_case_type(case_cls); return case_cls
-
-    def _resolve_case_cls(self, case_object_type: str) -> type[CaseInstanceBase]:
-        try:
-            return self._registry[case_object_type]
-        except KeyError:
-            raise UnregisteredCaseTypeError(
-                f"case_object_type {case_object_type!r} is not registered; "
-                f"call manager.register_case_type(...) before hydrating it"
-            )
-
-    # ---- the manager OBSERVES cases; it is never called "up" to (see §5a) ----
-    def _attach(self, case: CaseInstanceBase) -> CaseInstanceBase:
-        case.add_transition_listener(self._on_case_event)   # subscribe; case stays manager-agnostic
-        return case
-
-    def _on_case_event(self, case, event_name, info) -> None:
-        # CASE_CLOSING = phase 1 (pre-purge): manager does NOT archive here;
-        # assets may still exist and the record is not yet sealed.
-        # CASE_CLOSED  = phase 2 (post-purge): folder is immutable, safe to move.
-        if event_name == "CASE_CLOSED":
-            self.on_case_closed(case)            # prompt archive; reap_closed() is the safety net
-
-    # ---- creation (the concrete class is supplied; registry NOT required) ----
-    def create_case(self, case_cls, *, case_id=None, external_key=None, nickname=None,
-                    **fields) -> CaseInstanceBase:
-        case_id = case_id or _new_time_slug()
-        folder = self._allocate_case_folder(OPEN_GROUPING, case_id)   # == slave dir of a tracked entry
-        case = case_cls.create_in_folder(folder, case_id=case_id,     # writes record + CASE_NEW
-                                         external_key=external_key, nickname=nickname, **fields)
-        self._write_listing_card(OPEN_GROUPING, case_id, case._record)  # thin, regenerable convenience card
-        return self._attach(case)
-
-    # ---- hydration (registry REQUIRED; raises if the type is unregistered) ----
-    def _hydrate(self, case_folder: Path) -> CaseInstanceBase:
-        skinny = CaseRecord.peek(case_folder / RECORD_NAME)     # read identity fields only
-        case_cls = self._resolve_case_cls(skinny.case_object_type)
-        return self._attach(case_cls(case_folder))
-
-    # ---- lookup ----
-    def get_by_case_id(self, case_id: str) -> CaseInstanceBase | None: ...
-    def get_by_external_key(self, external_key: str, *, search_archives: bool = False
-                            ) -> CaseInstanceBase | None: ...
-
-    # ---- listing ----
-    def iter_open_cases(self): ...                # scan ONLY the open grouping (bounded)
-    def iter_closed_cases(self, *, date_range=None): ...  # date-bounded archive scan
-
-    # ---- archival (the manager's job, reacting to a case's CASE_CLOSED signal) ----
-    def on_case_closed(self, case: CaseInstanceBase) -> None:
-        """Move the whole case folder (tracked entry + its slave dir) from `open`
-        into case.archive_grouping_label(). Idempotent — safe if already moved."""
-        label = case.archive_grouping_label()
-        self._move_case(case.case_id, src=OPEN_GROUPING, dst=[label])
-
-    def reap_closed(self) -> int:
-        """Safety-net sweep: archive any case found `closed` but still in `open`
-        (e.g. created by a non-subscribed loader, or a crash mid-move). Idempotent."""
-        ...
-
-    def reopen(self, case: CaseInstanceBase) -> None: ...   # move archive -> open
-    def delete(self, case: CaseInstanceBase) -> None: ...   # rare; created-in-error open items
-
-    # ---- pulse driver ----
-    async def run_pulse_cycle(self) -> None: ...            # gather pulse() over open cases only
-    async def run_pulse_loop(self, default_interval_secs: float = 300.0) -> None: ...
-```
-
-Design notes:
-- Backed by `CachedFileFolders`; open cases live in the `open` grouping; closed
-  cases are moved to date-labeled `YYYY-MM-archive` groupings (§3).
-- **Explicit, opt-in registry** (§4a). `create_case()` is handed the class
-  directly — no registry required; only `_hydrate()` consults it and raises
-  `UnregisteredCaseTypeError` for an unknown `case_object_type`.
-- `iter_open_cases()` reads the thin **listing cards** in the `open` grouping —
-  no secondary index. Open-vs-closed is implicit in the grouping. Sorting by
-  fine-grained status costs one event-log read per case, acceptable at ~500 and
-  deferrable to a denormalized listing field only if measured slow.
-- `iter_closed_cases()` is **date-bounded** — it scans only the relevant archive
-  groupings, never one giant closed set.
-- The manager **observes** cases via `add_transition_listener` (`_attach`); it
-  never holds a backref and is never called from a case directly (§5a). Pulse
-  runs on open cases only; archived cases are inert.
+`CaseManager` is a complete, opinionated implementation of this pattern — backed
+by `CachedFileFolders`, with open/date-archive groupings, thin listing cards, a
+case-type registry for rehydration, `reap_closed()` for safety-net archival, and
+a pulse loop. See **`CaseManager Model.md`** for the full design.
 
 ---
 
-## 8. Lifecycle (end to end)
+## 8. Dependencies
 
-1. **Create** — `CaseManager.create_case(TicketCase, external_key=...)` (or
-   `TicketCase.create_in_folder(...)` standalone) writes the skinny `CaseRecord`
-   into the case folder, constructs the (load-only) instance, and logs the
-   `CASE_NEW` bookend + the initial `ENTER_STATE`. The manager then subscribes its
-   archival listener. (Registration is *not* required for this path.)
-2. **Work** — caller `await`s FSM triggers (`await case.assign()`), or, for a
-   linear pipeline, drives `await case.advance()` / `run_to_completion()`.
-   Assets attach via `write_file(..., retain=?)`. Every transition fires
-   `_on_state_changed`, which appends an `ENTER_STATE` event (status = the log)
-   and refreshes the in-memory activity cache. The record is **not** rewritten on
-   ordinary transitions.
-3. **Close** — the non-closed → closed *edge* runs a two-phase sequence: log
-   `CASE_CLOSED` event → `on_closing()` subclass hook → `CASE_CLOSING` notified
-   (pre-purge observers inspect assets here) → purge ephemerals → stamp and save
-   `record.closed` → `CASE_CLOSED` notified (manager archives the whole case
-   folder in manager mode; standalone: no-op).
-4. **Reopen** (rare) — manager moves it back to `open`.
-5. **Delete** (rare) — only for open items created in error; remove the whole
-   case folder.
-
----
-
-## 9. Cross-cutting decisions
-
-- **Scale target:** perform well to ~500 open cases; the open scan is the hot
-  path and is kept bounded by archiving. No persistent secondary index in v1.
-- **`external_key` lookup:** open set = bounded scan; archives =
-  date-bounded scan when `search_archives=True`. Truly random cross-archive
-  lookup by `external_key` would want a supplementary manifest — an **optional,
-  deferred** index (`case_id`/`external_key` → archive grouping), not core v1.
-- **Concurrency:** single-host advisory locking via `FileMappedPydanticMixin`
-  lock files. No distributed locking. (Any "assignee"-style advisory claim would
-  be an event-log entry / derived value, not a record field, per the skinny-record
-  rule.)
-- **Archive move atomicity (riskiest op):** copy-then-verify-then-delete (or
-  same-filesystem rename), bracketed by `MOVING`/`MOVED` events so an
-  interrupted move is detectable and resumable; `open` stays authoritative until
-  the move is confirmed (never present in two groupings).
-- **Range of use cases (be honest):** good fit for short-lived cases, bounded
-  open sets, file-bundle-per-case, human/AI-inspectable storage, mostly
-  single-writer; *not* a fit for high write throughput, ACID needs, huge open
-  sets, relational queries, or genuinely complex workflows (those should
-  hand-code their own manager rather than start from this convenience class).
-
----
-
-## 10. Dependencies
-
-- **`transitions`** (pytransitions) — the chosen FSM engine for this model
-  (DEVDAVE). Lightweight, MIT, composition pattern (`model=self`). We use its
-  **async** machine (`transitions.extensions.asyncio.AsyncMachine`), which ships
-  in the same package (no extra dependency). Packaging TBD: core dependency vs.
-  an optional extra (e.g. `casequeue = ["transitions"]`) consistent with the
-  library's lean-core + extras convention.
+- **`transitions`** (pytransitions) — FSM engine. Lightweight, MIT, composition
+  pattern (`model=self`). We use its **async** machine
+  (`transitions.extensions.asyncio.AsyncMachine`), which ships in the same
+  package. Packaging TBD: core dependency vs. an optional extra (e.g.
+  `casequeue = ["transitions"]`) consistent with the library's lean-core + extras
+  convention.
 - Reuses existing core deps: `pydantic>=2`, `pyyaml`, `portalocker`.
-
----
-
-## 11. Open questions for review
-
-| Question | Notes / options |
-|---|---|
-| `transitions` as core dep vs. optional extra | Lean-core convention suggests an extra; "good-enough default" argues core. (Note: async needs `transitions.extensions.asyncio`.) |
-| Async-first base vs. offer sync too | Base uses `AsyncMachine`. Do we also ship a sync variant for purely human-driven cases, or is `await` everywhere acceptable? |
-| Long / restart-spanning stages | For services that outlive the process, standardize the in-flight state-pair + "job handle as event-log entry" pattern (§6b) or leave it to implementers? |
-| Prompt vs. lazy archival | Manager subscribes to `CASE_CLOSED` (phase 2, post-purge) for prompt archival, with `reap_closed()` as a safety-net sweep (§5a). Remaining choice: is this dual-mode approach sufficient, or go purely lazy/sweep-only to remove the listener mechanism? |
-| `CASE_CLOSING` subscriber speed | Phase 1 subscribers are on the hot path. Enforce a timeout / make the notification async if I/O-heavy subscribers are anticipated? |
-| Workflow versioning | When `_fsm_transitions` change, how are in-flight cases (whose state is replayed/derived from the event log) migrated? |
-| Optional archive index | Add the `external_key → archive` manifest now, or defer until a real cross-archive random-access need appears? |
-| Status in listings | Fine-grained status is off-record (event-derived). If filtering/sorting open lists by status is common, is per-case event-log reads OK at ~500, or do we add a denormalized listing field? |
-| `closed` stamp vs. crash mid-close | The move is the real terminal commit; if `closed` is stamped but the move is interrupted, the `MOVING`/`MOVED` events (§9) drive recovery — confirm that ordering is sufficient. |
-| `CaseGroupingVersioner` snapshots | Worth wiring archive snapshots for audit, or out of scope for v1? |
-
----
-
-## 12. Naming reference
-
-| Original sketch | This model | Notes |
-|---|---|---|
-| `CaseInstanceBase` | `CaseInstanceBase` | unchanged (logic object) |
-| `CaseManager` | `CaseManager` | backed by `CachedFileFolders`; open + date-archive groupings |
-| concrete `TicketCase` / `DocumentPipelineCase` | `TicketCase` (human-driven) / `InboundDocCase` (async pipeline) | pipeline uses verb-triggers + `_run_*`; persistence inherited |
-| `case_meta.json` (serialized record) | `CaseRecord` → `case_record.yaml` (always **inside** the case folder) | now a dumb, **skinny** `FileMappedPydanticMixin` model (identity only) |
-| `Machine` (sync) | `AsyncMachine` (`send_event=True`) | async-first; triggers awaitable; hook sees source+dest |
-| `on_enter_<closed>` cleanup | `on_closing()` + `CASE_CLOSED` event on the non-closed→closed **edge** | one hook for all terminal states; subclass hook runs before purge |
-| (none) | `advance()` / `run_to_completion()` + `_pipeline` | new: flat one-step-at-a-time pipeline driver |
-| (none) | `reclassify_case(new_cls)` | new: rebind to a different subclass ("audible") |
-| `case_type` (record field) | `case_object_type` | bare `cls.__name__`; resolved via the explicit registry |
-| `state` on the record | (removed) | status is event-derived + in-memory cached, never persisted |
-| `to_dict`/`from_dict`/`save` + `_index.json` | skinny record + registry hydration | constructor is folder-anchored, load-only |
-| in-memory `event_log: list[dict]` | `PrimitiveEventLog` in `<case_folder>/events/` | now file-based + inspectable; **source of truth for status & retention** |
-| `case_dir` | the **case folder** (standalone: any dir; manager: a tracked entry's slave dir) | identical internal layout in both modes |
-| trunk dir + `_index.json` | `open` grouping + date archive groupings + thin **listing cards** | open scan replaces index; listing card is regenerable, not a source of truth |
-| `create_case` / `get_by_case_id` / `get_by_external_key` | same | unchanged names |
-| `iter_open_cases` / `iter_closed_cases` | same | closed iteration is date-bounded |
-| `register_case_type` | same (+ `register_case_types`, `@register`) | **explicit / opt-in**, needed only for rehydration |
-| `pulse` / `run_pulse_cycle` / `run_pulse_loop` | same | unchanged |
-| `write_file` / `read_file` / `retain_file` | same | rooted in the case folder's `assets/` |
-| `is_open` / `is_closed` / `is_idle_for` | same | unchanged |
-| `archive_grouping_label()` | new | implementer picks the archive key |
