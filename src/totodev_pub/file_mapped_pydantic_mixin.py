@@ -1105,6 +1105,26 @@ class FileMappedPydanticMixin:
             if hasattr(self, field_name):
                 setattr(self, field_name, value)
 
+    def detached_copy(self: Self) -> Self:
+        """Return a deep copy DETACHED from any file mapping.
+
+        model_copy(deep=True) faithfully clones the field data but also drags along
+        the private file-mapping attributes, leaving the copy bound to the same file
+        (it could be reloaded or save()-d back, dodging any higher-level guard). This
+        clears that binding, so the result is a free-standing snapshot: save() on it
+        raises "Cannot save model without a file path". Use it to hand out a
+        read-only view of a model without leaking a live, writable file handle.
+        """
+        clone = self.model_copy(deep=True)
+        clone._file_path = None
+        clone._absolute_file_path = None
+        clone._lock_acquired = False
+        clone._file = None
+        clone._file_stat = None
+        clone._last_loaded_at = None
+        clone._in_context_manager = False
+        return clone
+
     def __enter__(self) -> Self:
         """Context manager entry."""
         if not self._lock_acquired:

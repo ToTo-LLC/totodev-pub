@@ -18,14 +18,7 @@ from totodev_pub.folder_backed_case import (
 # ---------------------------------------------------------------------------
 
 class SimpleCase(FolderBackedCase):
-    _fsm_states = ["new", "open", "done"]
-    _fsm_transitions = [
-        {"trigger": "begin", "source": "new",  "dest": "open"},
-        {"trigger": "finish","source": "open", "dest": "done"},
-    ]
-    _fsm_initial_state = "new"
-    _closed_states = {"done"}
-    _pipeline = ["begin", "finish"]
+    fsm_state_chains = ["^new--begin-->open--finish-->done^"]
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +88,7 @@ def test_rehydrate_requires_registration(tmp_path):
 
 
 def test_rehydrate_with_registration(tmp_path):
-    FolderBackedCase.register_case_type(SimpleCase)
+    FolderBackedCase.register_case_types(SimpleCase)
     folder = tmp_path / "case-007"
     with SimpleCase.create_in_folder(folder):
         pass

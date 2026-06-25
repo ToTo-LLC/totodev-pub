@@ -13,10 +13,12 @@ from .exceptions import (
     UnregisteredCaseTypeError,
     RecordTypeMismatchError,
     IncompatibleReclassError,
+    FsmChainParseError,
 )
 from .case_record import CaseRecord
 from .case_event_log_reader import CaseEventLogReader
 from .case_assets import CaseAssets
+from .state_chain_parser import StateChainParser, FsmChainSpec
 
 __all__ = [
     "RECORD_NAME",
@@ -29,7 +31,10 @@ __all__ = [
     "UnregisteredCaseTypeError",
     "RecordTypeMismatchError",
     "IncompatibleReclassError",
+    "FsmChainParseError",
     "CaseRecord",
     "CaseEventLogReader",
     "CaseAssets",
+    "StateChainParser",
+    "FsmChainSpec",
 ]

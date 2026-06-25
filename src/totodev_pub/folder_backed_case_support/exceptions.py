@@ -46,11 +46,11 @@ class ReleasedCaseError(Exception):
 
 class UnregisteredCaseTypeError(Exception):
     """Raised by rehydrate() when the stored case_object_type has no matching entry in
-    the registry — i.e. the class was never passed to register_case_type()."""
+    the registry — i.e. the class was never passed to register_case_types()."""
     def __init__(self, type_name: Optional[str]):
         super().__init__(
             f"Case type {type_name!r} is not in the FolderBackedCase registry. "
-            "Call FolderBackedCase.register_case_type(YourClass) at startup."
+            "Call FolderBackedCase.register_case_types(YourClass) at startup."
         )
         self.type_name = type_name
 
@@ -63,7 +63,7 @@ class RecordTypeMismatchError(Exception):
     constructs the NEW class over a record that still carries the OLD name (so a
     crash mid-reclassify reopens cleanly as the old class). Before the committing
     flush you must CONSCIOUSLY stamp the new name (and migrate any new-schema
-    fields, if the new record_cls added some):
+    fields, if the new _record_cls added some):
 
         fresh._record.case_object_type = NewClass.__name__
         # ...initialize/migrate any new-schema fields here, if needed...
@@ -80,9 +80,27 @@ class RecordTypeMismatchError(Exception):
 
 class IncompatibleReclassError(Exception):
     """Raised when reclassify_to() is called but the current FSM state is not present
-    in the target class's _fsm_states list."""
+    among the target class's FSM states."""
     def __init__(self, current_state: str, target_class: str):
         super().__init__(
             f"Cannot reclassify to {target_class!r}: current state {current_state!r} "
-            "is not in that class's _fsm_states."
+            "is not among that class's FSM states."
         )
+
+
+class FsmChainParseError(Exception):
+    """Raised by StateChainParser when an `fsm_state_chains` entry cannot be parsed
+    into a well-formed FSM. Carries the offending chain (and its index in the list,
+    when known) plus a human-readable reason so a typo surfaces at class-definition
+    time with enough context to fix it immediately."""
+    def __init__(self, reason: str, *, chain: Optional[str] = None, index: Optional[int] = None):
+        where = ""
+        if index is not None:
+            where += f" (chain #{index}"
+            where += f": {chain!r})" if chain is not None else ")"
+        elif chain is not None:
+            where += f" (in {chain!r})"
+        super().__init__(f"Cannot parse fsm_state_chains{where}: {reason}")
+        self.reason = reason
+        self.chain = chain
+        self.index = index
