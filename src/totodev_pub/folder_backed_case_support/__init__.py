@@ -9,15 +9,19 @@ from .constants import RECORD_NAME, LEASE_NAME, ASSETS_DIR_NAME, KEEP_LIST_NAME
 from .exceptions import (
     CaseAlreadyOpenError,
     OwnershipLostError,
-    ReleasedCaseError,
+    DetachedCaseError,
     UnregisteredCaseTypeError,
     RecordTypeMismatchError,
     IncompatibleReclassError,
     FsmChainParseError,
+    FsmBindingError,
+    AutoAdvanceBlocked,
+    TriggerTimeout,
 )
 from .case_record import CaseRecord
 from .case_event_log_reader import CaseEventLogReader
 from .case_assets import CaseAssets
+from .advance_result import AdvanceResult
 from .state_chain_parser import StateChainParser, FsmChainSpec
 
 __all__ = [
@@ -27,14 +31,18 @@ __all__ = [
     "KEEP_LIST_NAME",
     "CaseAlreadyOpenError",
     "OwnershipLostError",
-    "ReleasedCaseError",
+    "DetachedCaseError",
     "UnregisteredCaseTypeError",
     "RecordTypeMismatchError",
     "IncompatibleReclassError",
     "FsmChainParseError",
+    "FsmBindingError",
+    "AutoAdvanceBlocked",
+    "TriggerTimeout",
     "CaseRecord",
     "CaseEventLogReader",
     "CaseAssets",
+    "AdvanceResult",
     "StateChainParser",
     "FsmChainSpec",
 ]

@@ -16,7 +16,7 @@ class CaseAlreadyOpenError(Exception):
     def __init__(self, folder: Path, *, expires_in: float):
         super().__init__(
             f"{folder} is already open (lease valid for ~{expires_in:.0f}s more). "
-            "Wait for the current owner to release() or for the lease to expire."
+            "Wait for the current owner to detach() or for the lease to expire."
         )
         self.folder = folder
         self.expires_in = expires_in
@@ -33,12 +33,12 @@ class OwnershipLostError(Exception):
         self.folder = folder
 
 
-class ReleasedCaseError(Exception):
-    """A mutating operation was attempted on a case husk that has already release()d its
-    lease (detached). Construct a fresh instance (rehydrate) to act on the folder again."""
+class DetachedCaseError(Exception):
+    """A mutating operation was attempted on a case husk that has already detach()ed from
+    its folder (lease cleared). Construct a fresh instance (rehydrate) to act on it again."""
     def __init__(self, folder: Path):
         super().__init__(
-            f"This FolderBackedCase for {folder} has already been released. "
+            f"This FolderBackedCase for {folder} has already been detached. "
             "Use rehydrate() to open a fresh instance."
         )
         self.folder = folder
@@ -116,6 +116,35 @@ class AutoAdvanceBlocked(Exception):
         self.candidates = candidates or []
 
 
+class TriggerTimeout(Exception):
+    """A trigger's work (`_perform_<trigger>`) was HARD-ABORTED for outrunning its kill
+    ceiling (the `~<dur>` soft timeout, or the default, times the kill multiple). Raised by
+    the timing wrapper after asyncio.wait_for cancels the work; it is an ordinary Exception
+    so it funnels through the machine's on_exception handler like any other pre-commit
+    failure — but is recognized there and logged as CASE_TRIGGER_TIMEOUT (NOT
+    CASE_FAIL_TRANSITION), keeping a timeout visually distinct in the event log.
+
+    A timeout IS a failed pre-commit attempt: the case never left its source state, and it
+    counts toward @FAIL (see _fail_count) so the retry cap applies and a timing-out trigger
+    cannot hammer forever. advance() folds it into AdvanceResult.failed like any other
+    absorbed failure.
+
+    NOTE: aborting an async-native await cancels it cleanly; a call offloaded via
+    run_blocking() cannot truly be killed (the thread runs on), so the abort frees the case
+    but may leak the worker — prefer async-native clients for anything that can hang."""
+    def __init__(self, case_id: str, trigger: Optional[str], state: str, *,
+                 elapsed: float, ceiling: float):
+        super().__init__(
+            f"Case {case_id!r}: trigger {trigger!r} hard-aborted in state {state!r} after "
+            f"{elapsed:.1f}s (kill ceiling {ceiling:.1f}s)."
+        )
+        self.case_id = case_id
+        self.trigger = trigger
+        self.state = state
+        self.elapsed = elapsed
+        self.ceiling = ceiling
+
+
 class FsmChainParseError(Exception):
     """Raised by StateChainParser when an `fsm_state_chains` entry cannot be parsed
     into a well-formed FSM. Carries the offending chain (and its index in the list,
@@ -132,3 +161,57 @@ class FsmChainParseError(Exception):
         self.reason = reason
         self.chain = chain
         self.index = index
+
+
+class FsmBindingError(Exception):
+    """Raised at first instantiation of a FolderBackedCase subclass when the class is not a
+    suitable CARRIER for its compiled FSM. Where FsmChainParseError is about the state model
+    being well-FORMED, this is about the model being well-BOUND to its host object. Both kinds
+    of gap are reported together so a developer can fix them in a single pass:
+
+      * MISSING — a method guard (or other explicitly-named transition callback) the FSM
+        references is not defined on the class. This is almost always a typo in a chain's
+        `guard#trigger`. A `_perform_<trigger>` action method is OPTIONAL and is NEVER
+        reported missing — it is wired only when present (the conventional, zero-effort path).
+      * SYNC — a referenced callable exists but is synchronous while the case requires async.
+        FolderBackedCase is driven through async (advance(), the generated triggers), so every
+        guard, action method, and callback the FSM touches MUST be a coroutine function
+        (`async def`). A stray `def` would silently block the event loop for every other case
+        a driver is advancing, so we reject it loudly here. (Relax with force_async=False.)
+
+    The whole point is a loud, early, unambiguous failure: future developers WILL write a sync
+    guard or misspell a method name, and this turns a baffling event-loop stall or an
+    AttributeError deep inside `transitions` into a precise message at construction time.
+
+    Carries `carrier_name` and the structured `missing` / `sync` lists (each a list of
+    (name, slot, trigger) tuples) for programmatic inspection."""
+
+    # transition-dict slot -> human label, for readable messages.
+    _SLOT_LABEL = {
+        "conditions": "method guard",
+        "unless": "method guard ('unless')",
+        "before": "before-callback",
+        "after": "after-callback",
+        "prepare": "prepare-callback",
+        "hook": "trigger action method",
+    }
+
+    def __init__(self, carrier_name: str, *, missing=None, sync=None):
+        self.carrier_name = carrier_name
+        self.missing = list(missing or [])
+        self.sync = list(sync or [])
+        lines = [f"{carrier_name!r} is not a valid carrier for its FSM:"]
+        for name, slot, trigger in self.missing:
+            label = self._SLOT_LABEL.get(slot, slot)
+            lines.append(
+                f"  - missing {label} {name!r} (referenced by trigger {trigger!r}); "
+                f"define `async def {name}(self, event)` on the class (check for a typo)"
+            )
+        for name, slot, trigger in self.sync:
+            label = self._SLOT_LABEL.get(slot, slot)
+            where = f" for trigger {trigger!r}" if trigger else ""
+            lines.append(
+                f"  - {label} {name!r}{where} is synchronous; declare it with 'async def' "
+                "(this case is driven through async methods like advance())"
+            )
+        super().__init__("\n".join(lines))

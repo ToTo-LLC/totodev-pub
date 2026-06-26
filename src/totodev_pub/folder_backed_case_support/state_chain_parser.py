@@ -18,12 +18,12 @@ States
   are also the reachability anchors (they are exempt from the "must have an incoming
   edge" rule), which is how an entry reached only via reclassify_to() is declared.
 * A TRAILING `^` marks a TERMINAL/closed state: `closed^`. Entering one fires the
-  two-phase close hook and suppresses the pulse.
+  two-phase close hook.
 * Initial and terminal are independent flags and may compose (`^x^`). A run of trailing
   markers is tolerated; any trailing glyph other than `^` is rejected, keeping the marker
   namespace closed against silent typos.
 
-Connectors  `--[*][cond#...][@FACT<op>N#...]trigger-->`
+Connectors  `--[*][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
 ----------
 * `A--trigger-->B` is one transition (trigger `trigger`, source `A`, dest `B`).
 * A leading `*` marks the edge AUTO-ADVANCE: advance()/run_to_completion() may fire it
@@ -40,7 +40,7 @@ Connectors  `--[*][cond#...][@FACT<op>N#...]trigger-->`
   UNSUPPORTED — we cannot promise to evaluate at an exact instant/count, so an equality
   test would create false expectations). Two facts are recognized:
     * `@DWELL<op><dur>` — seconds spent in the SOURCE state (dwell since the latest
-      ENTER_STATE). The operand is a duration, units s|m|h|d, float allowed
+      CASE_ENTER_STATE). The operand is a duration, units s|m|h|d, float allowed
       (`@DWELL>90s`, `@DWELL>=1.5h`, `@DWELL>0.5d`). `dwell_secs()` on the case computes it.
       A `>`/`>=` dwell guard is SELF-RELAXING (it ripens with time) and is what gives a
       state a guaranteed TIMED ESCAPE (see classify()/AutoAdvanceBlocked).
@@ -55,12 +55,23 @@ Connectors  `--[*][cond#...][@FACT<op>N#...]trigger-->`
   A factual guard is a pure FACT, NOT a promise to fire — something must still attempt the
   trigger. At most one guard PER FACT NAME per connector; facts compose with each other and
   with method guards (e.g. `@FAIL<3#@DWELL>30m#retry`).
+* `trigger~<dur>` attaches a SOFT TIMEOUT to the trigger's work — a SUFFIX (the `~` reads
+  "approximately"), the only suffix decoration, because unlike the prefix guards it bounds
+  the trigger's EXECUTION rather than gating entry. The duration uses the @DWELL units
+  (s|m|h|d, float allowed, unit required): `assign~20s`, `fetch~1.5m`. It is the point past
+  which the step is considered SLOW (a warning), NOT a hard kill; the hard-abort ceiling is
+  derived by the case as a multiple of this value. Most triggers are expected to be fast and
+  go un-annotated (they inherit the case's default); annotate the ones known to be slow. The
+  budget is keyed by TRIGGER (it is a property of `_perform_<trigger>`), so the same trigger
+  may not be annotated with two different durations. Composes with everything:
+  `@FAIL<3#funded#finish~3m`. (Stored in FsmChainSpec.trigger_timeouts; consumed by the
+  case, which owns the warn/abort/log behavior.)
 
 Wildcard ("from any source") chains  `*--...-->DEST`
 ----------
 * A chain that BEGINS with `*--` declares one edge whose source is ANY otherwise
   non-terminal state: `*--cancel-->cancelled^` means "from anywhere, `cancel` => cancelled".
-  The connector carries the usual `[*]`, guards, and `@dur` like any other.
+  The connector carries the usual `[*]`, guards, and `~<dur>` soft-timeout like any other.
 * Exactly one transition (one destination) per wildcard chain. The concrete per-source
   edges are deduced AFTER all chains parse and AFTER validate(): terminal states and the
   destination itself (no self-loop) are excluded, and an EXPLICIT edge for the same
@@ -85,11 +96,15 @@ FSM singleton.
 
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from totodev_pub.folder_backed_case_support.exceptions import FsmChainParseError
+from totodev_pub.folder_backed_case_support.exceptions import (
+    FsmChainParseError,
+    FsmBindingError,
+)
 
 # A state name: one or more [A-Za-z0-9_] groups joined by SINGLE dashes. Forbids
 # leading/trailing/double dashes, so a connector's `--` can never be read as part of a
@@ -103,15 +118,24 @@ _FACT_GUARD_SEGMENT = r"@\s*[A-Za-z][A-Za-z0-9_]*\s*(?:<=|>=|<|>)\s*\d+(?:\.\d+)
 # One connector label segment: a guard/trigger identifier OR a `@FACT<op>N` factual guard.
 _LABEL_SEGMENT = r"(?:" + _FACT_GUARD_SEGMENT + r"|[A-Za-z_]\w*)"
 
-# The connector between two states: `--[*][cond#...][@FACT<op>N#...]trigger-->`.
+# A SOFT-TIMEOUT suffix on the trigger: `~<dur>` (e.g. `assign~20s`). `~` reads
+# "approximately", matching the soft semantics: it is the duration past which the step is
+# considered SLOW, not a hard kill. The unit is accepted loosely here (optional) so a
+# unit-less typo gets a pointed message from _parse_trigger_timeout rather than a confusing
+# whole-connector parse failure — exactly how @DWELL handles its unit.
+_TIMEOUT_SUFFIX = r"(?:\s*~\s*\d+(?:\.\d+)?\s*[smhd]?)?"
+
+# The connector between two states: `--[*][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`.
 #   group 1: the optional auto-advance star.
 #   group 2: the label — a `#`-separated run of segments (method guards / factual guards,
-#            then the trigger). Identifier segments are valid Python identifiers because
-#            `transitions` turns the trigger into a method and resolves condition names
-#            against the model; `@...` segments are factual guards (see _parse_fact_guard).
+#            then the trigger), optionally followed by a `~<dur>` soft-timeout suffix on the
+#            trigger. Identifier segments are valid Python identifiers because `transitions`
+#            turns the trigger into a method and resolves condition names against the model;
+#            `@...` segments are factual guards (see _parse_fact_guard); the `~<dur>` suffix
+#            is split off the trigger in _parse_label (see _parse_trigger_timeout).
 _CONNECTOR_RE = re.compile(
     r"--\s*(\*)?\s*"
-    r"(" + _LABEL_SEGMENT + r"(?:\s*#\s*" + _LABEL_SEGMENT + r")*)"
+    r"(" + _LABEL_SEGMENT + r"(?:\s*#\s*" + _LABEL_SEGMENT + r")*" + _TIMEOUT_SUFFIX + r")"
     r"\s*-->"
 )
 
@@ -133,6 +157,22 @@ _RELAXING_OPS = {">", ">="}
 _INITIAL_MARKER = "^"      # LEADING on a state name
 _TERMINAL_MARKER = "^"     # TRAILING on a state name
 _WILDCARD_SOURCE = "*"     # a lone `*` in the first state slot => "from any source"
+
+# Transition-dict keys whose (string) values name a callable resolved against the carrier
+# object — the explicitly-referenced callbacks a carrier MUST provide. `_fact_guards` is
+# deliberately ABSENT: factual guards (@DWELL/@FAIL) are compiled by the base class itself,
+# not looked up on the carrier, so they impose no carrier-method requirement.
+_CARRIER_CALLBACK_KEYS = ("conditions", "unless", "before", "after", "prepare")
+
+
+def _is_async_callable(fn) -> bool:
+    """True if calling `fn` yields a coroutine: a coroutine function (incl. a functools.partial
+    wrapping one, which inspect unwraps on 3.8+), or a callable instance whose `__call__` is a
+    coroutine function. The single fact the force_async binding check turns on."""
+    if inspect.iscoroutinefunction(fn):
+        return True
+    call = getattr(fn, "__call__", None)
+    return call is not None and inspect.iscoroutinefunction(call)
 
 
 @dataclass
@@ -162,6 +202,13 @@ class FsmChainSpec:
                        never be permanently auto-blocked, because the edge ripens with time.
                        Computed by classify() (run AFTER expand_wildcards). Consulted by the
                        case to decide whether a no-progress pass means AutoAdvanceBlocked.
+        trigger_timeouts  {trigger: soft_secs} for triggers carrying a `~<dur>` SOFT-timeout
+                       annotation (the duration past which the step is considered SLOW, not a
+                       hard kill). Keyed by TRIGGER because the budget is a property of the
+                       work (`_perform_<trigger>`), not the edge; the parser rejects the same
+                       trigger annotated with conflicting durations. Triggers absent here take
+                       the case's default; the hard-abort ceiling is derived (a multiple of
+                       the soft value) by the case, not stored here.
     """
     states: list[str] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)
@@ -175,6 +222,7 @@ class FsmChainSpec:
     pending_wildcards: list[dict] = field(default_factory=list)
     wildcard_dests: set[str] = field(default_factory=set)
     timed_escape_states: set[str] = field(default_factory=set)
+    trigger_timeouts: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> "FsmChainSpec":
@@ -353,6 +401,106 @@ class FsmChainSpec:
             t["_fact_guards"] = list(fgs) + [{"name": "FAIL", "op": "<", "operand": 1}]
         return self
 
+    # ---- carrier-object compatibility (the binding check) ----
+    # The spec is the ONLY thing that knows what callables its graph implies, so it is the
+    # natural place to ask "is this object a suitable carrier for me?" — keeping the check
+    # off FolderBackedCase. PURE except validate_object_compatibility(), which inspects the
+    # object passed in but neither stores it nor mutates the spec.
+
+    def _referenced_callbacks(self):
+        """Yield (slot, item, trigger) for every explicitly-referenced transition callback in
+        the compiled spec — method guards (`conditions`/`unless`) plus any hand-built
+        `before`/`after`/`prepare` from a compile_fsm() override. `item` is a NAME (str, to be
+        resolved on the carrier) or an already-resolved callable. Factual guards are excluded
+        on purpose (see _CARRIER_CALLBACK_KEYS)."""
+        for t in self.transitions:
+            trigger = t.get("trigger")
+            for slot in _CARRIER_CALLBACK_KEYS:
+                val = t.get(slot)
+                if val is None:
+                    continue
+                items = val if isinstance(val, (list, tuple)) else [val]
+                for item in items:
+                    yield slot, item, trigger
+
+    def implied_carrier_attributes(
+        self, *, hook_patterns=("_perform_{trigger}",)
+    ) -> tuple[set[str], set[str]]:
+        """The carrier-method names this FSM implies, as (required, optional):
+          * required — every method-guard / explicitly-named callback the spec references;
+            these MUST exist on the carrier (a missing one is a typo, not a choice).
+          * optional — the per-trigger ACTION methods derived from `hook_patterns` (default
+            `_perform_<trigger>`); wired ONLY when present, hence never required.
+        PURE: reads the spec, binds to nothing. validate_object_compatibility() is the
+        companion that checks a concrete object against these."""
+        required = {
+            item for slot, item, _ in self._referenced_callbacks() if isinstance(item, str)
+        }
+        optional = {
+            pat.format(trigger=trigger)
+            for trigger in self.triggers
+            for pat in hook_patterns
+        }
+        return required, optional
+
+    def validate_object_compatibility(
+        self,
+        obj,
+        *,
+        force_async: bool = True,
+        hook_patterns=("_perform_{trigger}",),
+    ) -> None:
+        """Confirm `obj` is a suitable CARRIER for this compiled FSM, raising FsmBindingError
+        (listing ALL gaps at once) if not. Designed to run ONCE per concrete carrier class —
+        FolderBackedCase calls it at first instantiation, the earliest point a concrete class
+        is guaranteed fully assembled (Python forbids instantiating a class with unimplemented
+        abstractmethods, so leaf-supplied guards are present by then).
+
+        Checks:
+          * EXISTENCE — every method guard / explicitly-named callback the spec references
+            must be defined on `obj`; a missing one is a hard error (almost always a typo).
+          * ASYNC (force_async, default True) — every referenced callable that IS present —
+            the required names AND any optional `_perform_<trigger>` action method — must be a
+            coroutine function. The case family is driven through async (advance(), the
+            generated triggers); a stray `def` instead of `async def` would silently block the
+            event loop, so it is rejected here. Set force_async=False for the rare carrier that
+            deliberately mixes in synchronous callables.
+
+        The `_perform_<trigger>` action methods are OPTIONAL (wired only when present, the
+        zero-effort conventional path) and so are never reported missing — but if present they
+        are held to the async rule like everything else."""
+        missing: dict[str, tuple[str, str, str]] = {}
+        sync: dict[str, tuple[str, str, str]] = {}
+
+        for slot, item, trigger in self._referenced_callbacks():
+            if isinstance(item, str):
+                fn = getattr(obj, item, None)
+                if fn is None:
+                    missing.setdefault(item, (item, slot, trigger))
+                    continue
+                name = item
+            elif callable(item):
+                fn, name = item, getattr(item, "__name__", repr(item))
+            else:
+                continue
+            if force_async and not _is_async_callable(fn):
+                sync.setdefault(name, (name, slot, trigger))
+
+        if force_async:
+            for trigger in self.triggers:
+                for pat in hook_patterns:
+                    name = pat.format(trigger=trigger)
+                    fn = getattr(obj, name, None)
+                    if fn is not None and not _is_async_callable(fn):
+                        sync.setdefault(name, (name, "hook", trigger))
+
+        if missing or sync:
+            raise FsmBindingError(
+                type(obj).__name__,
+                missing=list(missing.values()),
+                sync=list(sync.values()),
+            )
+
 
 class StateChainParser:
     """Stateless renderer from chain strings to an FsmChainSpec. Use the classmethod
@@ -425,11 +573,11 @@ class StateChainParser:
 
         for i, label in enumerate(labels):
             auto = stars[i] == "*"
-            conditions, fact_guards, trigger = cls._parse_label(label, raw, idx)
+            conditions, fact_guards, trigger, soft_secs = cls._parse_label(label, raw, idx)
             cls._add_transition(
                 spec, trigger, node_names[i], node_names[i + 1],
                 conditions=conditions, fact_guards=fact_guards, auto=auto,
-                raw=raw, idx=idx, seen_edges=seen_edges,
+                soft_secs=soft_secs, raw=raw, idx=idx, seen_edges=seen_edges,
             )
 
     @classmethod
@@ -442,7 +590,7 @@ class StateChainParser:
         idx: int,
         spec: FsmChainSpec,
     ) -> None:
-        """Register a single `*--[*][guards#][@dur#]trigger-->DEST` wildcard edge. Must
+        """Register a single `*--[*][guards#]trigger[~<dur>]-->DEST` wildcard edge. Must
         contain exactly ONE transition to a single destination; the concrete per-source
         edges are deduced by FsmChainSpec.expand_wildcards() once every state is known."""
         if len(labels) != 1 or len(state_tokens) != 2:
@@ -454,7 +602,8 @@ class StateChainParser:
         name, initial, terminal = cls._parse_state_token(state_tokens[1], raw, idx)
         cls._add_state(spec, name, initial=initial, terminal=terminal)
         auto = stars[0] == "*"
-        conditions, fact_guards, trigger = cls._parse_label(labels[0], raw, idx)
+        conditions, fact_guards, trigger, soft_secs = cls._parse_label(labels[0], raw, idx)
+        cls._record_trigger_timeout(spec, trigger, soft_secs, raw, idx)
         spec.pending_wildcards.append({
             "trigger": trigger, "dest": name, "conditions": conditions,
             "fact_guards": fact_guards, "auto": auto,
@@ -522,11 +671,13 @@ class StateChainParser:
     @classmethod
     def _parse_label(
         cls, label: str, raw: str, idx: int
-    ) -> tuple[list[str], list[dict], str]:
-        """Split a connector label into (conditions, fact_guards, trigger). The final
-        `#`-delimited token is the trigger; preceding tokens are either method-guard names
-        or `@FACT<op>N` factual guards (parsed by _parse_fact_guard). The trigger itself may
-        not be a factual guard, and at most one guard per FACT NAME is allowed."""
+    ) -> tuple[list[str], list[dict], str, Optional[float]]:
+        """Split a connector label into (conditions, fact_guards, trigger, soft_secs). The
+        final `#`-delimited token is the trigger (optionally carrying a `~<dur>` SOFT-timeout
+        suffix, split off here); preceding tokens are either method-guard names or
+        `@FACT<op>N` factual guards (parsed by _parse_fact_guard). The trigger itself may not
+        be a factual guard, and at most one guard per FACT NAME is allowed. `soft_secs` is the
+        annotated soft-timeout in seconds, or None when un-annotated."""
         tokens = [p.strip() for p in label.split("#")]
         if any(not t for t in tokens):
             raise FsmChainParseError(
@@ -535,6 +686,9 @@ class StateChainParser:
                 chain=raw, index=idx,
             )
         trigger = tokens[-1]
+        soft_secs: Optional[float] = None
+        if "~" in trigger:                       # split the `~<dur>` soft-timeout off the trigger
+            trigger, soft_secs = cls._parse_trigger_timeout(trigger, raw, idx)
         if trigger.startswith("@"):
             raise FsmChainParseError(
                 f"a connector's trigger cannot be a factual guard ({trigger!r}); the final "
@@ -556,7 +710,50 @@ class StateChainParser:
                 fact_guards.append(fg)
             else:
                 conditions.append(tok)
-        return conditions, fact_guards, trigger
+        return conditions, fact_guards, trigger, soft_secs
+
+    @staticmethod
+    def _parse_trigger_timeout(token: str, raw: str, idx: int) -> tuple[str, float]:
+        """Split a `trigger~<dur>` token into (trigger_name, soft_secs). The duration uses
+        the same units as @DWELL (s|m|h|d, float allowed) and yields SECONDS. A unit is
+        REQUIRED — a unit-less duration is the most likely typo, so it gets a pointed message
+        rather than silently meaning something else."""
+        name, _, dur = token.partition("~")
+        name, dur = name.strip(), dur.strip()
+        m = re.match(r"^(\d+(?:\.\d+)?)\s*([smhd])$", dur)
+        if m is None:
+            raise FsmChainParseError(
+                f"invalid trigger soft-timeout in {token.strip()!r}; write 'trigger~<dur>' "
+                "with a unit s|m|h|d (e.g. 'assign~20s', 'fetch~1.5m')",
+                chain=raw, index=idx,
+            )
+        secs = float(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+        if secs <= 0:
+            raise FsmChainParseError(
+                f"trigger soft-timeout must be positive (got {token.strip()!r})",
+                chain=raw, index=idx,
+            )
+        return name, secs
+
+    @staticmethod
+    def _record_trigger_timeout(
+        spec: FsmChainSpec, trigger: str, soft_secs: Optional[float], raw: str, idx: int
+    ) -> None:
+        """Record a trigger's `~<dur>` soft-timeout on the spec, keyed by TRIGGER (the budget
+        is a property of `_perform_<trigger>`, not the edge). Annotating + not-annotating the
+        same trigger is fine (the annotation wins); annotating it with two DIFFERENT durations
+        is a contradiction and is rejected."""
+        if soft_secs is None:
+            return
+        existing = spec.trigger_timeouts.get(trigger)
+        if existing is not None and existing != soft_secs:
+            raise FsmChainParseError(
+                f"trigger {trigger!r} is annotated with conflicting soft-timeouts "
+                f"({existing:g}s vs {soft_secs:g}s); a trigger's timeout is a property of its "
+                "work — annotate it once, or identically on every edge",
+                chain=raw, index=idx,
+            )
+        spec.trigger_timeouts[trigger] = soft_secs
 
     @staticmethod
     def _parse_fact_guard(token: str, raw: str, idx: int) -> dict:
@@ -621,8 +818,9 @@ class StateChainParser:
             if spec.initial_state is None:        # first initial-marked state wins as default
                 spec.initial_state = name
 
-    @staticmethod
+    @classmethod
     def _add_transition(
+        cls,
         spec: FsmChainSpec,
         trigger: str,
         source: str,
@@ -631,10 +829,14 @@ class StateChainParser:
         conditions: list[str],
         fact_guards: list[dict],
         auto: bool,
+        soft_secs: Optional[float],
         raw: str,
         idx: int,
         seen_edges: dict[tuple, str],
     ) -> None:
+        # A trigger's soft-timeout is recorded regardless of edge-dedup below: it is keyed by
+        # trigger (a property of its work), and the recorder rejects conflicting annotations.
+        cls._record_trigger_timeout(spec, trigger, soft_secs, raw, idx)
         # Edge identity includes the guards (method conditions + factual guards): identical
         # trigger+source+guards but different dest is genuinely ambiguous; differing
         # guards is legitimate branching.

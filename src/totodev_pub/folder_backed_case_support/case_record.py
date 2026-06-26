@@ -22,9 +22,9 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     Serialized as YAML (FileMappedPydanticMixin). Fields emit in definition order
     (sort_keys=False) for clean, churn-free diffs.
 
-    Subclasses may add typed fields (see FolderBackedCase._record_cls, §4b). Any
-    added field MUST have a default / be Optional so that older on-disk records
-    (which lack the field) can still be loaded after a class upgrade.
+    Subclasses may add typed fields (see FolderBackedCase._record_cls). Any added
+    field MUST have a default / be Optional so that older on-disk records (which lack
+    the field) can still be loaded after a class upgrade.
     """
 
     case_object_type: str              # bare class __name__; resolved via the registry at hydration

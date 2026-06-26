@@ -34,7 +34,7 @@ def test_create_and_basic_properties(tmp_path):
         assert case.is_open
         assert not case.is_closed
     finally:
-        case.release()
+        case.detach()
 
 
 def test_context_manager_releases_lease(tmp_path):
@@ -52,7 +52,7 @@ def test_second_open_raises(tmp_path):
         with pytest.raises(CaseAlreadyOpenError):
             SimpleCase(folder)
     finally:
-        first.release()
+        first.detach()
 
 
 def test_fsm_transitions(tmp_path):

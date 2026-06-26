@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from totodev_pub.primitive_event_log import PrimitiveEventLog
+from totodev_pub.folder_backed_case_support.constants import EV_ENTER_STATE, EV_CLOSED
 
 
 class CaseEventLogReader:
@@ -35,14 +36,14 @@ class CaseEventLogReader:
 
     @property
     def current_state(self) -> Optional[str]:
-        """Latest ENTER_STATE value == fine-grained current state."""
-        ev = next(self._log.events(label_glob="ENTER_STATE"), None)  # recent_first=True default
+        """Latest CASE_ENTER_STATE value == fine-grained current state."""
+        ev = next(self._log.events(label_glob=EV_ENTER_STATE), None)  # recent_first=True default
         return ev.value if ev else None
 
     @property
     def is_closed(self) -> bool:
         """True when a CASE_CLOSED bookend event is present."""
-        return bool(self._log.has_event("CASE_CLOSED"))
+        return bool(self._log.has_event(EV_CLOSED))
 
     @property
     def status(self) -> str:
