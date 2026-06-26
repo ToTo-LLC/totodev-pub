@@ -33,7 +33,7 @@ class CaseAssets:
     # ---- locations ----
 
     @property
-    def root(self) -> Path:
+    def folder(self) -> Path:
         """The assets playground (<case_folder>/assets), created on first access."""
         d = self._case_folder / ASSETS_DIR_NAME
         d.mkdir(parents=True, exist_ok=True)
@@ -44,9 +44,29 @@ class CaseAssets:
         """The retention manifest file (<case_folder>/_keep_assets.txt)."""
         return self._case_folder / KEEP_LIST_NAME
 
-    def path_for(self, relative_path: str) -> Path:
-        """Absolute path of an asset (relative to root). Does not require existence."""
-        return self.root / _norm_rel(relative_path)
+    def asset_path(self, relative_path: str) -> Path:
+        """Absolute path of an asset (relative to assets folder). Does not require existence."""
+        return self.folder / _norm_rel(relative_path)
+
+    def relative_path(self, path: str | Path) -> str:
+        """Manifest-safe relative asset path for `path`.
+
+        Accepts either:
+          * a relative path (normalized + validated), or
+          * an absolute path that must be inside the assets folder.
+        """
+        p = Path(path)
+        if p.is_absolute():
+            assets_folder = self.folder.resolve()
+            absolute = p.resolve()
+            try:
+                rel = absolute.relative_to(assets_folder)
+            except ValueError:
+                raise ValueError(
+                    f"path {p!r} is not inside assets folder {assets_folder!r}"
+                ) from None
+            return _norm_rel(rel.as_posix())
+        return _norm_rel(p.as_posix())
 
     # ---- asset enumeration ----
 
@@ -123,7 +143,7 @@ class CaseAssets:
     def write(self, relative_path: str, data: bytes, *, keep: bool = False) -> Path:
         """Write bytes to an asset path, creating parent dirs. keep=True also records it
         in the retention manifest. Returns the absolute path."""
-        target = self.path_for(relative_path)
+        target = self.asset_path(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         if keep:
@@ -131,7 +151,7 @@ class CaseAssets:
         return target
 
     def read(self, relative_path: str) -> bytes:
-        return self.path_for(relative_path).read_bytes()
+        return self.asset_path(relative_path).read_bytes()
 
     # ---- purge ----
 

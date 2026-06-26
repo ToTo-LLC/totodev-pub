@@ -145,6 +145,26 @@ class TriggerTimeout(Exception):
         self.ceiling = ceiling
 
 
+class MissingFsmError(Exception):
+    """Raised at first instantiation of a concrete FolderBackedCase subclass that defines
+    no FSM at all — it neither declares `fsm_state_chains` nor overrides `compile_fsm()`
+    to build a spec by hand, so its compiled `_fsm` has zero states.
+
+    An empty spec is intentionally LEGAL for the base class and for abstract intermediates
+    (which are never instantiated), so this omission cannot be caught at class-definition
+    time — only at the first attempt to construct a concrete case. Distinct from its
+    siblings: FsmChainParseError means the chains are malformed; FsmBindingError means the
+    chains are fine but the carrier lacks (or mis-types) their methods; THIS means there is
+    no state model to bind at all. The message names the corrective action."""
+    def __init__(self, carrier_name: str):
+        self.carrier_name = carrier_name
+        super().__init__(
+            f"{carrier_name!r} defines no FSM: declare `fsm_state_chains` "
+            "(e.g. [\"^new--begin-->done^\"]) or override `compile_fsm()` to build an "
+            "FsmChainSpec by hand."
+        )
+
+
 class FsmChainParseError(Exception):
     """Raised by StateChainParser when an `fsm_state_chains` entry cannot be parsed
     into a well-formed FSM. Carries the offending chain (and its index in the list,

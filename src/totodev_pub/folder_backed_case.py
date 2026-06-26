@@ -26,7 +26,8 @@ Quick start
     class TicketCase(FolderBackedCase):
         # Mermaid-flavoured chains: A--trigger-->B; leading `^` = initial state,
         # trailing `^` = terminal state, leading `*` on a connector = auto-advance.
-        fsm_state_chains = ["^new--open_ticket-->open--*close_ticket-->closed^"]
+        fsm_state_chains = ["^new--open_ticket-->open--*close_ticket-->closed^"
+                            "*--*@DWELL>14d#non_responsive-->auto_closed^"] # timed-escape edge
 
     FolderBackedCase.register_case_types(TicketCase)
 
@@ -77,6 +78,7 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     UnregisteredCaseTypeError,
     RecordTypeMismatchError,
     IncompatibleReclassError,
+    MissingFsmError,
     FsmChainParseError,
     FsmBindingError,
     AutoAdvanceBlocked,
@@ -120,6 +122,7 @@ __all__ = [
     "UnregisteredCaseTypeError",
     "RecordTypeMismatchError",
     "IncompatibleReclassError",
+    "MissingFsmError",
     "FsmChainParseError",
     "FsmBindingError",
     "AutoAdvanceBlocked",
@@ -143,43 +146,18 @@ class FolderBackedCase(ABC):
     `transitions`, a flat pipeline driver, ephemeral-file retention,
     the two-phase closing-edge hook, and a single-owner heartbeat lease.
 
-    Subclasses declare ONE thing for the FSM:
-        fsm_state_chains  list of Mermaid-flavoured chain strings, e.g.
-                          ["^new--assign-->assigned--*begin-->in_process--*funded#finish-->closed^"].
-                            * `A--trigger-->B` is a transition.
-                            * a LEADING `^` marks an INITIAL/entry state (`^new`); a
-                              TRAILING `^` marks a TERMINAL/closed state (`closed^`,
-                              fires the two-phase close hook). Chains must collectively
-                              declare ≥1 of each; the default entry is the first
-                              initial-marked state, so a first-chain initial wins.
-                            * a leading `*` on a connector marks the edge AUTO-ADVANCE
-                              (opt-in; advance()/run_to_completion may fire it). Un-starred
-                              edges never auto-fire — fail-safe against skipping a gate.
-                            * `guard#trigger` attaches `conditions`; advance() tries the
-                              auto candidates from a state in order, firing the first whose
-                              guard permits. Guards must be FAST and non-blocking: they run
-                              before the trigger's work and are NOT time-bounded (only the
-                              work is), so a slow/blocking guard stalls the driver.
-                            * `@FACT<op>N#trigger` adds a FACTUAL GUARD (ops `< <= > >=`, no
-                              equality): `@DWELL>60m` gates on time dwelled in the source
-                              state (units s|m|h|d), `@FAIL<3` gates on the count of
-                              CASE_FAIL_TRANSITION events this dwell (the retry knob — pair a
-                              `@FAIL<n` retry edge with an optional `@FAIL>=n` divert edge).
-                              Facts gate; they do not drive. RETRY IS OPT-IN: an auto edge
-                              with no explicit `@FAIL` gets an implicit `@FAIL<1` (one shot,
-                              then it stops auto-firing) — EXCEPT a pure timed-escape edge
-                              (`@DWELL>`/`>=` only), which tolerates unlimited failures so a
-                              safety-net timeout is never disabled by a transient fault.
-                            * `trigger~<dur>` adds a SOFT TIMEOUT (suffix; `~` = "about"):
-                              the duration (units s|m|h|d) past which the step is deemed SLOW
-                              (a warning), NOT a hard kill — the hard-abort ceiling is derived
-                              as a multiple. Annotate slow triggers; the rest inherit a default.
-                            * a chain starting with `*--` is a "from any source" wildcard
-                              (`*--cancel-->cancelled^`): one edge fired from any non-terminal
-                              state, deduced after validation (explicit edges overrule it).
-                          Side-effecting work for a trigger goes in a `_perform_<trigger>`
-                          method, auto-wired as the transition's `before` (a raise aborts the
-                          step). The parser renders chains into the per-class singleton `_fsm`.
+    Subclasses declare ONE thing for the FSM: `fsm_state_chains`, a list of
+    Mermaid-flavoured chain strings. A trivial example:
+
+        fsm_state_chains = ["^new--assign-->assigned--*work-->closed^"]
+
+    reads left-to-right as states joined by `--trigger-->` connectors, where a leading
+    `^` marks the initial state, a trailing `^` a terminal (closing) state, and a
+    leading `*` opts an edge into auto-advance. Connectors also carry guards, `@DWELL`/
+    `@FAIL` factual guards, and `~<dur>` soft timeouts — see StateChainParser for the
+    full grammar. Side-effecting work for a trigger goes in a `_perform_<trigger>`
+    method, auto-wired as the transition's `before` (a raise aborts the step); the
+    parser renders the chains into the per-class singleton `_fsm`.
 
     Need the full power of `transitions` (callbacks, `unless`, `*`/multi-source, state
     objects)? Override compile_fsm() and return an FsmChainSpec you build yourself
@@ -190,16 +168,13 @@ class FolderBackedCase(ABC):
     # The ONE declarative FSM input (World A): the default compile_fsm() parses this.
     fsm_state_chains: list[str] = []
 
-    # The compiled FSM — a PER-CLASS singleton, populated in __init_subclass__ and shared
-    # by every instance. Reconfiguring it on a live machine is unsupported. The base ABC
-    # itself carries an empty spec; concrete subclasses overwrite it.
+    # Compiled per-class FSM (private); really populated in __init_subclass__ via
+    # compile_fsm(). Empty here on the base until a subclass supplies one.
     _fsm: FsmChainSpec = FsmChainSpec.empty()
 
-    # Record extensibility: point _record_cls at a CaseRecord subclass to carry extra
-    # TYPED fields. Subclasses MAY mutate those fields mid-life; keep the record as
-    # non-volatile as reasonably possible — volatile/derived data belongs in the event
-    # log — but infrequently-changed fields are fine here. PRIVATE on purpose: the only
-    # public way to read a record is fetch_record().
+    # The record-type seam (always required; defaults to CaseRecord): this attribute IS
+    # the extension point — subclass CaseRecord and set `_record_cls = MyRecord` to add
+    # fields. Read the live record back via fetch_record().
     _record_cls: type[CaseRecord] = CaseRecord
 
     # ---- FSM compilation (parse-once-at-class-definition) ----
@@ -290,31 +265,47 @@ class FolderBackedCase(ABC):
     # ---- ID generation ----
 
     @classmethod
-    def new_standard_time_slug(cls) -> str:
-        """The canonical default case_id scheme: a short, sortable, base-36
-        millisecond time slug. Public so a subclass with a custom
-        generate_case_id() can still fall back to (or compose) the standard."""
-        return _new_time_slug()
-
-    @classmethod
     def generate_case_id(cls) -> str:
         """Auto-ID factory used by create_in_folder() when no explicit case_id is
-        supplied. PUBLIC, overridable extension point — a subclass may return a
-        UUID, a domain-prefixed id, a sequential counter, etc. The default is the
-        standard time slug. (Must be a classmethod: the id is minted before the
-        instance exists, so there is no `self` to hang an instance method on.)"""
-        return cls.new_standard_time_slug()
+        supplied. The SOLE public slug seam: an overridable extension point — a
+        subclass may return a UUID, a domain-prefixed id, a sequential counter,
+        etc., and can COMPOSE with the default via super().generate_case_id()
+        (e.g. f"INV-{super().generate_case_id()}"). The default is a short,
+        sortable, base-36 millisecond time slug.
+
+        (Must be a classmethod: the id is minted before the instance exists, so
+        there is no `self` to hang an instance method on.)"""
+        return _new_time_slug()
 
     # ---- construction ----
 
     def __init__(self, case_folder: Path):
-        # ONE-TIME carrier binding check, BEFORE any disk/lease I/O so a misconfigured class
-        # fails clean. Run at the first instantiation of each CONCRETE class — the earliest
-        # point the class is guaranteed fully assembled (leaf guards present). The sentinel is
-        # keyed on cls.__dict__, NOT a plain attribute: a truthy flag inherited from a parent
-        # would wrongly skip a subclass validating its OWN (different) FSM. A raise leaves the
-        # flag unset, so every attempt re-checks and re-reports until fixed.
+        """Bind a live case object to an EXISTING on-disk case folder.
+
+        This constructor is intentionally the load/bind path, not inception:
+        it expects `case_record.yaml` (and any existing event-log history) to
+        already exist on disk, then loads them, acquires the lease, and builds
+        the in-memory FSM carrier.
+
+        Brand-new cases are created via `create_in_folder(...)`, which first
+        materializes the folder + record (minting `case_id` via
+        `generate_case_id()` when needed), then immediately calls this
+        constructor to attach the live object.
+        """
+        # Config guards, BEFORE any disk/lease I/O so a misconfigured class fails clean.
+        # Both run at the first instantiation of a CONCRETE class — the earliest point the
+        # class is guaranteed fully assembled (leaf guards present).
         cls = type(self)
+        # 1. NO-FSM guard: an empty spec is legal for the base / abstract intermediates
+        # (never instantiated), so the "forgot to declare an FSM" case can only be caught
+        # here, with a message that names the corrective action (vs. an opaque ValueError
+        # from `transitions` when it is handed no initial state).
+        if not cls._fsm.states:
+            raise MissingFsmError(cls.__name__)
+        # 2. ONE-TIME carrier binding check. The sentinel is keyed on cls.__dict__, NOT a
+        # plain attribute: a truthy flag inherited from a parent would wrongly skip a
+        # subclass validating its OWN (different) FSM. A raise leaves the flag unset, so
+        # every attempt re-checks and re-reports until fixed.
         if "_fsm_binding_checked" not in cls.__dict__:
             cls._fsm.validate_object_compatibility(self)
             cls._fsm_binding_checked = True
@@ -368,10 +359,52 @@ class FolderBackedCase(ABC):
         **fields,
     ) -> FolderBackedCase:
         """First-time inception, shared by CaseManager.create_case() and standalone.
-        Writes the skinny record, constructs (load-only), and logs the lifecycle bookend
-        CASE_NEW plus the initial CASE_ENTER_STATE."""
+
+        Path policy is deliberately typo-resistant:
+          * If `case_folder` exists, reuse it.
+          * If it does not exist, create ONLY that leaf directory.
+          * Its parent MUST already exist (no recursive parent creation), so a typo
+            cannot silently create a deep stray path.
+
+        Safety guard: the target folder must not already contain any case-owned
+        artifacts (`case_record.yaml`, `events/`, `assets/`, `_keep_assets.txt`,
+        `.case.lease`). Unrelated files are allowed.
+
+        Then writes the skinny record, constructs (load/bind), and logs the
+        lifecycle bookend CASE_NEW plus the initial CASE_ENTER_STATE.
+        """
         case_folder = Path(case_folder)
-        case_folder.mkdir(parents=True, exist_ok=True)
+        parent = case_folder.parent
+        if not parent.exists():
+            raise FileNotFoundError(
+                f"Parent folder {parent} does not exist. "
+                "Create/confirm the parent folder first, then retry create_in_folder()."
+            )
+        if not parent.is_dir():
+            raise NotADirectoryError(
+                f"Parent path {parent} exists but is not a directory."
+            )
+        if case_folder.exists():
+            if not case_folder.is_dir():
+                raise NotADirectoryError(
+                    f"Target path {case_folder} exists but is not a directory."
+                )
+        else:
+            case_folder.mkdir(parents=False, exist_ok=False)
+        reserved_paths = {
+            RECORD_NAME: case_folder / RECORD_NAME,
+            "events": case_folder / "events",
+            ASSETS_DIR_NAME: case_folder / ASSETS_DIR_NAME,
+            KEEP_LIST_NAME: case_folder / KEEP_LIST_NAME,
+            LEASE_NAME: case_folder / LEASE_NAME,
+        }
+        found = [name for name, path in reserved_paths.items() if path.exists()]
+        if found:
+            found_list = ", ".join(sorted(found))
+            raise FileExistsError(
+                f"Cannot create a new case in {case_folder}: existing case artifacts "
+                f"found ({found_list}). Choose a clean case folder."
+            )
         record = cls._record_cls(
             case_object_type=cls.__name__,
             case_id=case_id or cls.generate_case_id(),
@@ -1108,8 +1141,9 @@ class FolderBackedCase(ABC):
     @property
     def assets(self) -> CaseAssets:
         """The case's CaseAssets: file playground under assets/ plus the keep manifest.
-        Use case.assets.write(...), .keep_asset(...), .list_assets(), etc. Kept off this
-        class's own namespace so asset concerns stay grouped in one place."""
+        Use case.assets.folder, .asset_path(...), .relative_path(...), .write(...),
+        .keep_asset(...), .list_assets(), etc. Kept off this class's own namespace so
+        asset concerns stay grouped in one place."""
         return self._assets
 
     # ---- archive label hook ----
