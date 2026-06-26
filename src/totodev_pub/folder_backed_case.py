@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import operator
 import os
 import re
 import time
@@ -67,14 +68,25 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     RecordTypeMismatchError,
     IncompatibleReclassError,
     FsmChainParseError,
+    AutoAdvanceBlocked,
 )
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
 from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
+from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser,
     FsmChainSpec,
 )
+
+# Comparator name -> callable, for compiling `@FACT<op>N` factual guards into condition
+# functions. Equality is intentionally absent (the DSL forbids ==/!=).
+_FACT_OPS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
+
+# Event-log labels owned by this base class (all CASE_-prefixed for easy filtering).
+_EV_ENTER_STATE = "ENTER_STATE"
+_EV_FAIL_TRANSITION = "CASE_FAIL_TRANSITION"   # pre-commit attempt failed (counted by @FAIL)
+_EV_ENTRY_EXCEPTION = "CASE_ENTRY_EXCEPTION"   # post-commit on_enter/after raised (NOT counted)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +95,7 @@ __all__ = [
     "CaseRecord",
     "CaseEventLogReader",
     "CaseAssets",
+    "AdvanceResult",
     "StateChainParser",
     "FsmChainSpec",
     "CaseAlreadyOpenError",
@@ -92,6 +105,7 @@ __all__ = [
     "RecordTypeMismatchError",
     "IncompatibleReclassError",
     "FsmChainParseError",
+    "AutoAdvanceBlocked",
     "RECORD_NAME",
     "LEASE_NAME",
     "ASSETS_DIR_NAME",
@@ -126,9 +140,16 @@ class FolderBackedCase(ABC):
                             * `guard#trigger` attaches `conditions`; advance() tries the
                               auto candidates from a state in order, firing the first whose
                               guard permits.
-                            * `@<dur>#trigger` adds a TIME GUARD (`*@60m#expire`): a factual
-                              condition true once the case has dwelled ≥ that long in the
-                              source state (units s|m|h|d; it gates, it does not drive).
+                            * `@FACT<op>N#trigger` adds a FACTUAL GUARD (ops `< <= > >=`, no
+                              equality): `@DWELL>60m` gates on time dwelled in the source
+                              state (units s|m|h|d), `@FAIL<3` gates on the count of
+                              CASE_FAIL_TRANSITION events this dwell (the retry knob — pair a
+                              `@FAIL<n` retry edge with an optional `@FAIL>=n` divert edge).
+                              Facts gate; they do not drive. RETRY IS OPT-IN: an auto edge
+                              with no explicit `@FAIL` gets an implicit `@FAIL<1` (one shot,
+                              then it stops auto-firing) — EXCEPT a pure timed-escape edge
+                              (`@DWELL>`/`>=` only), which tolerates unlimited failures so a
+                              safety-net timeout is never disabled by a transient fault.
                             * a chain starting with `*--` is a "from any source" wildcard
                               (`*--cancel-->cancelled^`): one edge fired from any non-terminal
                               state, deduced after validation (explicit edges overrule it).
@@ -170,9 +191,15 @@ class FolderBackedCase(ABC):
         `*--...-->` wildcard edges via expand_wildcards() (in that order, so the typo checks
         see only the explicit graph); OVERRIDE this to build/extend the spec by hand for the
         rare cases the chain DSL can't express (arbitrary callbacks, `unless`, state objects)
-        — an override owns whether and when to call validate()/expand_wildcards(). Overriding
-        is the single, unambiguous manual escape hatch."""
-        return StateChainParser.parse(cls.fsm_state_chains).validate().expand_wildcards()
+        — an override owns whether and when to call validate()/expand_wildcards()/classify()/
+        apply_implicit_fail_cap(). Overriding is the single, unambiguous manual escape hatch."""
+        return (
+            StateChainParser.parse(cls.fsm_state_chains)
+            .validate()
+            .expand_wildcards()
+            .classify()
+            .apply_implicit_fail_cap()
+        )
 
     def __init_subclass__(cls, **kwargs) -> None:
         # Parse + validate at class-definition time: fail-fast (a malformed chain blows
@@ -490,14 +517,15 @@ class FolderBackedCase(ABC):
     def _prepare_machine_transitions(self, transitions: list[dict]) -> list[dict]:
         """Return machine-ready transition dicts from the per-class `_fsm` spec, applying
         the two conventions the parser leaves for the live instance to bind, and stripping
-        the spec's private `_`-prefixed keys (e.g. `_min_dwell_secs`, `_wildcard`) that the
+        the spec's private `_`-prefixed keys (e.g. `_fact_guards`, `_wildcard`) that the
         `transitions` library would reject. The shared `_fsm` spec is never mutated — each
         edge is rebuilt as a fresh dict.
 
-        1. TIME GUARD — a `_min_dwell_secs` (from a `@<dur>` token) is compiled into an
-           extra `conditions` callable that is true once the case has dwelled at least that
-           long in its current state (measured from `self._state_entered_at`). It is a pure
-           factual guard; it does not drive anything.
+        1. FACTUAL GUARDS — each `_fact_guards` entry (from a `@FACT<op>N` token) is compiled
+           into an extra `conditions` callable: `@DWELL` compares dwell_secs(); `@FAIL`
+           compares the count of CASE_FAIL_TRANSITION events since the current state was
+           entered (see _fail_count). They are pure factual guards; they do not drive
+           anything — something must still attempt the trigger.
         2. `_perform_<trigger>` -> `before` — the work a trigger implies belongs in
            `before`: if it raises, the transition ABORTS and the case stays in its source
            state (no ENTER_STATE logged), so "retry" is just "fire the trigger again" and a
@@ -509,10 +537,11 @@ class FolderBackedCase(ABC):
         for td in transitions:
             trigger = td["trigger"]
             clean = {k: v for k, v in td.items() if not k.startswith("_")}
-            min_dwell = td.get("_min_dwell_secs")
-            if min_dwell is not None:
+            fact_guards = td.get("_fact_guards")
+            if fact_guards:
                 conds = list(clean.get("conditions", []))
-                conds.append(self._make_dwell_condition(min_dwell))
+                for fg in fact_guards:
+                    conds.append(self._make_fact_guard(fg["name"], fg["op"], fg["operand"]))
                 clean["conditions"] = conds
             if "before" not in clean:
                 method = f"_perform_{trigger}"
@@ -521,13 +550,52 @@ class FolderBackedCase(ABC):
             prepared.append(clean)
         return prepared
 
-    def _make_dwell_condition(self, min_secs: float):
-        """Build a `transitions` condition callable for a `@<dur>` time guard: true once at
-        least `min_secs` have elapsed since the current state was entered. Bound to this
-        instance so each model gets its own check (send_event=True => receives EventData)."""
-        def _dwell_elapsed(event) -> bool:
-            return (_utcnow() - self._state_entered_at).total_seconds() >= min_secs
-        return _dwell_elapsed
+    def _make_fact_guard(self, name: str, op: str, operand):
+        """Build a `transitions` condition callable for a `@FACT<op>N` factual guard. Bound
+        to this instance so each model checks its own facts (send_event=True => the callable
+        receives EventData, which it ignores). `@DWELL` compares dwell_secs() (seconds in
+        the current state); `@FAIL` compares _fail_count() (failed attempts this dwell)."""
+        cmp = _FACT_OPS[op]
+        if name == "DWELL":
+            def _dwell_guard(event) -> bool:
+                return cmp(self.dwell_secs(), operand)
+            return _dwell_guard
+        if name == "FAIL":
+            def _fail_guard(event) -> bool:
+                return cmp(self._fail_count(), operand)
+            return _fail_guard
+        raise ValueError(f"unknown factual guard {name!r}")   # parser should prevent this
+
+    def dwell_secs(self) -> float:
+        """Seconds the case has spent in its CURRENT state — the fact the `@DWELL` guard
+        compares against. Measured from `self._state_entered_at` (the latest ENTER_STATE,
+        or creation for a brand-new case). This is the documented home for "what does DWELL
+        mean": a `@DWELL>30m` guard is simply `dwell_secs() > 1800`."""
+        return (_utcnow() - self._state_entered_at).total_seconds()
+
+    def _fail_count(self) -> int:
+        """Count of CASE_FAIL_TRANSITION events since the current state was entered — the
+        fact the `@FAIL` guard compares against. STATE-scoped: every failed pre-commit
+        attempt in this dwell counts, regardless of which trigger raised. Derived from the
+        event log (no stored counter), so it is correct across process restarts and resets
+        naturally when the next ENTER_STATE is logged."""
+        n = 0
+        for ev in self._events.primitive.events(recent_first=True):
+            if ev.label == _EV_ENTER_STATE:
+                break                       # reached the boundary of the current dwell
+            if ev.label == _EV_FAIL_TRANSITION:
+                n += 1
+        return n
+
+    def _has_event_since_enter(self, label: str) -> bool:
+        """True if an event with `label` has been logged since the current state was
+        entered. Used to keep blocked-state alerts to one per dwell."""
+        for ev in self._events.primitive.events(recent_first=True):
+            if ev.label == _EV_ENTER_STATE:
+                return False
+            if ev.label == label:
+                return True
+        return False
 
     def _on_state_changed(self, event) -> None:
         """Runs after EVERY transition (event is a transitions EventData). Records the
@@ -569,48 +637,91 @@ class FolderBackedCase(ABC):
             self._notify("CASE_CLOSED", src=src, dest=dest)
 
     async def _on_fsm_exception(self, event) -> None:
-        """Machine-level `on_exception` hook (wired in _build_machine): fires when ANY
-        callback in a trigger's dispatch raises — a guard, a `_perform_<trigger>`, an
-        on_enter/on_exit, or an `after`. `transitions` has already aborted the transition
-        (the model stayed in its source state) by the time we get here.
+        """Machine-level `on_exception` hook (wired in _build_machine): the SINGLE chokepoint
+        every trigger dispatch funnels through, so it covers both advance() and a direct
+        `await case.<trigger>()`. Fires when ANY callback raises — a guard, a
+        `_perform_<trigger>`, on_exit/on_enter, or an `after`.
 
-        We do three things, in order:
-          1. DECORATE the exception with structured FSM context under `case_context`
-             (case_id + the trigger and intended source/dest). A driver such as a
-             CaseManager — which by design does NOT understand any case's internals —
-             can branch on this to take its crude actions (kill / monitor / retry /
-             escalate) without parsing the message or knowing the case type. Decoration
-             happens HERE rather than in advance() so the context is attached however the
-             trigger was fired (direct `await case.x()` as well as via advance()).
-          2. Log a CASE_ALERT (type-agnostic escalation marker) capturing the same
-             context in the low-volume event log, so the failure is visible on disk.
-          3. RE-RAISE the original exception (preserving its type and traceback) so the
-             abort stays fail-fast and the caller still sees the real error.
+        It distinguishes the COMMIT BOUNDARY without needing to know which callback slot
+        raised: `transitions` sets `self.state` to the dest during the state change, BEFORE
+        on_enter/after run, so `self.state == dest` means we are POST-commit.
 
-        FUTURE ENHANCEMENT (deferred): EventData does not reveal WHICH callback slot
-        raised, so we cannot yet distinguish e.g. an operational `_perform_` failure
-        from a (likely-defect) guard exception. That phase attribution can be added by
-        wrapping the callbacks we ourselves wire; not implemented until a need appears."""
+        Steps, in order:
+          1. NO-DRIFT REMEDY (post-commit only): if we advanced in memory but the durable
+             ENTER_STATE write never ran (the after_state_change writer was skipped by the
+             raise), write it now so the on-disk log can never lag in-memory state.
+          2. DECORATE the exception with structured `case_context` (case_id, trigger,
+             source/dest, commit phase) so a type-agnostic driver can branch without parsing
+             messages — attached HERE so it travels regardless of how the trigger was fired.
+          3. LOG a terse, COUNTABLE failure fact (NOT a CASE_ALERT): CASE_FAIL_TRANSITION for
+             a pre-commit failure (the kind `@FAIL` counts and retries re-attempt), or
+             CASE_ENTRY_EXCEPTION for a post-commit entry-hook raise (it DID enter; logged
+             and hooked, but NOT counted by @FAIL).
+          4. Call on_transition_exception(...) so the case may compensate.
+          5. RE-RAISE the original exception. advance() catches it and folds it into an
+             AdvanceResult; a direct caller gets the raise (fail-fast preserved)."""
         err = event.error
         trigger = event.event.name if event.event is not None else None
         trans = event.transition
         src = trans.source if trans is not None else self.state
         dest = trans.dest if trans is not None else None
+        post_commit = dest is not None and self.state == dest
+
+        # 1. No-drift remedy. NOTE (sharp edge): if dest is a TERMINAL state, the two-phase
+        # close in _on_state_changed was also skipped here; we reconcile the ENTER_STATE but
+        # do NOT attempt the close from inside the exception handler. Terminal-entry failures
+        # need the close path made idempotent/re-runnable — flagged for the next pass.
+        if post_commit and self._events.current_state != dest:
+            self._events.primitive.create_event(_EV_ENTER_STATE, dest)
+            self._last_activity = _utcnow()
+            self._state_entered_at = self._last_activity
+
+        # 2. Decorate.
         context = {
             "case_id": self.case_id,
             "trigger": trigger,
             "source": src,
             "dest": dest,
+            "phase": "post_commit" if post_commit else "pre_commit",
         }
         try:
             err.case_context = context        # best-effort; some exceptions forbid attrs
         except (AttributeError, TypeError):
             pass
-        self.log_alert(
-            f"unhandled {type(err).__name__} in {trigger} ({src} -> {dest})",
-            where=src,
-        )
+
+        # 3. Log the countable failure fact.
+        detail = {"trigger": trigger, "source": src, "dest": dest,
+                  "error": type(err).__name__, "msg": str(err)[:200]}
+        if post_commit:
+            self._events.primitive.create_event(_EV_ENTRY_EXCEPTION, dest or src, detail)
+        else:
+            self._events.primitive.create_event(_EV_FAIL_TRANSITION, trigger or src, detail)
+
+        # 4. Let the case react. final_state reflects where we actually ended up.
+        final_state = dest if post_commit else src
+        try:
+            self.on_transition_exception(src, trigger, final_state, err)
+        except Exception:                     # a misbehaving hook must not mask the real error
+            logger.exception("on_transition_exception hook raised for case %s", self.case_id)
+
+        # 5. Re-raise so advance() can fold it in (and direct callers stay fail-fast).
         raise err
+
+    def on_transition_exception(self, begin_state, trigger, final_state, exc) -> None:
+        """Overridable recovery hook, fired (before the exception re-raises) whenever a
+        transition's dispatch raised. Default: no-op.
+
+        `begin_state == final_state` ⇒ a PRE-commit failure (the work raised, the case never
+        left its state — the retryable "no progress" kind). `begin_state != final_state` ⇒
+        a POST-commit failure (the state DID change, then an entry/after hook raised; the
+        case is in `final_state` carrying the baggage of a failed side-effect).
+
+        Use it to compensate from inside the case (which, unlike a generic driver, knows its
+        own data): mark a record field, schedule a fix-up, set a flag a later guard reads.
+
+        DO NOT fire a transition from within this hook — re-entering the machine mid-dispatch
+        is unsupported. To route to a fault state, prefer the declarative `@FAIL>=n` divert
+        edge, or record intent here and let the next advance() carry it out."""
 
     def on_closing(self) -> None:
         """Overridable hook fired in phase 1 (pre-finalization): assets still exist,
@@ -757,41 +868,78 @@ class FolderBackedCase(ABC):
                 out.append((t["trigger"], t["dest"]))
         return out
 
-    async def advance(self) -> bool:
-        """Fire ONE forward step from the current state and return True if a transition
-        occurred. Tries each auto-advance candidate in declared order, firing the first
-        whose guard permits; returns False when terminal, when nothing auto-advances, or
-        when every candidate's guard declines. Each fired step persists before the next,
-        so the loop is flat and fully resumable."""
+    async def advance(self) -> AdvanceResult:
+        """Fire ONE forward step from the current state and report the outcome as an
+        AdvanceResult (a NON-throwing reporter — see that class). Tries each auto-advance
+        candidate in declared order, firing the first whose guard permits.
+
+        Outcomes (all returned, never raised — except the misuse guards below):
+          * progressed — a transition fired; result.trigger names it, final_state advanced.
+          * a failed attempt — a candidate's work raised; the exception is CAUGHT and
+            carried in result.exceptions (decorated + logged + hooked by _on_fsm_exception),
+            the case stayed in its source state to be retried next pass.
+          * nothing to do — terminal, or every guard declined, with no progress.
+          * BLOCKED — when nothing fired/raised AND the state has no timed escape, a
+            synthetic AutoAdvanceBlocked is carried in result.exceptions (one CASE_ALERT is
+            logged on first detection per dwell). Deterministic: same state, same block.
+
+        Still RAISES the misuse guard ReleasedCaseError (acting on a released husk is a
+        programming error, not a flow condition)."""
+        initial = self.state
         if self.is_closed:              # terminal short-circuits first (a closed case
-            return False                # auto-releases its lease in phase 2, §5d)
+            return AdvanceResult(initial, self.state)   # auto-releases its lease, §5d
         self._check_active()            # else refuse to drive a released husk
         candidates = self._forward_candidates(self.state)
-        if not candidates:
-            return False
+        exceptions: list = []
         self._stepping = True
         try:
             for trigger, _dest in candidates:
-                # A guard-blocked transition returns falsy WITHOUT changing state (and
-                # without firing the after-hook), so we simply fall through to the next.
-                if await getattr(self, trigger)():
-                    return True
-            return False
+                try:
+                    # A guard-blocked transition returns falsy WITHOUT changing state (and
+                    # without firing the after-hook), so we fall through to the next.
+                    if await getattr(self, trigger)():
+                        return AdvanceResult(initial, self.state, trigger=trigger)
+                except Exception as err:    # absorbed: reported as data, not raised at driver
+                    exceptions.append(err)
+                    return AdvanceResult(initial, self.state, trigger=trigger,
+                                         exceptions=tuple(exceptions))
         finally:
             self._stepping = False
+        # Nothing fired and nothing raised: no forward progress this pass. If the state has
+        # no guaranteed timed escape, it is provably auto-advance blocked.
+        if self.state not in self._fsm.timed_escape_states:
+            exceptions.append(self._make_blocked(candidates))
+        return AdvanceResult(initial, self.state, exceptions=tuple(exceptions))
 
-    async def run_to_completion(self, *, stop_before: Optional[str] = None) -> None:
-        """Drive forward until closed, until nothing auto-advances, or until an auto step
-        from the current state could ENTER `stop_before` (for staged inspection / testing).
-        Delegates to advance() so _stepping is set correctly for each step."""
+    def _make_blocked(self, candidates) -> AutoAdvanceBlocked:
+        """Build the AutoAdvanceBlocked marker for the current (provably stuck) state,
+        logging a SINGLE CASE_ALERT the first time we detect the block in this dwell so it
+        is visible on disk without spamming the low-volume log on every advance() call."""
+        if not self._has_event_since_enter("CASE_ALERT"):
+            self.log_alert(f"auto-advance blocked in {self.state!r}", where=self.state)
+        return AutoAdvanceBlocked(
+            self.case_id, self.state, candidates=[t for t, _ in candidates]
+        )
+
+    async def run_to_completion(
+        self, *, stop_before: Optional[str] = None
+    ) -> Optional[AdvanceResult]:
+        """Drive forward until closed, until nothing auto-advances (no progress — including
+        a failed attempt or a block), or until an auto step from the current state could
+        ENTER `stop_before` (for staged inspection / testing). Delegates to advance() so
+        _stepping is set correctly for each step. Returns the LAST AdvanceResult (so a
+        caller can inspect why the drive stopped), or None if it never stepped."""
+        last: Optional[AdvanceResult] = None
         while self.is_open:
             candidates = self._forward_candidates(self.state)
             if not candidates:
                 break
             if stop_before and any(dest == stop_before for _, dest in candidates):
                 break
-            if not await self.advance():     # all guards declined -> nothing left to do
+            last = await self.advance()
+            if not last.progressed:          # failed / all guards declined / blocked
                 break
+        return last
 
     # ---- reclassify ("call an audible" to a different subclass) ----
 
@@ -886,12 +1034,13 @@ class FolderBackedCase(ABC):
         marker event and beats the lease. Override to escalate on stall or fire FSM
         triggers on timeout.
 
-        PLANNED (next design pass — not yet implemented): pulse()/advance() will also
-        re-evaluate TIME-GUARDED auto edges (the `@<dur>` guard, e.g. `*@60m#expire`),
-        firing one once its minimum dwell in the current state has elapsed. The dwell is
-        measured from the latest ENTER_STATE timestamp; the time guard is a floor ("at
-        least N elapsed"), never a promise to fire exactly at N. Interrupting an
-        in-progress transition is explicitly OUT of scope for that work."""
+        Time-guarded auto edges (the `@DWELL` fact, e.g. `*@DWELL>60m#expire`) are honored
+        by advance(): the guard is a factual floor ("at least N elapsed", measured from the
+        latest ENTER_STATE), so a driver that keeps calling advance() on its cadence will
+        fire the edge once the dwell ripens. A `>`/`>=` dwell guard is also what gives a
+        state a TIMED ESCAPE, so it never reports AutoAdvanceBlocked while waiting it out.
+        The exact advance()/pulse() cadence — how often, by whom — is the chronology design
+        still to come; the guard semantics above are settled."""
         idle = (_utcnow() - self._last_activity).total_seconds()
         self._events.primitive.create_event("PULSE", "idle", {"idle_secs": round(idle)})
         self.heartbeat()               # piggyback liveness on the pulse cadence (§5d)

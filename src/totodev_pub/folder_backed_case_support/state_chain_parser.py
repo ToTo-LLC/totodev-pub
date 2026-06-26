@@ -23,7 +23,7 @@ States
   markers is tolerated; any trailing glyph other than `^` is rejected, keeping the marker
   namespace closed against silent typos.
 
-Connectors  `--[*][cond#...][@dur#]trigger-->`
+Connectors  `--[*][cond#...][@FACT<op>N#...]trigger-->`
 ----------
 * `A--trigger-->B` is one transition (trigger `trigger`, source `A`, dest `B`).
 * A leading `*` marks the edge AUTO-ADVANCE: advance()/run_to_completion() may fire it
@@ -35,12 +35,26 @@ Connectors  `--[*][cond#...][@dur#]trigger-->`
   "finish"). Multiple guards chain: `a#b#trigger`. Guards are what make multiple
   auto-advance edges from one state meaningful — advance() tries each auto candidate in
   declared order and fires the first whose guard permits.
-* `@<dur>#trigger` attaches a TIME GUARD: a `@`-prefixed duration among the `#`-segments
-  (e.g. `*@60m#expire`) compiles into a condition that is true only once at least that
-  much time has elapsed in the SOURCE state (dwell measured from the latest ENTER_STATE).
-  Units are s|m|h|d, float allowed (`@90s`, `@1.5h`, `@0.5d`). It is a pure FACTUAL guard
-  ("at least N elapsed"), NOT a promise to fire at N — something must still attempt the
-  trigger. At most one time guard per connector; it composes with method guards.
+* `@FACT<op>N#trigger` attaches a FACTUAL GUARD: an `@`-prefixed, system-computed fact
+  compared against a constant with one of `< <= > >=` (equality `==`/`!=` is deliberately
+  UNSUPPORTED — we cannot promise to evaluate at an exact instant/count, so an equality
+  test would create false expectations). Two facts are recognized:
+    * `@DWELL<op><dur>` — seconds spent in the SOURCE state (dwell since the latest
+      ENTER_STATE). The operand is a duration, units s|m|h|d, float allowed
+      (`@DWELL>90s`, `@DWELL>=1.5h`, `@DWELL>0.5d`). `dwell_secs()` on the case computes it.
+      A `>`/`>=` dwell guard is SELF-RELAXING (it ripens with time) and is what gives a
+      state a guaranteed TIMED ESCAPE (see classify()/AutoAdvanceBlocked).
+    * `@FAIL<op>N` — count of `CASE_FAIL_TRANSITION` events logged since the current state
+      was entered (failed pre-commit attempts to LEAVE this state). The operand is a bare
+      integer, NO unit (`@FAIL<3`, `@FAIL>=3`). State-scoped: every failed attempt in this
+      dwell counts regardless of which trigger raised. This is the retry knob — list a
+      `@FAIL<n` retry edge first and an optional `@FAIL>=n` divert edge second. RETRY IS
+      OPT-IN: an auto edge that declares no `@FAIL` gets an implicit `@FAIL<1` (one attempt,
+      no retry) via apply_implicit_fail_cap(); a pure timed-escape edge is exempt and
+      tolerates unlimited failures (logically `@FAIL>=0`).
+  A factual guard is a pure FACT, NOT a promise to fire — something must still attempt the
+  trigger. At most one guard PER FACT NAME per connector; facts compose with each other and
+  with method guards (e.g. `@FAIL<3#@DWELL>30m#retry`).
 
 Wildcard ("from any source") chains  `*--...-->DEST`
 ----------
@@ -82,24 +96,39 @@ from totodev_pub.folder_backed_case_support.exceptions import FsmChainParseError
 # name and a trailing marker glyph can never be read as a name character.
 _NAME_RE = re.compile(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
 
-# One connector label segment: a guard/trigger identifier OR a `@<dur>` time guard.
-_LABEL_SEGMENT = r"(?:@\s*\d+(?:\.\d+)?\s*[smhd]|[A-Za-z_]\w*)"
+# A FACTUAL-GUARD segment: `@NAME<op>NUMBER[unit]` with op in < <= > >= (NO ==/!=). The
+# optional s|m|h|d unit belongs to time facts (@DWELL); count facts (@FAIL) take a bare int.
+_FACT_GUARD_SEGMENT = r"@\s*[A-Za-z][A-Za-z0-9_]*\s*(?:<=|>=|<|>)\s*\d+(?:\.\d+)?\s*[smhd]?"
 
-# The connector between two states: `--[*][cond#...][@dur#]trigger-->`.
+# One connector label segment: a guard/trigger identifier OR a `@FACT<op>N` factual guard.
+_LABEL_SEGMENT = r"(?:" + _FACT_GUARD_SEGMENT + r"|[A-Za-z_]\w*)"
+
+# The connector between two states: `--[*][cond#...][@FACT<op>N#...]trigger-->`.
 #   group 1: the optional auto-advance star.
-#   group 2: the label — a `#`-separated run of segments (guards / time guards, then the
-#            trigger). Identifier segments are valid Python identifiers because
+#   group 2: the label — a `#`-separated run of segments (method guards / factual guards,
+#            then the trigger). Identifier segments are valid Python identifiers because
 #            `transitions` turns the trigger into a method and resolves condition names
-#            against the model; `@<dur>` segments are time guards (see _parse_duration).
+#            against the model; `@...` segments are factual guards (see _parse_fact_guard).
 _CONNECTOR_RE = re.compile(
     r"--\s*(\*)?\s*"
     r"(" + _LABEL_SEGMENT + r"(?:\s*#\s*" + _LABEL_SEGMENT + r")*)"
     r"\s*-->"
 )
 
-# A `@<number><unit>` time-guard token, units s|m|h|d (float allowed).
-_DURATION_RE = re.compile(r"^@\s*(\d+(?:\.\d+)?)\s*([smhd])$")
+# A `@NAME<op>NUMBER[unit]` factual-guard token (the four ordering comparators only).
+_FACT_GUARD_RE = re.compile(
+    r"^@\s*([A-Za-z][A-Za-z0-9_]*)\s*(<=|>=|<|>)\s*(\d+(?:\.\d+)?)\s*([smhd]?)$"
+)
 _UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
+# Recognized factual-guard names and the kind of operand each takes. TIME facts compare a
+# duration (a unit is required); COUNT facts compare a bare integer (no unit). DWELL is the
+# only time fact today (AGE/IDLE are reserved for future, distinct clocks); FAIL the only
+# count fact. The `>`/`>=` form of a TIME fact is "self-relaxing" — it ripens with the mere
+# passage of time, which is what classify() looks for to grant a state a TIMED ESCAPE.
+_TIME_FACTS = {"DWELL"}
+_COUNT_FACTS = {"FAIL"}
+_RELAXING_OPS = {">", ">="}
 
 _INITIAL_MARKER = "^"      # LEADING on a state name
 _TERMINAL_MARKER = "^"     # TRAILING on a state name
@@ -115,8 +144,9 @@ class FsmChainSpec:
     Attributes:
         states         every state name, in first-seen order.
         transitions    `transitions`-library dicts: {"trigger","source","dest"[,"conditions"]}.
-                       A dict MAY also carry the private key "_min_dwell_secs" (a time
-                       guard) — stripped before the dicts reach the machine.
+                       A dict MAY also carry the private key "_fact_guards" (a list of
+                       {"name","op","operand"} factual guards, e.g. @DWELL/@FAIL) — stripped
+                       and compiled into `conditions` callables before reaching the machine.
         closed_states  states marked terminal (trailing `^`).
         initial_states states marked initial (leading `^`); also reachability anchors.
         initial_state  the DEFAULT entry state (first initial-marked, in chain order).
@@ -127,6 +157,11 @@ class FsmChainSpec:
         pending_wildcards  unresolved `*--...-->dest` edges; expanded by expand_wildcards().
         wildcard_dests dests of pending wildcards; exempt from validate()'s reachability
                        check (they are reached only once the wildcards are injected).
+        timed_escape_states  states that own at least one auto edge guarded SOLELY by a
+                       self-relaxing time fact (`@DWELL` with `>`/`>=`) — such a state can
+                       never be permanently auto-blocked, because the edge ripens with time.
+                       Computed by classify() (run AFTER expand_wildcards). Consulted by the
+                       case to decide whether a no-progress pass means AutoAdvanceBlocked.
     """
     states: list[str] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)
@@ -139,6 +174,7 @@ class FsmChainSpec:
     primary_chain: Optional[str] = None
     pending_wildcards: list[dict] = field(default_factory=list)
     wildcard_dests: set[str] = field(default_factory=set)
+    timed_escape_states: set[str] = field(default_factory=set)
 
     @classmethod
     def empty(cls) -> "FsmChainSpec":
@@ -244,8 +280,8 @@ class FsmChainSpec:
                 td: dict = {"trigger": trigger, "source": s, "dest": dest, "_wildcard": True}
                 if w["conditions"]:
                     td["conditions"] = list(w["conditions"])
-                if w["min_dwell"] is not None:
-                    td["_min_dwell_secs"] = w["min_dwell"]
+                if w["fact_guards"]:
+                    td["_fact_guards"] = [dict(fg) for fg in w["fact_guards"]]
                 self.transitions.append(td)
                 claimed.add((trigger, s))
                 if trigger not in self.triggers:
@@ -254,6 +290,67 @@ class FsmChainSpec:
                     self.auto_edges.add((s, trigger))
                     if trigger not in self.pipeline:
                         self.pipeline.append(trigger)
+        return self
+
+    def classify(self) -> "FsmChainSpec":
+        """Compute `timed_escape_states`: states that can never be permanently auto-blocked
+        because they own an auto edge guaranteed to become fireable by the mere passage of
+        time. Run AFTER expand_wildcards() so a blanket `*--*@DWELL>=2d#timeout-->expired^`
+        net is reflected. Returns self for chaining.
+
+        A state qualifies if it has an auto edge whose guards are satisfiable BY WAITING
+        ALONE — i.e. the edge carries at least one self-relaxing time fact (`@DWELL` with
+        `>`/`>=`), every fact guard on it is such a fact, and it has NO method conditions
+        (an opaque method guard might never relax, so a mixed edge gives no guarantee)."""
+        self.timed_escape_states = set()
+        for t in self.transitions:
+            srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
+            for s in srcs:
+                if (s, t["trigger"]) in self.auto_edges and self._is_pure_timed_escape(t):
+                    self.timed_escape_states.add(s)
+        return self
+
+    @staticmethod
+    def _is_pure_timed_escape(t: dict) -> bool:
+        """True iff transition `t` is fireable by waiting alone: no method conditions, and
+        at least one fact guard with EVERY fact being a self-relaxing time fact (`@DWELL`
+        `>`/`>=`). An unguarded auto edge would have fired already, so it is not a 'timed'
+        escape; a `@FAIL`/`<`-style guard only tightens with time, so it disqualifies."""
+        if t.get("conditions"):
+            return False
+        fgs = t.get("_fact_guards") or []
+        if not fgs:
+            return False
+        for fg in fgs:
+            if fg["name"] not in _TIME_FACTS or fg["op"] not in _RELAXING_OPS:
+                return False
+        return True
+
+    def apply_implicit_fail_cap(self) -> "FsmChainSpec":
+        """Inject a default `@FAIL<1` (one attempt, NO retry) onto every AUTO edge that does
+        not already declare a `@FAIL` guard and is not a pure timed escape. Retry is thus
+        OPT-IN — an un-guarded auto edge halts auto-progress after a single failure rather
+        than being hammered forever — mirroring how auto-advance itself is opt-in (`*`).
+        Returns self for chaining. Run AFTER classify() so the injected guard never perturbs
+        timed-escape detection (which keys on the EXPLICIT graph).
+
+        Two kinds of edge are EXEMPT (left uncapped):
+          * an edge with an EXPLICIT `@FAIL` guard — the author already chose the policy;
+          * a pure timed-escape edge (`@DWELL>`/`>=` only) — logically `@FAIL>=0`, it
+            tolerates any number of failures, so a safety-net timeout is never disabled by a
+            transient failure.
+        Only AUTO edges are touched: un-starred (manual/event-driven) triggers are never
+        driven by advance(), so a retry cap on them would have no meaning."""
+        for t in self.transitions:
+            srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
+            if not any((s, t["trigger"]) in self.auto_edges for s in srcs):
+                continue
+            fgs = t.get("_fact_guards") or []
+            if any(fg["name"] in _COUNT_FACTS for fg in fgs):
+                continue                       # explicit @FAIL policy wins
+            if self._is_pure_timed_escape(t):
+                continue                       # timed escape => unlimited fail tolerance
+            t["_fact_guards"] = list(fgs) + [{"name": "FAIL", "op": "<", "operand": 1}]
         return self
 
 
@@ -328,10 +425,10 @@ class StateChainParser:
 
         for i, label in enumerate(labels):
             auto = stars[i] == "*"
-            conditions, min_dwell, trigger = cls._parse_label(label, raw, idx)
+            conditions, fact_guards, trigger = cls._parse_label(label, raw, idx)
             cls._add_transition(
                 spec, trigger, node_names[i], node_names[i + 1],
-                conditions=conditions, min_dwell=min_dwell, auto=auto,
+                conditions=conditions, fact_guards=fact_guards, auto=auto,
                 raw=raw, idx=idx, seen_edges=seen_edges,
             )
 
@@ -357,10 +454,10 @@ class StateChainParser:
         name, initial, terminal = cls._parse_state_token(state_tokens[1], raw, idx)
         cls._add_state(spec, name, initial=initial, terminal=terminal)
         auto = stars[0] == "*"
-        conditions, min_dwell, trigger = cls._parse_label(labels[0], raw, idx)
+        conditions, fact_guards, trigger = cls._parse_label(labels[0], raw, idx)
         spec.pending_wildcards.append({
             "trigger": trigger, "dest": name, "conditions": conditions,
-            "min_dwell": min_dwell, "auto": auto,
+            "fact_guards": fact_guards, "auto": auto,
         })
         spec.wildcard_dests.add(name)
 
@@ -425,11 +522,11 @@ class StateChainParser:
     @classmethod
     def _parse_label(
         cls, label: str, raw: str, idx: int
-    ) -> tuple[list[str], Optional[float], str]:
-        """Split a connector label into (conditions, min_dwell_secs, trigger). The final
-        `#`-delimited token is the trigger; preceding tokens are guard/condition method
-        names, except a single `@<dur>` time guard which becomes min_dwell_secs (seconds).
-        The trigger itself may not be a time guard, and at most one time guard is allowed."""
+    ) -> tuple[list[str], list[dict], str]:
+        """Split a connector label into (conditions, fact_guards, trigger). The final
+        `#`-delimited token is the trigger; preceding tokens are either method-guard names
+        or `@FACT<op>N` factual guards (parsed by _parse_fact_guard). The trigger itself may
+        not be a factual guard, and at most one guard per FACT NAME is allowed."""
         tokens = [p.strip() for p in label.split("#")]
         if any(not t for t in tokens):
             raise FsmChainParseError(
@@ -440,36 +537,76 @@ class StateChainParser:
         trigger = tokens[-1]
         if trigger.startswith("@"):
             raise FsmChainParseError(
-                f"a connector's trigger cannot be a time guard ({trigger!r}); the final "
-                "'#'-segment must be the trigger name (e.g. '@60m#expire')",
+                f"a connector's trigger cannot be a factual guard ({trigger!r}); the final "
+                "'#'-segment must be the trigger name (e.g. '@DWELL>60m#expire')",
                 chain=raw, index=idx,
             )
         conditions: list[str] = []
-        min_dwell: Optional[float] = None
+        fact_guards: list[dict] = []
+        seen_facts: set[str] = set()
         for tok in tokens[:-1]:
             if tok.startswith("@"):
-                if min_dwell is not None:
+                fg = cls._parse_fact_guard(tok, raw, idx)
+                if fg["name"] in seen_facts:
                     raise FsmChainParseError(
-                        "at most one time guard ('@<dur>') is allowed per connector",
+                        f"at most one @{fg['name']} guard is allowed per connector",
                         chain=raw, index=idx,
                     )
-                min_dwell = cls._parse_duration(tok, raw, idx)
+                seen_facts.add(fg["name"])
+                fact_guards.append(fg)
             else:
                 conditions.append(tok)
-        return conditions, min_dwell, trigger
+        return conditions, fact_guards, trigger
 
     @staticmethod
-    def _parse_duration(token: str, raw: str, idx: int) -> float:
-        """Parse a `@<number><unit>` time-guard token into seconds (unit s|m|h|d, float
-        allowed): `@90s`->90.0, `@1.5h`->5400.0, `@60m`->3600.0."""
-        m = _DURATION_RE.match(token)
+    def _parse_fact_guard(token: str, raw: str, idx: int) -> dict:
+        """Parse a `@NAME<op>NUMBER[unit]` factual guard into {"name","op","operand"}.
+        TIME facts (@DWELL) require a duration unit (s|m|h|d) and yield operand in SECONDS;
+        COUNT facts (@FAIL) take a bare integer (no unit). Only `< <= > >=` are accepted —
+        equality is rejected with a pointed message so the intent is clear."""
+        m = _FACT_GUARD_RE.match(token)
         if m is None:
+            if "==" in token or "!=" in token:
+                raise FsmChainParseError(
+                    f"equality comparators are not supported in factual guards ({token!r}); "
+                    "use one of < <= > >= (we cannot promise to evaluate at an exact "
+                    "instant/count, so '==' would be misleading)",
+                    chain=raw, index=idx,
+                )
             raise FsmChainParseError(
-                f"invalid time guard {token!r}; use '@<number><unit>' with unit s|m|h|d "
-                "(e.g. '@90s', '@1.5h', '@60m', '@0.5d')",
+                f"invalid factual guard {token!r}; use '@NAME<op>N' with op in < <= > >= "
+                "(e.g. '@FAIL<3', '@DWELL>=90s', '@DWELL>1.5h')",
                 chain=raw, index=idx,
             )
-        return float(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+        name, op, number, unit = m.group(1).upper(), m.group(2), m.group(3), m.group(4)
+        if name in _TIME_FACTS:
+            if not unit:
+                raise FsmChainParseError(
+                    f"time fact @{name} needs a duration unit s|m|h|d (e.g. '@{name}>30m')",
+                    chain=raw, index=idx,
+                )
+            operand: float = float(number) * _UNIT_SECONDS[unit]
+        elif name in _COUNT_FACTS:
+            if unit:
+                raise FsmChainParseError(
+                    f"count fact @{name} is a bare integer and takes NO unit (e.g. "
+                    f"'@{name}<3'); got unit {unit!r}",
+                    chain=raw, index=idx,
+                )
+            if "." in number:
+                raise FsmChainParseError(
+                    f"count fact @{name} must be a whole number (e.g. '@{name}<3'); "
+                    f"got {number!r}",
+                    chain=raw, index=idx,
+                )
+            operand = int(number)
+        else:
+            raise FsmChainParseError(
+                f"unknown factual guard @{name}; supported: "
+                f"@DWELL (time, needs unit) and @FAIL (count, bare integer)",
+                chain=raw, index=idx,
+            )
+        return {"name": name, "op": op, "operand": operand}
 
     # ---- accumulation helpers ----
 
@@ -492,16 +629,17 @@ class StateChainParser:
         dest: str,
         *,
         conditions: list[str],
-        min_dwell: Optional[float],
+        fact_guards: list[dict],
         auto: bool,
         raw: str,
         idx: int,
         seen_edges: dict[tuple, str],
     ) -> None:
-        # Edge identity includes the guards (conditions + time guard): identical
+        # Edge identity includes the guards (method conditions + factual guards): identical
         # trigger+source+guards but different dest is genuinely ambiguous; differing
         # guards is legitimate branching.
-        key = (trigger, source, tuple(conditions), min_dwell)
+        fact_key = tuple((fg["name"], fg["op"], fg["operand"]) for fg in fact_guards)
+        key = (trigger, source, tuple(conditions), fact_key)
         if key in seen_edges:
             if seen_edges[key] != dest:
                 raise FsmChainParseError(
@@ -515,8 +653,8 @@ class StateChainParser:
             td: dict = {"trigger": trigger, "source": source, "dest": dest}
             if conditions:
                 td["conditions"] = list(conditions)
-            if min_dwell is not None:
-                td["_min_dwell_secs"] = min_dwell
+            if fact_guards:
+                td["_fact_guards"] = [dict(fg) for fg in fact_guards]
             spec.transitions.append(td)
             if trigger not in spec.triggers:
                 spec.triggers.append(trigger)

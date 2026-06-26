@@ -88,6 +88,34 @@ class IncompatibleReclassError(Exception):
         )
 
 
+class AutoAdvanceBlocked(Exception):
+    """A case is OPEN but no auto-advance edge can fire from the current state — now OR
+    ever, by the mere passage of time. Every auto candidate's guard declined this pass and
+    the state has no self-relaxing time guard (`@DWELL>...`) that would ripen to let one
+    fire later, so the case is genuinely stuck waiting on out-of-band help.
+
+    SCOPE: only the unattended advance() path is walled off — manual or event-driven
+    (un-starred) transitions may still be perfectly available, which is why it is "auto
+    advance" blocked, not "all transitions" blocked.
+
+    USAGE: advance() does NOT raise this — it CARRIES it in AdvanceResult.exceptions as
+    data, so a blind driver can inspect it without a try/except (a direct/manual trigger
+    call, having no AdvanceResult to return, still raises). It is deterministic and
+    idempotent: the same state yields the same block on every call until something changes.
+
+    REMEDY: give the state a timed escape, e.g. `--*@DWELL>{N}h#timeout-->somewhere`, or a
+    blanket net like `*--*@DWELL>=2d#timeout-->expired^`; or resolve/route it manually.
+    """
+    def __init__(self, case_id: str, state: str, *, candidates: Optional[list] = None):
+        super().__init__(
+            f"Case {case_id!r} is auto-advance blocked in state {state!r}: no auto edge can "
+            "fire now or ripen with time. Add a @DWELL timed escape, or act on it manually."
+        )
+        self.case_id = case_id
+        self.state = state
+        self.candidates = candidates or []
+
+
 class FsmChainParseError(Exception):
     """Raised by StateChainParser when an `fsm_state_chains` entry cannot be parsed
     into a well-formed FSM. Carries the offending chain (and its index in the list,
