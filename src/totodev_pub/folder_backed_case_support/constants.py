@@ -10,8 +10,19 @@ from __future__ import annotations
 
 RECORD_NAME     = "case_record.yaml"
 LEASE_NAME      = ".case.lease"      # single-owner lease: content-free; mtime = "valid-until"
+EVENTS_DIR_NAME = "events"           # case event-log folder (PrimitiveEventLog storage)
 ASSETS_DIR_NAME = "assets"           # the downstream-owned asset "playground"
 KEEP_LIST_NAME  = "_keep_assets.txt" # retention manifest at the CASE ROOT (NOT under assets/)
+
+# Reserved case-owned artifacts at the case root; create_in_folder() rejects targets
+# that already contain any of these names to avoid colliding with a prior case.
+CASE_RESERVED_ARTIFACT_NAMES = (
+    RECORD_NAME,
+    EVENTS_DIR_NAME,
+    ASSETS_DIR_NAME,
+    KEEP_LIST_NAME,
+    LEASE_NAME,
+)
 
 # Event-log labels written by the FolderBackedCase base class. Every label is
 # CASE_-prefixed so an observer can isolate the family's lifecycle events with a

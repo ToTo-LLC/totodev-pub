@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Optional
 
 from totodev_pub.primitive_event_log import PrimitiveEventLog
-from totodev_pub.folder_backed_case_support.constants import EV_ENTER_STATE, EV_CLOSED
+from totodev_pub.folder_backed_case_support.constants import (
+    EV_ENTER_STATE,
+    EV_CLOSED,
+    EVENTS_DIR_NAME,
+)
 
 
 class CaseEventLogReader:
@@ -24,7 +28,7 @@ class CaseEventLogReader:
 
     @classmethod
     def for_folder(cls, folder: Path) -> "CaseEventLogReader":
-        return cls(folder / "events")
+        return cls(folder / EVENTS_DIR_NAME)
 
     @property
     def primitive(self) -> PrimitiveEventLog:

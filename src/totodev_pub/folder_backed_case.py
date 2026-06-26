@@ -62,8 +62,10 @@ from transitions.extensions.asyncio import AsyncMachine
 from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME,
     LEASE_NAME,
+    EVENTS_DIR_NAME,
     ASSETS_DIR_NAME,
     KEEP_LIST_NAME,
+    CASE_RESERVED_ARTIFACT_NAMES,
     EV_ENTER_STATE,
     EV_NEW,
     EV_CLOSED,
@@ -134,8 +136,10 @@ __all__ = [
     "TriggerTimeout",
     "RECORD_NAME",
     "LEASE_NAME",
+    "EVENTS_DIR_NAME",
     "ASSETS_DIR_NAME",
     "KEEP_LIST_NAME",
+    "CASE_RESERVED_ARTIFACT_NAMES",
 ]
 
 
@@ -402,11 +406,7 @@ class FolderBackedCase(ABC):
         else:
             case_folder.mkdir(parents=False, exist_ok=False)
         reserved_paths = {
-            RECORD_NAME: case_folder / RECORD_NAME,
-            "events": case_folder / "events",
-            ASSETS_DIR_NAME: case_folder / ASSETS_DIR_NAME,
-            KEEP_LIST_NAME: case_folder / KEEP_LIST_NAME,
-            LEASE_NAME: case_folder / LEASE_NAME,
+            name: case_folder / name for name in CASE_RESERVED_ARTIFACT_NAMES
         }
         found = [name for name, path in reserved_paths.items() if path.exists()]
         if found:
