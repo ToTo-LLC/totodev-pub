@@ -20,10 +20,10 @@ States
 * A TRAILING `^` marks a TERMINAL/closed state: `closed^`. Entering one fires the
   two-phase close hook and suppresses the pulse.
 * Initial and terminal are independent flags and may compose (`^x^`). A run of trailing
-  markers is tolerated; an error-state marker glyph is intentionally DEFERRED, so any
-  other trailing glyph is rejected to keep the namespace open.
+  markers is tolerated; any trailing glyph other than `^` is rejected, keeping the marker
+  namespace closed against silent typos.
 
-Connectors  `--[*][cond#...]trigger-->`
+Connectors  `--[*][cond#...][@dur#]trigger-->`
 ----------
 * `A--trigger-->B` is one transition (trigger `trigger`, source `A`, dest `B`).
 * A leading `*` marks the edge AUTO-ADVANCE: advance()/run_to_completion() may fire it
@@ -35,6 +35,25 @@ Connectors  `--[*][cond#...]trigger-->`
   "finish"). Multiple guards chain: `a#b#trigger`. Guards are what make multiple
   auto-advance edges from one state meaningful — advance() tries each auto candidate in
   declared order and fires the first whose guard permits.
+* `@<dur>#trigger` attaches a TIME GUARD: a `@`-prefixed duration among the `#`-segments
+  (e.g. `*@60m#expire`) compiles into a condition that is true only once at least that
+  much time has elapsed in the SOURCE state (dwell measured from the latest ENTER_STATE).
+  Units are s|m|h|d, float allowed (`@90s`, `@1.5h`, `@0.5d`). It is a pure FACTUAL guard
+  ("at least N elapsed"), NOT a promise to fire at N — something must still attempt the
+  trigger. At most one time guard per connector; it composes with method guards.
+
+Wildcard ("from any source") chains  `*--...-->DEST`
+----------
+* A chain that BEGINS with `*--` declares one edge whose source is ANY otherwise
+  non-terminal state: `*--cancel-->cancelled^` means "from anywhere, `cancel` => cancelled".
+  The connector carries the usual `[*]`, guards, and `@dur` like any other.
+* Exactly one transition (one destination) per wildcard chain. The concrete per-source
+  edges are deduced AFTER all chains parse and AFTER validate(): terminal states and the
+  destination itself (no self-loop) are excluded, and an EXPLICIT edge for the same
+  trigger from a state always overrules the wildcard there.
+* Wildcards inject only AFTER the typo-catching validations run on the explicit graph, so
+  they can never mask a forgotten exit or a misspelled state — a state whose ONLY outgoing
+  edge would be a wildcard is still flagged; declare an explicit edge.
 
 Conventions
 -----------
@@ -63,23 +82,28 @@ from totodev_pub.folder_backed_case_support.exceptions import FsmChainParseError
 # name and a trailing marker glyph can never be read as a name character.
 _NAME_RE = re.compile(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
 
-# The connector between two states: `--[*][cond#...]trigger-->`.
+# One connector label segment: a guard/trigger identifier OR a `@<dur>` time guard.
+_LABEL_SEGMENT = r"(?:@\s*\d+(?:\.\d+)?\s*[smhd]|[A-Za-z_]\w*)"
+
+# The connector between two states: `--[*][cond#...][@dur#]trigger-->`.
 #   group 1: the optional auto-advance star.
-#   group 2: the label — a `#`-separated run of identifiers (conditions..., then trigger).
-# Each identifier is a valid Python identifier because `transitions` turns the trigger
-# into a method and resolves condition names against the model.
+#   group 2: the label — a `#`-separated run of segments (guards / time guards, then the
+#            trigger). Identifier segments are valid Python identifiers because
+#            `transitions` turns the trigger into a method and resolves condition names
+#            against the model; `@<dur>` segments are time guards (see _parse_duration).
 _CONNECTOR_RE = re.compile(
     r"--\s*(\*)?\s*"
-    r"([A-Za-z_]\w*(?:\s*#\s*[A-Za-z_]\w*)*)"
+    r"(" + _LABEL_SEGMENT + r"(?:\s*#\s*" + _LABEL_SEGMENT + r")*)"
     r"\s*-->"
 )
 
+# A `@<number><unit>` time-guard token, units s|m|h|d (float allowed).
+_DURATION_RE = re.compile(r"^@\s*(\d+(?:\.\d+)?)\s*([smhd])$")
+_UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
 _INITIAL_MARKER = "^"      # LEADING on a state name
 _TERMINAL_MARKER = "^"     # TRAILING on a state name
-# Markers reserved for the future are recognised here so they fail LOUDLY rather than
-# being silently swallowed. The error-state marker is deferred, so this stays empty for
-# now; adding one later is a single entry.
-_RESERVED_MARKERS: dict[str, str] = {}
+_WILDCARD_SOURCE = "*"     # a lone `*` in the first state slot => "from any source"
 
 
 @dataclass
@@ -91,6 +115,8 @@ class FsmChainSpec:
     Attributes:
         states         every state name, in first-seen order.
         transitions    `transitions`-library dicts: {"trigger","source","dest"[,"conditions"]}.
+                       A dict MAY also carry the private key "_min_dwell_secs" (a time
+                       guard) — stripped before the dicts reach the machine.
         closed_states  states marked terminal (trailing `^`).
         initial_states states marked initial (leading `^`); also reachability anchors.
         initial_state  the DEFAULT entry state (first initial-marked, in chain order).
@@ -98,6 +124,9 @@ class FsmChainSpec:
         pipeline       distinct auto-advance trigger names, in first-seen order (display).
         triggers       every distinct trigger name, in first-seen order.
         primary_chain  the raw first chain string, kept for DEBUG logging / diagrams.
+        pending_wildcards  unresolved `*--...-->dest` edges; expanded by expand_wildcards().
+        wildcard_dests dests of pending wildcards; exempt from validate()'s reachability
+                       check (they are reached only once the wildcards are injected).
     """
     states: list[str] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)
@@ -108,6 +137,8 @@ class FsmChainSpec:
     pipeline: list[str] = field(default_factory=list)
     triggers: list[str] = field(default_factory=list)
     primary_chain: Optional[str] = None
+    pending_wildcards: list[dict] = field(default_factory=list)
+    wildcard_dests: set[str] = field(default_factory=set)
 
     @classmethod
     def empty(cls) -> "FsmChainSpec":
@@ -134,7 +165,9 @@ class FsmChainSpec:
                 exception, a state left only via reclassify_to(), is handled by guidance:
                 declare its successor's entry as an initial state, or add a trivial edge);
           - reachability: every non-initial state has an incoming edge (catches the
-                mistyped state name, whose orphan has no way in).
+                mistyped state name, whose orphan has no way in). A wildcard's declared
+                dest is exempt — it is reached only once the wildcards are injected, which
+                happens AFTER validate() so the typo checks see only the explicit graph.
         """
         if not self.states:
             return self
@@ -170,12 +203,57 @@ class FsmChainSpec:
                     "left only via reclassify_to() should declare its successor's entry as "
                     "initial, or use a trivial edge — see the reclassify docs)"
                 )
-            if s not in self.initial_states and s not in in_dests:
+            if (s not in self.initial_states and s not in in_dests
+                    and s not in self.wildcard_dests):
                 raise FsmChainParseError(
                     f"state {s!r} is unreachable: it has no incoming transition and is not "
                     "marked initial ('^name'). If this is a deliberate entry point, mark it "
                     "initial; otherwise it is probably a misspelled state name"
                 )
+        return self
+
+    def expand_wildcards(self) -> "FsmChainSpec":
+        """Inject the concrete per-source edges for any `*--...-->dest` wildcard chains,
+        then return self for chaining. Call AFTER validate() so the typo-catching checks
+        run against only the explicit graph (the default compile_fsm does exactly this;
+        a hand-built override decides for itself). A no-op when there are no wildcards.
+
+        For each pending wildcard, an edge `s -> dest` is created for every state `s`
+        that is NOT terminal (terminals cannot be left) and NOT the dest itself (no
+        self-loop), UNLESS `s` already has an EXPLICIT edge for that trigger — an explicit
+        edge always overrules the wildcard. Conditions, the time guard, and the
+        auto-advance flag from the wildcard connector are carried onto each injected edge.
+        """
+        if not self.pending_wildcards:
+            return self
+        # Snapshot (trigger, source) of the EXPLICIT edges; explicit always overrules a
+        # wildcard, and this also prevents a later wildcard from re-injecting the same edge.
+        claimed: set[tuple[str, str]] = set()
+        for t in self.transitions:
+            srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
+            for s in srcs:
+                claimed.add((t["trigger"], s))
+
+        for w in self.pending_wildcards:
+            trigger, dest = w["trigger"], w["dest"]
+            for s in self.states:
+                if s in self.closed_states or s == dest:
+                    continue
+                if (trigger, s) in claimed:
+                    continue
+                td: dict = {"trigger": trigger, "source": s, "dest": dest, "_wildcard": True}
+                if w["conditions"]:
+                    td["conditions"] = list(w["conditions"])
+                if w["min_dwell"] is not None:
+                    td["_min_dwell_secs"] = w["min_dwell"]
+                self.transitions.append(td)
+                claimed.add((trigger, s))
+                if trigger not in self.triggers:
+                    self.triggers.append(trigger)
+                if w["auto"]:
+                    self.auto_edges.add((s, trigger))
+                    if trigger not in self.pipeline:
+                        self.pipeline.append(trigger)
         return self
 
 
@@ -188,7 +266,8 @@ class StateChainParser:
     def parse(cls, chains: Optional[list[str]]) -> FsmChainSpec:
         """Render `chains` into an FsmChainSpec. Empty/None -> empty spec. Raises
         FsmChainParseError (with the offending chain + index) on malformed input. Does NOT
-        run the whole-graph checks — call FsmChainSpec.validate() for those."""
+        run the whole-graph checks (call FsmChainSpec.validate()) and does NOT expand
+        `*--...-->` wildcard chains (call FsmChainSpec.expand_wildcards(), AFTER validate)."""
         spec = FsmChainSpec.empty()
         if not chains:
             return spec
@@ -198,8 +277,9 @@ class StateChainParser:
                 "wrap it in a list, e.g. ['^a--t-->b^']"
             )
 
-        # (trigger, source, conditions) -> dest, to catch genuinely nondeterministic
-        # duplicates (identical guard, different dest) while allowing guarded branching.
+        # (trigger, source, conditions, min_dwell) -> dest, to catch genuinely
+        # nondeterministic duplicates (identical guard, different dest) while allowing
+        # guarded branching.
         seen_edges: dict[tuple, str] = {}
 
         for idx, raw in enumerate(chains):
@@ -234,6 +314,12 @@ class StateChainParser:
         if primary:
             spec.primary_chain = chain
 
+        # A chain whose first state slot is a lone `*` is a "from any source" wildcard:
+        # its concrete edges are deduced later by FsmChainSpec.expand_wildcards().
+        if state_tokens and state_tokens[0].strip() == _WILDCARD_SOURCE:
+            cls._parse_wildcard_chain(state_tokens, stars, labels, raw, idx, spec)
+            return
+
         node_names: list[str] = []
         for tok in state_tokens:
             name, initial, terminal = cls._parse_state_token(tok, raw, idx)
@@ -242,11 +328,41 @@ class StateChainParser:
 
         for i, label in enumerate(labels):
             auto = stars[i] == "*"
-            conditions, trigger = cls._parse_label(label, raw, idx)
+            conditions, min_dwell, trigger = cls._parse_label(label, raw, idx)
             cls._add_transition(
                 spec, trigger, node_names[i], node_names[i + 1],
-                conditions=conditions, auto=auto, raw=raw, idx=idx, seen_edges=seen_edges,
+                conditions=conditions, min_dwell=min_dwell, auto=auto,
+                raw=raw, idx=idx, seen_edges=seen_edges,
             )
+
+    @classmethod
+    def _parse_wildcard_chain(
+        cls,
+        state_tokens: list[str],
+        stars: list,
+        labels: list[str],
+        raw: str,
+        idx: int,
+        spec: FsmChainSpec,
+    ) -> None:
+        """Register a single `*--[*][guards#][@dur#]trigger-->DEST` wildcard edge. Must
+        contain exactly ONE transition to a single destination; the concrete per-source
+        edges are deduced by FsmChainSpec.expand_wildcards() once every state is known."""
+        if len(labels) != 1 or len(state_tokens) != 2:
+            raise FsmChainParseError(
+                "a wildcard '*--...-->' chain must contain exactly ONE transition to a "
+                "single destination, e.g. '*--cancel-->cancelled^'",
+                chain=raw, index=idx,
+            )
+        name, initial, terminal = cls._parse_state_token(state_tokens[1], raw, idx)
+        cls._add_state(spec, name, initial=initial, terminal=terminal)
+        auto = stars[0] == "*"
+        conditions, min_dwell, trigger = cls._parse_label(labels[0], raw, idx)
+        spec.pending_wildcards.append({
+            "trigger": trigger, "dest": name, "conditions": conditions,
+            "min_dwell": min_dwell, "auto": auto,
+        })
+        spec.wildcard_dests.add(name)
 
     @classmethod
     def _parse_state_token(cls, token: str, raw: str, idx: int) -> tuple[str, bool, bool]:
@@ -284,20 +400,14 @@ class StateChainParser:
         cls, rest: str, name: str, token: str, raw: str, idx: int
     ) -> bool:
         """Read the run of trailing marker glyphs after a state name. Only `^` (terminal)
-        is active; reserved glyphs fail with a 'reserved' message and anything else fails
-        as unknown — both keep the marker namespace closed against silent typos."""
+        is active; anything else fails as unknown, keeping the marker namespace closed
+        against silent typos."""
         terminal = False
         for ch in rest:
             if ch == _TERMINAL_MARKER:
                 terminal = True
             elif ch.isspace():
                 continue
-            elif ch in _RESERVED_MARKERS:
-                raise FsmChainParseError(
-                    f"marker {ch!r} on state {name!r} is reserved for {_RESERVED_MARKERS[ch]} "
-                    "and is not yet supported",
-                    chain=raw, index=idx,
-                )
             else:
                 if "--" in token or "->" in token:
                     raise FsmChainParseError(
@@ -312,10 +422,14 @@ class StateChainParser:
                 )
         return terminal
 
-    @staticmethod
-    def _parse_label(label: str, raw: str, idx: int) -> tuple[list[str], str]:
-        """Split a connector label into (conditions, trigger): the final `#`-delimited
-        token is the trigger; any preceding tokens are guard/condition method names."""
+    @classmethod
+    def _parse_label(
+        cls, label: str, raw: str, idx: int
+    ) -> tuple[list[str], Optional[float], str]:
+        """Split a connector label into (conditions, min_dwell_secs, trigger). The final
+        `#`-delimited token is the trigger; preceding tokens are guard/condition method
+        names, except a single `@<dur>` time guard which becomes min_dwell_secs (seconds).
+        The trigger itself may not be a time guard, and at most one time guard is allowed."""
         tokens = [p.strip() for p in label.split("#")]
         if any(not t for t in tokens):
             raise FsmChainParseError(
@@ -323,7 +437,39 @@ class StateChainParser:
                 "`guard#trigger` (no empty segments)",
                 chain=raw, index=idx,
             )
-        return tokens[:-1], tokens[-1]
+        trigger = tokens[-1]
+        if trigger.startswith("@"):
+            raise FsmChainParseError(
+                f"a connector's trigger cannot be a time guard ({trigger!r}); the final "
+                "'#'-segment must be the trigger name (e.g. '@60m#expire')",
+                chain=raw, index=idx,
+            )
+        conditions: list[str] = []
+        min_dwell: Optional[float] = None
+        for tok in tokens[:-1]:
+            if tok.startswith("@"):
+                if min_dwell is not None:
+                    raise FsmChainParseError(
+                        "at most one time guard ('@<dur>') is allowed per connector",
+                        chain=raw, index=idx,
+                    )
+                min_dwell = cls._parse_duration(tok, raw, idx)
+            else:
+                conditions.append(tok)
+        return conditions, min_dwell, trigger
+
+    @staticmethod
+    def _parse_duration(token: str, raw: str, idx: int) -> float:
+        """Parse a `@<number><unit>` time-guard token into seconds (unit s|m|h|d, float
+        allowed): `@90s`->90.0, `@1.5h`->5400.0, `@60m`->3600.0."""
+        m = _DURATION_RE.match(token)
+        if m is None:
+            raise FsmChainParseError(
+                f"invalid time guard {token!r}; use '@<number><unit>' with unit s|m|h|d "
+                "(e.g. '@90s', '@1.5h', '@60m', '@0.5d')",
+                chain=raw, index=idx,
+            )
+        return float(m.group(1)) * _UNIT_SECONDS[m.group(2)]
 
     # ---- accumulation helpers ----
 
@@ -346,14 +492,16 @@ class StateChainParser:
         dest: str,
         *,
         conditions: list[str],
+        min_dwell: Optional[float],
         auto: bool,
         raw: str,
         idx: int,
         seen_edges: dict[tuple, str],
     ) -> None:
-        # Edge identity includes conditions: identical trigger+source+guards but different
-        # dest is genuinely ambiguous; differing guards is legitimate branching.
-        key = (trigger, source, tuple(conditions))
+        # Edge identity includes the guards (conditions + time guard): identical
+        # trigger+source+guards but different dest is genuinely ambiguous; differing
+        # guards is legitimate branching.
+        key = (trigger, source, tuple(conditions), min_dwell)
         if key in seen_edges:
             if seen_edges[key] != dest:
                 raise FsmChainParseError(
@@ -367,6 +515,8 @@ class StateChainParser:
             td: dict = {"trigger": trigger, "source": source, "dest": dest}
             if conditions:
                 td["conditions"] = list(conditions)
+            if min_dwell is not None:
+                td["_min_dwell_secs"] = min_dwell
             spec.transitions.append(td)
             if trigger not in spec.triggers:
                 spec.triggers.append(trigger)

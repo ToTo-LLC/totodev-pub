@@ -126,7 +126,15 @@ class FolderBackedCase(ABC):
                             * `guard#trigger` attaches `conditions`; advance() tries the
                               auto candidates from a state in order, firing the first whose
                               guard permits.
-                          The parser renders this into the per-class FSM singleton `_fsm`.
+                            * `@<dur>#trigger` adds a TIME GUARD (`*@60m#expire`): a factual
+                              condition true once the case has dwelled ≥ that long in the
+                              source state (units s|m|h|d; it gates, it does not drive).
+                            * a chain starting with `*--` is a "from any source" wildcard
+                              (`*--cancel-->cancelled^`): one edge fired from any non-terminal
+                              state, deduced after validation (explicit edges overrule it).
+                          Side-effecting work for a trigger goes in a `_perform_<trigger>`
+                          method, auto-wired as the transition's `before` (a raise aborts the
+                          step). The parser renders chains into the per-class singleton `_fsm`.
 
     Need the full power of `transitions` (callbacks, `unless`, `*`/multi-source, state
     objects)? Override compile_fsm() and return an FsmChainSpec you build yourself
@@ -158,12 +166,13 @@ class FolderBackedCase(ABC):
         """Render this class's declared FSM into an FsmChainSpec. PURE: it touches no
         class state and is called exactly once per subclass (by __init_subclass__), whose
         job is to cache the result as the `_fsm` singleton. The default parses
-        `fsm_state_chains` and then runs the whole-graph FsmChainSpec.validate(); OVERRIDE
-        this to build/extend the spec by hand for the rare cases the chain DSL can't
-        express (callbacks, `unless`, wildcards, state objects) — an override owns whether
-        and when to call validate(). Overriding is the single, unambiguous manual escape
-        hatch."""
-        return StateChainParser.parse(cls.fsm_state_chains).validate()
+        `fsm_state_chains`, runs the whole-graph FsmChainSpec.validate(), then injects any
+        `*--...-->` wildcard edges via expand_wildcards() (in that order, so the typo checks
+        see only the explicit graph); OVERRIDE this to build/extend the spec by hand for the
+        rare cases the chain DSL can't express (arbitrary callbacks, `unless`, state objects)
+        — an override owns whether and when to call validate()/expand_wildcards(). Overriding
+        is the single, unambiguous manual escape hatch."""
+        return StateChainParser.parse(cls.fsm_state_chains).validate().expand_wildcards()
 
     def __init_subclass__(cls, **kwargs) -> None:
         # Parse + validate at class-definition time: fail-fast (a malformed chain blows
@@ -274,6 +283,15 @@ class FolderBackedCase(ABC):
         self._last_activity: datetime.datetime = (
             _ev_activity.astimezone(datetime.timezone.utc)
             if _ev_activity is not None
+            else self._record.created
+        )
+        # When the CURRENT state was entered — the dwell anchor for time guards (@<dur>).
+        # Derived from the latest ENTER_STATE mtime (LOCAL naive; astimezone reads it as
+        # local -> aware UTC); a brand-new case has none yet, so fall back to created.
+        _enter = next(self._events.primitive.events(label_glob="ENTER_STATE"), None)
+        self._state_entered_at: datetime.datetime = (
+            _enter.mtime.astimezone(datetime.timezone.utc)
+            if _enter is not None
             else self._record.created
         )
         # Acquire single ownership of the folder (§5d). AFTER state is known because the
@@ -457,14 +475,59 @@ class FolderBackedCase(ABC):
     def _build_machine(self, initial_state: str) -> AsyncMachine:
         # send_event=True so the global after-hook receives EventData and can see
         # BOTH the source and dest of each transition (needed for the closing edge).
+        # on_exception funnels EVERY callback failure (guard / _perform_ / on_enter /
+        # on_exit / after) through one handler regardless of how the trigger was fired.
         return AsyncMachine(
             model=self,
             states=self._fsm.states,
-            transitions=self._fsm.transitions,
+            transitions=self._prepare_machine_transitions(self._fsm.transitions),
             initial=initial_state,
             after_state_change="_on_state_changed",
+            on_exception="_on_fsm_exception",
             send_event=True,
         )
+
+    def _prepare_machine_transitions(self, transitions: list[dict]) -> list[dict]:
+        """Return machine-ready transition dicts from the per-class `_fsm` spec, applying
+        the two conventions the parser leaves for the live instance to bind, and stripping
+        the spec's private `_`-prefixed keys (e.g. `_min_dwell_secs`, `_wildcard`) that the
+        `transitions` library would reject. The shared `_fsm` spec is never mutated — each
+        edge is rebuilt as a fresh dict.
+
+        1. TIME GUARD — a `_min_dwell_secs` (from a `@<dur>` token) is compiled into an
+           extra `conditions` callable that is true once the case has dwelled at least that
+           long in its current state (measured from `self._state_entered_at`). It is a pure
+           factual guard; it does not drive anything.
+        2. `_perform_<trigger>` -> `before` — the work a trigger implies belongs in
+           `before`: if it raises, the transition ABORTS and the case stays in its source
+           state (no ENTER_STATE logged), so "retry" is just "fire the trigger again" and a
+           crash mid-work resumes cleanly (§6a). Opt-in and non-clobbering: wired ONLY when
+           the method exists AND no `before` was already declared (a compile_fsm() override
+           keeps full control). A declarative FSM with no `_perform_` methods stays
+           callback-free."""
+        prepared: list[dict] = []
+        for td in transitions:
+            trigger = td["trigger"]
+            clean = {k: v for k, v in td.items() if not k.startswith("_")}
+            min_dwell = td.get("_min_dwell_secs")
+            if min_dwell is not None:
+                conds = list(clean.get("conditions", []))
+                conds.append(self._make_dwell_condition(min_dwell))
+                clean["conditions"] = conds
+            if "before" not in clean:
+                method = f"_perform_{trigger}"
+                if callable(getattr(type(self), method, None)):
+                    clean["before"] = method
+            prepared.append(clean)
+        return prepared
+
+    def _make_dwell_condition(self, min_secs: float):
+        """Build a `transitions` condition callable for a `@<dur>` time guard: true once at
+        least `min_secs` have elapsed since the current state was entered. Bound to this
+        instance so each model gets its own check (send_event=True => receives EventData)."""
+        def _dwell_elapsed(event) -> bool:
+            return (_utcnow() - self._state_entered_at).total_seconds() >= min_secs
+        return _dwell_elapsed
 
     def _on_state_changed(self, event) -> None:
         """Runs after EVERY transition (event is a transitions EventData). Records the
@@ -485,6 +548,7 @@ class FolderBackedCase(ABC):
         src, dest = event.transition.source, event.transition.dest
         self._events.primitive.create_event("ENTER_STATE", dest)
         self._last_activity = _utcnow()
+        self._state_entered_at = self._last_activity   # reset the time-guard dwell anchor
         closing = src not in self._fsm.closed_states and dest in self._fsm.closed_states
         if not closing:
             # Throttled flush + lease beat at the boundary. Skipped on the closing edge:
@@ -503,6 +567,50 @@ class FolderBackedCase(ABC):
             self._flush_record(force=True)
             self.release()                     # drop lease BEFORE any archival move (§5d)
             self._notify("CASE_CLOSED", src=src, dest=dest)
+
+    async def _on_fsm_exception(self, event) -> None:
+        """Machine-level `on_exception` hook (wired in _build_machine): fires when ANY
+        callback in a trigger's dispatch raises — a guard, a `_perform_<trigger>`, an
+        on_enter/on_exit, or an `after`. `transitions` has already aborted the transition
+        (the model stayed in its source state) by the time we get here.
+
+        We do three things, in order:
+          1. DECORATE the exception with structured FSM context under `case_context`
+             (case_id + the trigger and intended source/dest). A driver such as a
+             CaseManager — which by design does NOT understand any case's internals —
+             can branch on this to take its crude actions (kill / monitor / retry /
+             escalate) without parsing the message or knowing the case type. Decoration
+             happens HERE rather than in advance() so the context is attached however the
+             trigger was fired (direct `await case.x()` as well as via advance()).
+          2. Log a CASE_ALERT (type-agnostic escalation marker) capturing the same
+             context in the low-volume event log, so the failure is visible on disk.
+          3. RE-RAISE the original exception (preserving its type and traceback) so the
+             abort stays fail-fast and the caller still sees the real error.
+
+        FUTURE ENHANCEMENT (deferred): EventData does not reveal WHICH callback slot
+        raised, so we cannot yet distinguish e.g. an operational `_perform_` failure
+        from a (likely-defect) guard exception. That phase attribution can be added by
+        wrapping the callbacks we ourselves wire; not implemented until a need appears."""
+        err = event.error
+        trigger = event.event.name if event.event is not None else None
+        trans = event.transition
+        src = trans.source if trans is not None else self.state
+        dest = trans.dest if trans is not None else None
+        context = {
+            "case_id": self.case_id,
+            "trigger": trigger,
+            "source": src,
+            "dest": dest,
+        }
+        try:
+            err.case_context = context        # best-effort; some exceptions forbid attrs
+        except (AttributeError, TypeError):
+            pass
+        self.log_alert(
+            f"unhandled {type(err).__name__} in {trigger} ({src} -> {dest})",
+            where=src,
+        )
+        raise err
 
     def on_closing(self) -> None:
         """Overridable hook fired in phase 1 (pre-finalization): assets still exist,
@@ -730,6 +838,43 @@ class FolderBackedCase(ABC):
         Override to key on creation date, fiscal period, tenant, etc."""
         return _utcnow().strftime("%Y-%m-archive")
 
+    # ---- operator alert channel (type-agnostic escalation marker) ----
+
+    def log_alert(self, short_msg: str = "", *, where: Optional[str] = None) -> None:
+        """Record a CASE_ALERT: a deliberate, type-agnostic "this case needs a human
+        or administrator to look at it" marker in the event log.
+
+        This is the case family's single generic escalation channel. Because it reads
+        the same for every case type, an observer (a CaseManager sweep, a dashboard, a
+        person grepping folders) can surface cases needing attention WITHOUT
+        understanding any particular case type's internal state vocabulary.
+
+        Orthogonal to the FSM: it does NOT change state, close the case, or imply a
+        terminal/failure state. A case may log zero, one, or several over its lifetime.
+
+        Use SPARINGLY — the event log is a low-volume audit trail (tens of entries, not
+        thousands), so every alert should be worth a reader's time. Raise one when the
+        case has deviated in a way that warrants out-of-band examination, e.g.:
+
+          * Integrity risk — outputs may be inconsistent or violate an agreed protocol
+            (e.g. a non-recoverable write failed partway through).
+          * Substantial deviation from norms — a behavioral/SLA envelope was breached
+            (e.g. a step expected to take 5 minutes took 30).
+
+        Do NOT use it for routine, recoverable defects or normal exception handling the
+        flow is designed to absorb (retries, expected guard declines) — that is ordinary
+        control flow, not an alert.
+
+        Args:
+            short_msg: a brief human-readable reason. The event log holds only short
+                text — keep it to a terse phrase, not a stack trace.
+            where: optional label for the locus of concern; defaults to the current
+                state, usually the most useful starting point for examination.
+        """
+        self._events.primitive.create_event(
+            "CASE_ALERT", where or self.state, {"msg": short_msg}
+        )
+
     # ---- pulse (stall-detection; subclasses override to escalate) ----
 
     @property
@@ -739,7 +884,14 @@ class FolderBackedCase(ABC):
     async def pulse(self) -> None:
         """Called periodically by an external scheduler (or CaseManager). Logs an idle
         marker event and beats the lease. Override to escalate on stall or fire FSM
-        triggers on timeout."""
+        triggers on timeout.
+
+        PLANNED (next design pass — not yet implemented): pulse()/advance() will also
+        re-evaluate TIME-GUARDED auto edges (the `@<dur>` guard, e.g. `*@60m#expire`),
+        firing one once its minimum dwell in the current state has elapsed. The dwell is
+        measured from the latest ENTER_STATE timestamp; the time guard is a floor ("at
+        least N elapsed"), never a promise to fire exactly at N. Interrupting an
+        in-progress transition is explicitly OUT of scope for that work."""
         idle = (_utcnow() - self._last_activity).total_seconds()
         self._events.primitive.create_event("PULSE", "idle", {"idle_secs": round(idle)})
         self.heartbeat()               # piggyback liveness on the pulse cadence (§5d)
