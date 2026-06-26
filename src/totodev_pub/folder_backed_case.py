@@ -154,7 +154,7 @@ class FolderBackedCase(ABC):
     Subclasses declare ONE thing for the FSM: `fsm_state_chains`, a list of
     Mermaid-flavoured chain strings. A trivial example:
 
-        fsm_state_chains = ["^new--assign-->assigned==work-->closed^"]
+        fsm_state_chains = ["^new==assign-->assigned--work-->closed^"]
 
     reads left-to-right as states joined by `--trigger-->` connectors, where a leading
     `^` marks the initial state, a trailing `^` a terminal (closing) state, and `==`
