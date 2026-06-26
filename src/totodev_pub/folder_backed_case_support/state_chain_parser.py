@@ -7,13 +7,13 @@ machine as a list of chain strings, plus the dumb data structure it renders into
 
 A chain reads left-to-right as alternating states and the connectors that join them:
 
-    "^new--assign-->assigned--*begin-->in_process--*funded#finish-->closed^"
+    "^new--assign-->assigned==begin-->in_process==funded#finish-->closed^"
 
 States
 ------
-* A bare name is an ordinary state. Names use `[A-Za-z0-9_]` with SINGLE internal
-  dashes (no leading/trailing/double dash) — that constraint is what keeps the
-  decorator glyphs unambiguous.
+* A bare name is an ordinary state. Names use `[A-Za-z0-9_]` only (no dashes), so
+  identifier-based hook conventions like `on_enter_<state>`/`on_exit_<state>` map
+  directly to DSL state names.
 * A LEADING `^` marks an INITIAL state (a valid entry/root): `^new`. Initial states
   are also the reachability anchors (they are exempt from the "must have an incoming
   edge" rule), which is how an entry reached only via reclassify_to() is declared.
@@ -23,13 +23,13 @@ States
   markers is tolerated; any trailing glyph other than `^` is rejected, keeping the marker
   namespace closed against silent typos.
 
-Connectors  `--[*][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
+Connectors  `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
 ----------
 * `A--trigger-->B` is one transition (trigger `trigger`, source `A`, dest `B`).
-* A leading `*` marks the edge AUTO-ADVANCE: advance()/run_to_completion() may fire it
-  unattended. `*` is opt-in (fail-safe): an un-starred edge never auto-fires, so a case
-  simply waits rather than silently running past a human/event gate. The `*` sits to the
-  LEFT because it governs whether the edge is taken at all.
+* `A==trigger-->B` marks the edge AUTO-ADVANCE: advance()/run_to_completion() may fire it
+  unattended. `==` is opt-in (fail-safe): a `--` edge never auto-fires, so a case
+  simply waits rather than silently running past a human/event gate. The connector form
+  itself carries this "may auto-fire" policy.
 * `cond#trigger` attaches a GUARD: the leading `#`-separated identifiers become the
   transition's `conditions` (e.g. `funded#finish` => conditions=["funded"], trigger
   "finish"). Multiple guards chain: `a#b#trigger`. Guards are what make multiple
@@ -67,11 +67,12 @@ Connectors  `--[*][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
   `@FAIL<3#funded#finish~3m`. (Stored in FsmChainSpec.trigger_timeouts; consumed by the
   case, which owns the warn/abort/log behavior.)
 
-Wildcard ("from any source") chains  `*--...-->DEST`
+Wildcard ("from any source") chains  `*[--|==]...-->DEST`
 ----------
-* A chain that BEGINS with `*--` declares one edge whose source is ANY otherwise
-  non-terminal state: `*--cancel-->cancelled^` means "from anywhere, `cancel` => cancelled".
-  The connector carries the usual `[*]`, guards, and `~<dur>` soft-timeout like any other.
+* A chain that BEGINS with `*--` or `*==` declares one edge whose source is ANY otherwise
+  non-terminal state: `*--cancel-->cancelled^` means "from anywhere, `cancel` => cancelled";
+  `*==timeout-->expired^` is the auto-advance variant. The connector carries the usual
+  guards and `~<dur>` soft-timeout like any other.
 * Exactly one transition (one destination) per wildcard chain. The concrete per-source
   edges are deduced AFTER all chains parse and AFTER validate(): terminal states and the
   destination itself (no self-loop) are excluded, and an EXPLICIT edge for the same
@@ -98,6 +99,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -106,10 +108,9 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     FsmBindingError,
 )
 
-# A state name: one or more [A-Za-z0-9_] groups joined by SINGLE dashes. Forbids
-# leading/trailing/double dashes, so a connector's `--` can never be read as part of a
-# name and a trailing marker glyph can never be read as a name character.
-_NAME_RE = re.compile(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
+# A state name: one or more [A-Za-z0-9_] characters (no dashes). This keeps state names
+# directly representable as Python suffix identifiers for hook conventions.
+_NAME_RE = re.compile(r"[A-Za-z0-9_]+")
 
 # A FACTUAL-GUARD segment: `@NAME<op>NUMBER[unit]` with op in < <= > >= (NO ==/!=). The
 # optional s|m|h|d unit belongs to time facts (@DWELL); count facts (@FAIL) take a bare int.
@@ -125,8 +126,8 @@ _LABEL_SEGMENT = r"(?:" + _FACT_GUARD_SEGMENT + r"|[A-Za-z_]\w*)"
 # whole-connector parse failure — exactly how @DWELL handles its unit.
 _TIMEOUT_SUFFIX = r"(?:\s*~\s*\d+(?:\.\d+)?\s*[smhd]?)?"
 
-# The connector between two states: `--[*][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`.
-#   group 1: the optional auto-advance star.
+# The connector between two states: `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`.
+#   group 1: connector kind (`--` manual, `==` auto-advance).
 #   group 2: the label — a `#`-separated run of segments (method guards / factual guards,
 #            then the trigger), optionally followed by a `~<dur>` soft-timeout suffix on the
 #            trigger. Identifier segments are valid Python identifiers because `transitions`
@@ -134,7 +135,7 @@ _TIMEOUT_SUFFIX = r"(?:\s*~\s*\d+(?:\.\d+)?\s*[smhd]?)?"
 #            `@...` segments are factual guards (see _parse_fact_guard); the `~<dur>` suffix
 #            is split off the trigger in _parse_label (see _parse_trigger_timeout).
 _CONNECTOR_RE = re.compile(
-    r"--\s*(\*)?\s*"
+    r"(--|==)\s*"
     r"(" + _LABEL_SEGMENT + r"(?:\s*#\s*" + _LABEL_SEGMENT + r")*" + _TIMEOUT_SUFFIX + r")"
     r"\s*-->"
 )
@@ -190,7 +191,7 @@ class FsmChainSpec:
         closed_states  states marked terminal (trailing `^`).
         initial_states states marked initial (leading `^`); also reachability anchors.
         initial_state  the DEFAULT entry state (first initial-marked, in chain order).
-        auto_edges     {(source, trigger)} edges eligible for advance() (leading `*`).
+        auto_edges     {(source, trigger)} edges eligible for advance() (`==` connector).
         pipeline       distinct auto-advance trigger names, in first-seen order (display).
         triggers       every distinct trigger name, in first-seen order.
         primary_chain  the raw first chain string, kept for DEBUG logging / diagrams.
@@ -343,7 +344,7 @@ class FsmChainSpec:
     def classify(self) -> "FsmChainSpec":
         """Compute `timed_escape_states`: states that can never be permanently auto-blocked
         because they own an auto edge guaranteed to become fireable by the mere passage of
-        time. Run AFTER expand_wildcards() so a blanket `*--*@DWELL>=2d#timeout-->expired^`
+        time. Run AFTER expand_wildcards() so a blanket `*==@DWELL>=2d#timeout-->expired^`
         net is reflected. Returns self for chaining.
 
         A state qualifies if it has an auto edge whose guards are satisfiable BY WAITING
@@ -378,7 +379,7 @@ class FsmChainSpec:
         """Inject a default `@FAIL<1` (one attempt, NO retry) onto every AUTO edge that does
         not already declare a `@FAIL` guard and is not a pure timed escape. Retry is thus
         OPT-IN — an un-guarded auto edge halts auto-progress after a single failure rather
-        than being hammered forever — mirroring how auto-advance itself is opt-in (`*`).
+        than being hammered forever — mirroring how auto-advance itself is opt-in (`==`).
         Returns self for chaining. Run AFTER classify() so the injected guard never perturbs
         timed-escape detection (which keys on the EXPLICIT graph).
 
@@ -387,7 +388,7 @@ class FsmChainSpec:
           * a pure timed-escape edge (`@DWELL>`/`>=` only) — logically `@FAIL>=0`, it
             tolerates any number of failures, so a safety-net timeout is never disabled by a
             transient failure.
-        Only AUTO edges are touched: un-starred (manual/event-driven) triggers are never
+        Only AUTO edges are touched: manual/event-driven (`--`) triggers are never
         driven by advance(), so a retry cap on them would have no meaning."""
         for t in self.transitions:
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
@@ -428,17 +429,26 @@ class FsmChainSpec:
     ) -> tuple[set[str], set[str]]:
         """The carrier-method names this FSM implies, as (required, optional):
           * required — every method-guard / explicitly-named callback the spec references;
-            these MUST exist on the carrier (a missing one is a typo, not a choice).
-          * optional — the per-trigger ACTION methods derived from `hook_patterns` (default
-            `_perform_<trigger>`); wired ONLY when present, hence never required.
+            these MUST exist on the carrier (a missing one is a typo, not a choice); plus
+            action hooks for triggers reachable from any auto edge (`==`), because unattended
+            paths must be explicit.
+          * optional — per-trigger ACTION methods derived from `hook_patterns` (default
+            `_perform_<trigger>`) for manual-only triggers (`--`); wired when present.
         PURE: reads the spec, binds to nothing. validate_object_compatibility() is the
         companion that checks a concrete object against these."""
         required = {
             item for slot, item, _ in self._referenced_callbacks() if isinstance(item, str)
         }
+        auto_triggers = {trigger for _, trigger in self.auto_edges}
+        required.update(
+            pat.format(trigger=trigger)
+            for trigger in auto_triggers
+            for pat in hook_patterns
+        )
         optional = {
             pat.format(trigger=trigger)
             for trigger in self.triggers
+            if trigger not in auto_triggers
             for pat in hook_patterns
         }
         return required, optional
@@ -449,6 +459,7 @@ class FsmChainSpec:
         *,
         force_async: bool = True,
         hook_patterns=("_perform_{trigger}",),
+        orphan_detection: str = "off",
     ) -> None:
         """Confirm `obj` is a suitable CARRIER for this compiled FSM, raising FsmBindingError
         (listing ALL gaps at once) if not. Designed to run ONCE per concrete carrier class —
@@ -458,19 +469,29 @@ class FsmChainSpec:
 
         Checks:
           * EXISTENCE — every method guard / explicitly-named callback the spec references
-            must be defined on `obj`; a missing one is a hard error (almost always a typo).
+            must be defined on `obj`; plus `_perform_<trigger>` for any trigger reachable from
+            an auto edge (`==`) must exist, even if it is a no-op.
           * ASYNC (force_async, default True) — every referenced callable that IS present —
-            the required names AND any optional `_perform_<trigger>` action method — must be a
-            coroutine function. The case family is driven through async (advance(), the
-            generated triggers); a stray `def` instead of `async def` would silently block the
-            event loop, so it is rejected here. Set force_async=False for the rare carrier that
-            deliberately mixes in synchronous callables.
+            required names, required auto-edge hooks, and any optional action method that
+            happens to exist — must be a coroutine function. The case family is driven through
+            async (advance(), the generated triggers); a stray `def` instead of `async def`
+            would silently block the event loop, so it is rejected here. Set force_async=False
+            for the rare carrier that deliberately mixes in synchronous callables.
 
-        The `_perform_<trigger>` action methods are OPTIONAL (wired only when present, the
-        zero-effort conventional path) and so are never reported missing — but if present they
-        are held to the async rule like everything else."""
+        `_perform_<trigger>` stays OPTIONAL for manual-only triggers (`--`) — but if present
+        it is held to the async rule like everything else.
+
+        orphan_detection controls scanning for hook-looking typo traps:
+          * "off"  — skip orphan scan (default)
+          * "warn" — emit a warning for hook-like methods whose suffix does not match any
+                     known state/trigger
+          * "error" — fail binding with FsmBindingError including orphan details
+        Scanned prefixes: `on_enter_`, `on_exit_`, `_perform_`, `before_`, `after_`."""
+        if orphan_detection not in {"off", "warn", "error"}:
+            raise ValueError("orphan_detection must be one of {'off', 'warn', 'error'}")
         missing: dict[str, tuple[str, str, str]] = {}
         sync: dict[str, tuple[str, str, str]] = {}
+        auto_triggers = {trigger for _, trigger in self.auto_edges}
 
         for slot, item, trigger in self._referenced_callbacks():
             if isinstance(item, str):
@@ -486,20 +507,84 @@ class FsmChainSpec:
             if force_async and not _is_async_callable(fn):
                 sync.setdefault(name, (name, slot, trigger))
 
+        for trigger in auto_triggers:
+            for pat in hook_patterns:
+                name = pat.format(trigger=trigger)
+                fn = getattr(obj, name, None)
+                if fn is None:
+                    missing.setdefault(name, (name, "auto_hook", trigger))
+                    continue
+                if force_async and not _is_async_callable(fn):
+                    sync.setdefault(name, (name, "auto_hook", trigger))
+
         if force_async:
             for trigger in self.triggers:
+                if trigger in auto_triggers:
+                    continue
                 for pat in hook_patterns:
                     name = pat.format(trigger=trigger)
                     fn = getattr(obj, name, None)
                     if fn is not None and not _is_async_callable(fn):
                         sync.setdefault(name, (name, "hook", trigger))
+        orphaned = (
+            self._find_orphan_hook_methods(obj) if orphan_detection != "off" else []
+        )
 
-        if missing or sync:
+        if missing or sync or (orphan_detection == "error" and orphaned):
             raise FsmBindingError(
                 type(obj).__name__,
                 missing=list(missing.values()),
                 sync=list(sync.values()),
+                orphaned=orphaned if orphan_detection == "error" else [],
             )
+        if orphan_detection == "warn" and orphaned:
+            warnings.warn(
+                self._format_orphan_hook_warning(type(obj).__name__, orphaned),
+                UserWarning,
+                stacklevel=2,
+            )
+
+    def _find_orphan_hook_methods(self, obj) -> list[tuple[str, str, str]]:
+        """Return hook-like methods whose suffix points at no known state/trigger.
+        Tuples are (method_name, slot, suffix) where slot is one of:
+        'on_enter', 'on_exit', 'perform', 'before', 'after'."""
+        states = set(self.states)
+        triggers = set(self.triggers)
+        patterns: tuple[tuple[str, str, set[str]], ...] = (
+            ("on_enter_", "on_enter", states),
+            ("on_exit_", "on_exit", states),
+            ("_perform_", "perform", triggers),
+            ("before_", "before", triggers),
+            ("after_", "after", triggers),
+        )
+        orphans: list[tuple[str, str, str]] = []
+        for name in dir(type(obj)):
+            fn = getattr(obj, name, None)
+            if not callable(fn):
+                continue
+            for prefix, slot, expected in patterns:
+                if not name.startswith(prefix):
+                    continue
+                suffix = name[len(prefix):]
+                if suffix and suffix not in expected:
+                    orphans.append((name, slot, suffix))
+                break
+        return orphans
+
+    def _format_orphan_hook_warning(
+        self, carrier_name: str, orphaned: list[tuple[str, str, str]]
+    ) -> str:
+        lines = [
+            f"{carrier_name!r} has hook-like methods that do not map to known FSM states/triggers:"
+        ]
+        for name, slot, suffix in orphaned:
+            expected = sorted(self.states) if slot in {"on_enter", "on_exit"} else sorted(self.triggers)
+            kind = "state" if slot in {"on_enter", "on_exit"} else "trigger"
+            lines.append(
+                f"  - {name!r}: suffix {suffix!r} is not a known {kind}; expected one of {expected}"
+            )
+        lines.append("Rename/fix these methods, or disable with orphan_detection='off'.")
+        return "\n".join(lines)
 
 
 class StateChainParser:
@@ -512,7 +597,8 @@ class StateChainParser:
         """Render `chains` into an FsmChainSpec. Empty/None -> empty spec. Raises
         FsmChainParseError (with the offending chain + index) on malformed input. Does NOT
         run the whole-graph checks (call FsmChainSpec.validate()) and does NOT expand
-        `*--...-->` wildcard chains (call FsmChainSpec.expand_wildcards(), AFTER validate)."""
+        `*[--|==]...-->` wildcard chains (call FsmChainSpec.expand_wildcards(),
+        AFTER validate)."""
         spec = FsmChainSpec.empty()
         if not chains:
             return spec
@@ -551,9 +637,9 @@ class StateChainParser:
         if not chain:
             raise FsmChainParseError("empty chain string", chain=raw, index=idx)
 
-        parts = _CONNECTOR_RE.split(chain)   # [state, star, label, state, star, label, ...]
+        parts = _CONNECTOR_RE.split(chain)   # [state, connector, label, state, connector, label, ...]
         state_tokens = parts[0::3]
-        stars = parts[1::3]
+        connectors = parts[1::3]
         labels = parts[2::3]
 
         if primary:
@@ -562,7 +648,7 @@ class StateChainParser:
         # A chain whose first state slot is a lone `*` is a "from any source" wildcard:
         # its concrete edges are deduced later by FsmChainSpec.expand_wildcards().
         if state_tokens and state_tokens[0].strip() == _WILDCARD_SOURCE:
-            cls._parse_wildcard_chain(state_tokens, stars, labels, raw, idx, spec)
+            cls._parse_wildcard_chain(state_tokens, connectors, labels, raw, idx, spec)
             return
 
         node_names: list[str] = []
@@ -572,7 +658,7 @@ class StateChainParser:
             cls._add_state(spec, name, initial=initial, terminal=terminal)
 
         for i, label in enumerate(labels):
-            auto = stars[i] == "*"
+            auto = connectors[i] == "=="
             conditions, fact_guards, trigger, soft_secs = cls._parse_label(label, raw, idx)
             cls._add_transition(
                 spec, trigger, node_names[i], node_names[i + 1],
@@ -584,24 +670,25 @@ class StateChainParser:
     def _parse_wildcard_chain(
         cls,
         state_tokens: list[str],
-        stars: list,
+        connectors: list[str],
         labels: list[str],
         raw: str,
         idx: int,
         spec: FsmChainSpec,
     ) -> None:
-        """Register a single `*--[*][guards#]trigger[~<dur>]-->DEST` wildcard edge. Must
-        contain exactly ONE transition to a single destination; the concrete per-source
-        edges are deduced by FsmChainSpec.expand_wildcards() once every state is known."""
+        """Register a single `*[--|==][guards#]trigger[~<dur>]-->DEST` wildcard edge.
+        Must contain exactly ONE transition to a single destination; the concrete
+        per-source edges are deduced by FsmChainSpec.expand_wildcards() once every
+        state is known."""
         if len(labels) != 1 or len(state_tokens) != 2:
             raise FsmChainParseError(
-                "a wildcard '*--...-->' chain must contain exactly ONE transition to a "
+                "a wildcard '*--...-->' or '*==...-->' chain must contain exactly ONE transition to a "
                 "single destination, e.g. '*--cancel-->cancelled^'",
                 chain=raw, index=idx,
             )
         name, initial, terminal = cls._parse_state_token(state_tokens[1], raw, idx)
         cls._add_state(spec, name, initial=initial, terminal=terminal)
-        auto = stars[0] == "*"
+        auto = connectors[0] == "=="
         conditions, fact_guards, trigger, soft_secs = cls._parse_label(labels[0], raw, idx)
         cls._record_trigger_timeout(spec, trigger, soft_secs, raw, idx)
         spec.pending_wildcards.append({
@@ -633,8 +720,7 @@ class StateChainParser:
         if m is None or m.start() != 0:
             raise FsmChainParseError(
                 f"invalid state name {token.strip()!r}; names use letters/digits/underscores "
-                "with single internal dashes (mark initial with a LEADING '^', terminal with "
-                "a TRAILING '^')",
+                "only (mark initial with a LEADING '^', terminal with a TRAILING '^')",
                 chain=raw, index=idx,
             )
         name = m.group(0)
@@ -658,7 +744,7 @@ class StateChainParser:
                 if "--" in token or "->" in token:
                     raise FsmChainParseError(
                         f"could not parse {token.strip()!r}; a transition must be written "
-                        "`A--trigger-->B` (two dashes, then `-->`)",
+                        "`A--trigger-->B` (manual) or `A==trigger-->B` (auto)",
                         chain=raw, index=idx,
                     )
                 raise FsmChainParseError(

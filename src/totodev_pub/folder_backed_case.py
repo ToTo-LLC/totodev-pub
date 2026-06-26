@@ -17,6 +17,8 @@ CaseRecord          — skinny Pydantic identity card (case_record.yaml).
 CaseEventLogReader  — read-oriented convention interpreter over PrimitiveEventLog.
 CaseAssets          — working-file playground + retention manifest (_keep_assets.txt).
 FolderBackedCase    — ABC you subclass to define a case type.
+StateChainParser    — authoritative source for the state-chains DSL: parser/compiler and
+                      validation logic used by FolderBackedCase.compile_fsm().
 
 The tightly-coupled supporting classes live in the folder_backed_case_support
 package and are re-exported here for convenience and backward compatibility.
@@ -24,10 +26,13 @@ package and are re-exported here for convenience and backward compatibility.
 Quick start
 -----------
     class TicketCase(FolderBackedCase):
-        # Mermaid-flavoured chains: A--trigger-->B; leading `^` = initial state,
-        # trailing `^` = terminal state, leading `*` on a connector = auto-advance.
-        fsm_state_chains = ["^new--open_ticket-->open--*close_ticket-->closed^"
-                            "*--*@DWELL>14d#non_responsive-->auto_closed^"] # timed-escape edge
+        # State-chains DSL: 
+        #     State_A --trigger--> State_B (manual)    a human-driven transition
+        #     State_A ==trigger--> State_B (auto)      an auto-advance transition
+        #     leading  `^` = initial state, 
+        #     trailing `^` = terminal state.
+        fsm_state_chains = ["^new==open_ticket-->open--close_ticket-->closed^"
+                            "*==@DWELL>14d#non_responsive-->auto_closed^"]  # timed-escape edge
 
     FolderBackedCase.register_case_types(TicketCase)
 
@@ -149,15 +154,26 @@ class FolderBackedCase(ABC):
     Subclasses declare ONE thing for the FSM: `fsm_state_chains`, a list of
     Mermaid-flavoured chain strings. A trivial example:
 
-        fsm_state_chains = ["^new--assign-->assigned--*work-->closed^"]
+        fsm_state_chains = ["^new--assign-->assigned==work-->closed^"]
 
     reads left-to-right as states joined by `--trigger-->` connectors, where a leading
-    `^` marks the initial state, a trailing `^` a terminal (closing) state, and a
-    leading `*` opts an edge into auto-advance. Connectors also carry guards, `@DWELL`/
+    `^` marks the initial state, a trailing `^` a terminal (closing) state, and `==`
+    opts an edge into auto-advance (`--` stays manual). Connectors also carry guards, `@DWELL`/
     `@FAIL` factual guards, and `~<dur>` soft timeouts — see StateChainParser for the
     full grammar. Side-effecting work for a trigger goes in a `_perform_<trigger>`
     method, auto-wired as the transition's `before` (a raise aborts the step); the
     parser renders the chains into the per-class singleton `_fsm`.
+
+    Implicit hook conventions (derived from your declared states/triggers):
+      * `on_enter_<state>`, `on_exit_<state>` fire only when `<state>` is an exact
+        known FSM state name.
+      * `_perform_<trigger>`, `before_<trigger>`, `after_<trigger>` map only when
+        `<trigger>` is an exact known FSM trigger name.
+      * `<guard>` in `guard#trigger` DSL segments must be an exact method name on the
+        class (or an explicitly provided callable in a hand-built transition dict).
+    In short: hook suffixes are strict exact matches to parsed state/trigger/guard
+    names; typos are treated as non-matching methods and may be flagged by compatibility
+    validation depending on `orphan_detection`.
 
     Need the full power of `transitions` (callbacks, `unless`, `*`/multi-source, state
     objects)? Override compile_fsm() and return an FsmChainSpec you build yourself
@@ -213,17 +229,12 @@ class FolderBackedCase(ABC):
                 cls._fsm.pipeline,
             )
 
-    # Flush policy: by default the base throttled-flushes the record (only if dirty) at
-    # every transition boundary. Set False — or shadow as a property — to suppress that
-    # intermediate flush; the FORCED lifecycle flushes (create / close / reclassify)
-    # STILL happen regardless.
-    autoflush_record_on_transition: bool = True
+    # ---- Derived-class registry management ----
 
     # Case-type registry: a GLOBAL SINGLETON owned here, not by a manager, so type
     # resolution (rehydrate / smart peek_record) works manager-free.
-    _registry: dict[str, type[FolderBackedCase]] = {}
-
-    # ---- registry management ----
+    _case_class_registry: dict[str, type[FolderBackedCase]] = {}
+    _last_generated_case_id_ms: int = -1
 
     @classmethod
     def register_case_types(cls, *case_classes: type[FolderBackedCase]) -> None:
@@ -233,7 +244,7 @@ class FolderBackedCase(ABC):
         _flush_record's guard — so the class name in code is guaranteed to match the name
         on disk. Single or many: register_case_types(A) or register_case_types(A, B, C)."""
         for case_cls in case_classes:
-            cls._registry[case_cls.__name__] = case_cls
+            cls._case_class_registry[case_cls.__name__] = case_cls
 
     @classmethod
     def register(cls, case_cls: type[FolderBackedCase]) -> type[FolderBackedCase]:
@@ -260,7 +271,7 @@ class FolderBackedCase(ABC):
         (tests / isolation); None means use the global singleton."""
         if type_name is None:
             return None
-        return (registry if registry is not None else cls._registry).get(type_name)
+        return (registry if registry is not None else cls._case_class_registry).get(type_name)
 
     # ---- ID generation ----
 
@@ -273,9 +284,17 @@ class FolderBackedCase(ABC):
         (e.g. f"INV-{super().generate_case_id()}"). The default is a short,
         sortable, base-36 millisecond time slug.
 
+        For in-process collision resistance, generation is monotonic per class:
+        if two calls land in the same millisecond, the latter is bumped to
+        (previous + 1ms) before encoding. This does not guarantee uniqueness
+        across multiple processes or machines.
+
         (Must be a classmethod: the id is minted before the instance exists, so
         there is no `self` to hang an instance method on.)"""
-        return _new_time_slug()
+        now_ms = int(time.time() * 1000)
+        mint_ms = now_ms if now_ms > cls._last_generated_case_id_ms else cls._last_generated_case_id_ms + 1
+        cls._last_generated_case_id_ms = mint_ms
+        return _new_time_slug(mint_ms)
 
     # ---- construction ----
 
@@ -292,24 +311,16 @@ class FolderBackedCase(ABC):
         `generate_case_id()` when needed), then immediately calls this
         constructor to attach the live object.
         """
-        # Config guards, BEFORE any disk/lease I/O so a misconfigured class fails clean.
-        # Both run at the first instantiation of a CONCRETE class — the earliest point the
-        # class is guaranteed fully assembled (leaf guards present).
+        # Run config guards BEFORE any disk/lease I/O so misconfigured classes fail cleanly.
         cls = type(self)
-        # 1. NO-FSM guard: an empty spec is legal for the base / abstract intermediates
-        # (never instantiated), so the "forgot to declare an FSM" case can only be caught
-        # here, with a message that names the corrective action (vs. an opaque ValueError
-        # from `transitions` when it is handed no initial state).
+        # 1) Empty FSM is legal on base/abstract classes, so this check belongs here.
         if not cls._fsm.states:
             raise MissingFsmError(cls.__name__)
-        # 2. ONE-TIME carrier binding check. The sentinel is keyed on cls.__dict__, NOT a
-        # plain attribute: a truthy flag inherited from a parent would wrongly skip a
-        # subclass validating its OWN (different) FSM. A raise leaves the flag unset, so
-        # every attempt re-checks and re-reports until fixed.
+        # 2) One-time carrier binding check, keyed on cls.__dict__ so subclasses don't
+        # inherit a parent's "already checked" sentinel.
         if "_fsm_binding_checked" not in cls.__dict__:
             cls._fsm.validate_object_compatibility(self)
             cls._fsm_binding_checked = True
-        # Load-only and manager-agnostic: brand-new cases come via create_in_folder().
         self._folder = Path(case_folder)
         self._holds_lease = False         # set True only on a successful _acquire_lease()
         self._detached = False
@@ -321,9 +332,9 @@ class FolderBackedCase(ABC):
         )
         self._events = CaseEventLogReader.for_folder(self._folder)
         self._assets = CaseAssets(self._folder)   # asset playground + retention manifest
-        self._listeners: list = []        # fn(case, event_name, info); how a manager subscribes
+        self._listeners: list = []        # fn(case, event_name, info)
         self._stepping = False            # in-memory: a step is executing right now (this process)
-        # State is DERIVED from the event log on load; cached in self.state for transitions.
+        # State is derived from the event log on load; transitions then cache on self.state.
         self.state: str = self._derive_state() or self._fsm.initial_state
         # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _as_utc() converts them
         # to aware UTC. record.created is already aware UTC (CaseRecord validator).
@@ -336,8 +347,7 @@ class FolderBackedCase(ABC):
         self._state_entered_at: datetime.datetime = (
             self._as_utc(_enter.mtime) if _enter is not None else self._record.created
         )
-        # Acquire single ownership of the folder. AFTER state is known because the lease TTL
-        # is state-aware. Raises CaseAlreadyOpenError if another owner holds it.
+        # Acquire ownership AFTER state is known because lease TTL is state-aware.
         self._my_mtime: float | None = None
         self._last_beat_local: float = 0.0
         self._acquire_lease()
@@ -551,7 +561,7 @@ class FolderBackedCase(ABC):
     @property
     def is_awaiting(self) -> bool:
         """Open but with no auto-advance candidate defined — blocked on external input / a
-        human / an event-driven (un-starred) transition."""
+        human / an event-driven (`--`) transition."""
         return self.is_open and self.next_step is None
 
     @property
@@ -766,8 +776,7 @@ class FolderBackedCase(ABC):
         if not closing:
             # Throttled flush + lease beat at the boundary. Skipped on the closing edge:
             # the forced phase-2 seal supersedes the flush, and phase 2 beats explicitly.
-            if self.autoflush_record_on_transition:
-                self._flush_record()
+            self._flush_record()
             self.heartbeat()
         else:
             # --- phase 1: pre-finalization --- assets still present ---

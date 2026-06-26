@@ -95,7 +95,7 @@ class AutoAdvanceBlocked(Exception):
     fire later, so the case is genuinely stuck waiting on out-of-band help.
 
     SCOPE: only the unattended advance() path is walled off — manual or event-driven
-    (un-starred) transitions may still be perfectly available, which is why it is "auto
+    (`--`) transitions may still be perfectly available, which is why it is "auto
     advance" blocked, not "all transitions" blocked.
 
     USAGE: advance() does NOT raise this — it CARRIES it in AdvanceResult.exceptions as
@@ -103,8 +103,8 @@ class AutoAdvanceBlocked(Exception):
     call, having no AdvanceResult to return, still raises). It is deterministic and
     idempotent: the same state yields the same block on every call until something changes.
 
-    REMEDY: give the state a timed escape, e.g. `--*@DWELL>{N}h#timeout-->somewhere`, or a
-    blanket net like `*--*@DWELL>=2d#timeout-->expired^`; or resolve/route it manually.
+    REMEDY: give the state a timed escape, e.g. `==@DWELL>{N}h#timeout-->somewhere`, or a
+    blanket net like `*==@DWELL>=2d#timeout-->expired^`; or resolve/route it manually.
     """
     def __init__(self, case_id: str, state: str, *, candidates: Optional[list] = None):
         super().__init__(
@@ -191,8 +191,8 @@ class FsmBindingError(Exception):
 
       * MISSING — a method guard (or other explicitly-named transition callback) the FSM
         references is not defined on the class. This is almost always a typo in a chain's
-        `guard#trigger`. A `_perform_<trigger>` action method is OPTIONAL and is NEVER
-        reported missing — it is wired only when present (the conventional, zero-effort path).
+        `guard#trigger`. Additionally, `_perform_<trigger>` is REQUIRED when that trigger is
+        reachable from an auto-advance edge (`==`), so unattended paths are explicit.
       * SYNC — a referenced callable exists but is synchronous while the case requires async.
         FolderBackedCase is driven through async (advance(), the generated triggers), so every
         guard, action method, and callback the FSM touches MUST be a coroutine function
@@ -203,8 +203,8 @@ class FsmBindingError(Exception):
     guard or misspell a method name, and this turns a baffling event-loop stall or an
     AttributeError deep inside `transitions` into a precise message at construction time.
 
-    Carries `carrier_name` and the structured `missing` / `sync` lists (each a list of
-    (name, slot, trigger) tuples) for programmatic inspection."""
+    Carries `carrier_name` and structured `missing` / `sync` / `orphaned` lists for
+    programmatic inspection."""
 
     # transition-dict slot -> human label, for readable messages.
     _SLOT_LABEL = {
@@ -214,24 +214,42 @@ class FsmBindingError(Exception):
         "after": "after-callback",
         "prepare": "prepare-callback",
         "hook": "trigger action method",
+        "auto_hook": "auto-advance trigger action method",
     }
 
-    def __init__(self, carrier_name: str, *, missing=None, sync=None):
+    def __init__(self, carrier_name: str, *, missing=None, sync=None, orphaned=None):
         self.carrier_name = carrier_name
         self.missing = list(missing or [])
         self.sync = list(sync or [])
+        self.orphaned = list(orphaned or [])
         lines = [f"{carrier_name!r} is not a valid carrier for its FSM:"]
         for name, slot, trigger in self.missing:
             label = self._SLOT_LABEL.get(slot, slot)
-            lines.append(
-                f"  - missing {label} {name!r} (referenced by trigger {trigger!r}); "
-                f"define `async def {name}(self, event)` on the class (check for a typo)"
-            )
+            if slot == "auto_hook":
+                lines.append(
+                    f"  - missing {label} {name!r} for auto-advance trigger {trigger!r}; "
+                    f"this trigger is reachable from a `==` edge, so define it explicitly "
+                    f"(a no-op is fine): `async def {name}(self, event): ...`"
+                )
+            else:
+                lines.append(
+                    f"  - missing {label} {name!r} (referenced by trigger {trigger!r}); "
+                    f"define `async def {name}(self, event)` on the class (check for a typo)"
+                )
         for name, slot, trigger in self.sync:
             label = self._SLOT_LABEL.get(slot, slot)
             where = f" for trigger {trigger!r}" if trigger else ""
             lines.append(
                 f"  - {label} {name!r}{where} is synchronous; declare it with 'async def' "
                 "(this case is driven through async methods like advance())"
+            )
+        for name, slot, suffix in self.orphaned:
+            if slot in {"on_enter", "on_exit"}:
+                kind = "state"
+            else:
+                kind = "trigger"
+            lines.append(
+                f"  - orphan hook-like method {name!r}: suffix {suffix!r} does not match any "
+                f"known {kind}; rename/fix it or disable orphan detection for this check"
             )
         super().__init__("\n".join(lines))

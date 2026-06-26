@@ -54,10 +54,14 @@ def _norm_rel(relative_path: str) -> str:
     return "/".join(parts)
 
 
-def _new_time_slug() -> str:
-    """A short, sortable, base-36 time slug suitable for use as a case_id."""
+def _new_time_slug(epoch_ms: int | None = None) -> str:
+    """A short, sortable, base-36 time slug suitable for use as a case_id.
+
+    If `epoch_ms` is given, it is encoded directly; otherwise current epoch
+    milliseconds are used.
+    """
     import time as _t
-    n = int(_t.time() * 1000)
+    n = int(_t.time() * 1000) if epoch_ms is None else int(epoch_ms)
     digits = "0123456789abcdefghijklmnopqrstuvwxyz"
     result = []
     while n:

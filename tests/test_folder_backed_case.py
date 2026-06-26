@@ -165,3 +165,12 @@ def test_assets_relative_path_from_absolute_and_relative(tmp_path):
             case.assets.relative_path(tmp_path / "outside.txt")
     finally:
         case.detach()
+
+
+def test_generate_case_id_auto_bumps_on_same_millisecond(monkeypatch):
+    fixed_seconds = 1_700_000_000.123
+    monkeypatch.setattr("totodev_pub.folder_backed_case.time.time", lambda: fixed_seconds)
+    first = SimpleCase.generate_case_id()
+    second = SimpleCase.generate_case_id()
+    assert second != first
+    assert int(second, 36) == int(first, 36) + 1
