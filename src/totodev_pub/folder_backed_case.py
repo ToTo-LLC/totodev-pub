@@ -34,13 +34,18 @@ Quick start
         fsm_state_chains = ["^new--open_ticket-->open==close_ticket-->closed^"
                             "*--@DWELL>14d#non_responsive-->auto_closed^"]  # timed-escape edge
 
-    FolderBackedCase.register_case_types(TicketCase)
+    from totodev_pub.folder_backed_case import case_type_registry
+    case_type_registry.register_case_types(TicketCase)
 
     case = TicketCase.create_in_folder(Path("/data/cases/t-001"), case_id="t-001")
     with case:
         await case.open_ticket()
         await case.close_ticket()
     # detached by the context manager on exit (lease cleared); folder is self-contained
+
+    # Reopen later without knowing the concrete class:
+    with case_type_registry.rehydrate(Path("/data/cases/t-001")) as case:
+        ...
 """
 
 from __future__ import annotations
@@ -52,7 +57,6 @@ import inspect
 import logging
 import operator
 import os
-import re
 import time
 from abc import ABC
 from pathlib import Path
@@ -83,6 +87,7 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     OwnershipLostError,
     DetachedCaseError,
     UnregisteredCaseTypeError,
+    CaseTypeMismatchError,
     RecordTypeMismatchError,
     IncompatibleReclassError,
     MissingFsmError,
@@ -95,6 +100,10 @@ from totodev_pub.folder_backed_case_support.case_record import CaseRecord
 from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
+from totodev_pub.folder_backed_case_support.case_type_registry import (
+    CaseTypeRegistry,
+    case_type_registry,
+)
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser,
     FsmChainSpec,
@@ -118,6 +127,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FolderBackedCase",
+    "CaseTypeRegistry",
+    "case_type_registry",
     "CaseRecord",
     "CaseEventLogReader",
     "CaseAssets",
@@ -128,6 +139,7 @@ __all__ = [
     "OwnershipLostError",
     "DetachedCaseError",
     "UnregisteredCaseTypeError",
+    "CaseTypeMismatchError",
     "RecordTypeMismatchError",
     "IncompatibleReclassError",
     "MissingFsmError",
@@ -240,51 +252,10 @@ class FolderBackedCase(ABC):
                 cls._fsm.pipeline,
             )
 
-    # ---- Derived-class registry management ----
-
-    # Case-type registry: a GLOBAL SINGLETON owned here, not by a manager, so type
-    # resolution (rehydrate / smart peek_record) works manager-free.
-    _case_class_registry: dict[str, type[FolderBackedCase]] = {}
-    _last_generated_case_id_ms: int = -1
-
-    @classmethod
-    def register_case_types(cls, *case_classes: type[FolderBackedCase]) -> None:
-        """Explicit, opt-in registration of one or more case types (no auto-register).
-        Each class is keyed by its bare __name__ — the EXACT value stamped into every
-        record's case_object_type (see create_in_folder / reclassify_to) and enforced by
-        _flush_record's guard — so the class name in code is guaranteed to match the name
-        on disk. Single or many: register_case_types(A) or register_case_types(A, B, C)."""
-        for case_cls in case_classes:
-            cls._case_class_registry[case_cls.__name__] = case_cls
-
-    @classmethod
-    def register(cls, case_cls: type[FolderBackedCase]) -> type[FolderBackedCase]:
-        """Class-decorator sugar for one-line self-registration. Returns the class
-        unchanged so it composes cleanly:
-
-            @FolderBackedCase.register
-            class TicketCase(FolderBackedCase):
-                ...
-
-        Equivalent to register_case_types(TicketCase) after the definition. Runs at
-        class-definition time, when the class object already exists in full."""
-        cls.register_case_types(case_cls)
-        return case_cls
-
-    @classmethod
-    def resolve_case_type(
-        cls,
-        type_name: str | None,
-        *,
-        registry=None,
-    ) -> type[FolderBackedCase] | None:
-        """Look up a class by its stored bare name. `registry` overrides the singleton
-        (tests / isolation); None means use the global singleton."""
-        if type_name is None:
-            return None
-        return (registry if registry is not None else cls._case_class_registry).get(type_name)
-
     # ---- ID generation ----
+
+    # Monotonic clock for in-process case_id minting (see generate_case_id).
+    _last_generated_case_id_ms: int = -1
 
     @classmethod
     def generate_case_id(cls) -> str:
@@ -315,12 +286,35 @@ class FolderBackedCase(ABC):
         This constructor is intentionally the load/bind path, not inception:
         it expects `case_record.yaml` (and any existing event-log history) to
         already exist on disk, then loads them, acquires the lease, and builds
-        the in-memory FSM carrier.
+        the in-memory FSM carrier. Two ways it fails fast and points elsewhere:
+          * The folder is not an initialized case (no record) -> FileNotFoundError
+            naming `create_in_folder()` (inception) and `rehydrate()`.
+          * The record names a DIFFERENT case type than this class -> the
+            CaseTypeMismatchError gate.
 
         Brand-new cases are created via `create_in_folder(...)`, which first
         materializes the folder + record (minting `case_id` via
         `generate_case_id()` when needed), then immediately calls this
         constructor to attach the live object.
+        """
+        self._bind_existing_case_dir(case_folder, check_type=True)
+
+    def _bind_existing_case_dir(
+        self, case_folder: Path, *, check_type: bool = True
+    ) -> None:
+        """Load an existing case folder and bind this live object to it: run the
+        config guards, open the record, (optionally) enforce the case-type gate,
+        derive state, acquire the lease, and build the FSM carrier.
+
+        Shared worker behind two entry points:
+          * `__init__` calls it with `check_type=True` (the normal public path).
+          * `reclassify_to` calls it with `check_type=False` on a freshly
+            `__new__`-ed instance, because phase 1 deliberately leaves the OLD
+            type name on disk until phase 2 stamps the new one.
+
+        Deliberately verbose: the base-class namespace is crowded and inherited
+        by every subclass, so internal seams are named to be unmistakable rather
+        than terse. Subclasses should never need to call this directly.
         """
         # Run config guards BEFORE any disk/lease I/O so misconfigured classes fail cleanly.
         cls = type(self)
@@ -335,14 +329,30 @@ class FolderBackedCase(ABC):
             cls._fsm.validate_object_compatibility(self)
             cls._fsm_binding_checked = True
         self._folder = Path(case_folder)
+        # Uninitialized-folder gate: this is the BIND path, not inception. A missing
+        # record means the caller wanted create_in_folder() (new) or rehydrate() (by type).
+        record_path = self._folder / RECORD_NAME
+        if not record_path.exists():
+            raise FileNotFoundError(
+                f"No case record at {record_path}: this folder is not an initialized case. "
+                "Use create_in_folder() to incept a new case, or "
+                "case_type_registry.rehydrate(folder) to open an existing one by type."
+            )
         self._holds_lease = False         # set True only on a successful _acquire_lease()
         self._detached = False
         # without_lock=True: the case lease is our single-owner mechanism; the mixin's file
         # lock is redundant for reads and would block re-opens. save() still acquires its
         # own short-lived lock per write.
         self._record: CaseRecord = self._record_cls.open(
-            str(self._folder / RECORD_NAME), without_lock=True
+            str(record_path), without_lock=True
         )
+        # Wrong-type gate (before the lease, so a reject claims nothing): this class is not
+        # the one the record names. reclassify_to passes check_type=False to build over the
+        # old name on purpose; every other caller gets the gate.
+        if check_type and self._record.case_object_type != cls.__name__:
+            raise CaseTypeMismatchError(
+                on_disk=self._record.case_object_type, loading_class=cls.__name__
+            )
         self._events = CaseEventLogReader.for_folder(self._folder)
         self._assets = CaseAssets(self._folder)   # asset playground + retention manifest
         self._listeners: list = []        # fn(case, event_name, info)
@@ -442,65 +452,45 @@ class FolderBackedCase(ABC):
         case._events.primitive.create_event(EV_ENTER_STATE, cls._fsm.initial_state)
         return case
 
-    # ---- type resolution (shared by rehydrate + peek_record) ----
+    # Type resolution and rehydrate live in CaseTypeRegistry (case_type_registry singleton).
+
+    # ---- folder peek: read a case folder without constructing a live instance ----
 
     @staticmethod
-    def _sniff_case_type(folder: Path) -> str | None:
-        """Cheaply read the record's case_object_type WITHOUT full Pydantic validation.
-        case_object_type is the FIRST CaseRecord field and YAML is emitted in definition
-        order (sort_keys=False), so it reliably appears at the top of the file."""
-        record_path = Path(folder) / RECORD_NAME
-        try:
-            text = record_path.read_text()
-        except FileNotFoundError:
-            return None
-        m = re.search(r'^case_object_type:\s*["\']?([^"\'\s]+)', text, re.M)
-        return m.group(1) if m else None
-
-    @classmethod
-    def rehydrate(cls, folder: Path, *, registry=None) -> FolderBackedCase:
-        """Open the folder as the CORRECT FolderBackedCase subclass (registry lookup on
-        the sniffed type). The live-object analog of peek_record(); both share the same
-        resolution. RAISES UnregisteredCaseTypeError for an unknown type — you cannot
-        build behavior without the class (contrast peek_record, which degrades)."""
-        tname = cls._sniff_case_type(folder)
-        case_cls = cls.resolve_case_type(tname, registry=registry)
-        if case_cls is None:
-            raise UnregisteredCaseTypeError(tname)
-        return case_cls(folder)
-
-    # ---- peek accessors: read a case without constructing a live instance ----
-
-    @classmethod
-    def peek_record(
-        cls,
+    def peek_case_record(
         folder: Path,
         *,
         record_cls: type[CaseRecord] | None = None,
-        registry=None,
+        case_cls: type[FolderBackedCase] | None = None,
     ) -> CaseRecord:
-        """The identity record, read straight from disk with the CORRECT typed record
-        class when resolvable:
-          - record_cls given     → use it directly (no sniff, no registry).
-          - else                 → sniff case_object_type, resolve via registry.
-          - unregistered/unknown → fall back to base CaseRecord (graceful)."""
+        """Read the identity record from disk — lock-free, no live case, no registry.
+
+        YOU supply the typed record shape, or accept the base:
+          - record_cls=...  → use that CaseRecord subclass directly (wins if both given).
+          - case_cls=...    → use that case's _record_cls.
+          - neither         → base CaseRecord (common identity fields only; subclass-specific
+                              fields not present on the base are silently dropped).
+
+        When you want the type deduced from the on-disk record itself rather than supplying
+        it here, use case_type_registry.peek_class(folder, return_class_object=True) first
+        and pass the result as case_cls."""
         if record_cls is None:
-            case_cls = cls.resolve_case_type(cls._sniff_case_type(folder), registry=registry)
-            record_cls = case_cls._record_cls if case_cls else CaseRecord
+            record_cls = case_cls._record_cls if case_cls is not None else CaseRecord
         # Peek is explicitly lock-free; the case lease is not ours to take here.
         return record_cls.open(str(Path(folder) / RECORD_NAME), without_lock=True)
 
     @staticmethod
-    def peek_events(folder: Path) -> CaseEventLogReader:
-        """A CaseEventLogReader over the folder's event log: current_state,
-        status/is_closed, last_activity, and .primitive for the raw log — all without
-        constructing or owning a live case."""
+    def peek_case_events(folder: Path) -> CaseEventLogReader:
+        """A CaseEventLogReader over the folder's event log — lock-free, no live case,
+        no registry. Uniform across every case type (the log format is not subclassed).
+        Exposes current_state, is_closed, last_activity, and .primitive for the raw log."""
         return CaseEventLogReader.for_folder(Path(folder))
 
     @staticmethod
-    def peek_assets(folder: Path) -> CaseAssets:
-        """A CaseAssets over the folder — list_assets(), keep_list(), etc. — without
-        constructing or owning a live case. The peek analog of case.assets."""
+    def peek_case_assets(folder: Path) -> CaseAssets:
+        """A CaseAssets over the folder — lock-free, no live case, no registry. Uniform
+        across every case type. Exposes list_assets(), keep_list(), asset_path(), etc.
+        The peek analog of a live case's .assets property."""
         return CaseAssets(Path(folder))
 
     # ---- lifecycle-signal subscription ----
@@ -1106,7 +1096,10 @@ class FolderBackedCase(ABC):
         from_name = self._record.case_object_type
         self._flush_record(force=True)           # phase 1: snapshot old repr (old name)
         self.detach()                            # serialize-then-DETACH, then re-acquire
-        fresh = new_cls(self._folder)            # acquires the now-free lease; old repr on disk
+        # Bind without the type gate: the old name is still on disk until phase 2 stamps the
+        # new one. __new__ + _bind_existing_case_dir bypasses __init__'s gated public path.
+        fresh = new_cls.__new__(new_cls)
+        fresh._bind_existing_case_dir(self._folder, check_type=False)
         fresh._events.primitive.create_event(
             EV_RECLASSIFY, new_cls.__name__,
             {"from": from_name, "at_state": fresh.state},

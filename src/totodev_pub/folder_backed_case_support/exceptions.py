@@ -39,20 +39,37 @@ class DetachedCaseError(Exception):
     def __init__(self, folder: Path):
         super().__init__(
             f"This FolderBackedCase for {folder} has already been detached. "
-            "Use rehydrate() to open a fresh instance."
+            "Use case_type_registry.rehydrate() to open a fresh instance."
         )
         self.folder = folder
 
 
 class UnregisteredCaseTypeError(Exception):
-    """Raised by rehydrate() when the stored case_object_type has no matching entry in
-    the registry — i.e. the class was never passed to register_case_types()."""
+    """Raised by CaseTypeRegistry.rehydrate() and peek_class(return_class_object=True)
+    when the stored case_object_type has no matching entry in the registry — i.e. the
+    class was never registered. Two ways to register at startup:
+        case_type_registry.register_case_types(MyCase)   # explicit call
+        @case_type_registry.register                      # class-decorator form
+    """
     def __init__(self, type_name: Optional[str]):
         super().__init__(
-            f"Case type {type_name!r} is not in the FolderBackedCase registry. "
-            "Call FolderBackedCase.register_case_types(YourClass) at startup."
+            f"Case type {type_name!r} is not in the case-type registry. "
+            "Register it at startup: call case_type_registry.register_case_types(YourClass), "
+            "or decorate the class with @case_type_registry.register."
         )
         self.type_name = type_name
+
+
+class CaseTypeMismatchError(Exception):
+    """Raised at construction when the folder's record names a different case type than
+    the loading class. Construct that type directly, or use case_type_registry.rehydrate()."""
+    def __init__(self, *, on_disk: Optional[str], loading_class: str):
+        super().__init__(
+            f"Folder holds a {on_disk!r} case but {loading_class!r} is loading it. "
+            f"Construct {on_disk!r} directly, or use case_type_registry.rehydrate(folder)."
+        )
+        self.on_disk = on_disk
+        self.loading_class = loading_class
 
 
 class RecordTypeMismatchError(Exception):

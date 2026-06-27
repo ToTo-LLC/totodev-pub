@@ -11,6 +11,7 @@ from .exceptions import (
     OwnershipLostError,
     DetachedCaseError,
     UnregisteredCaseTypeError,
+    CaseTypeMismatchError,
     RecordTypeMismatchError,
     IncompatibleReclassError,
     MissingFsmError,
@@ -24,6 +25,7 @@ from .case_event_log_reader import CaseEventLogReader
 from .case_assets import CaseAssets
 from .advance_result import AdvanceResult
 from .state_chain_parser import StateChainParser, FsmChainSpec
+from .case_type_registry import CaseTypeRegistry, case_type_registry
 
 __all__ = [
     "RECORD_NAME",
@@ -34,6 +36,7 @@ __all__ = [
     "OwnershipLostError",
     "DetachedCaseError",
     "UnregisteredCaseTypeError",
+    "CaseTypeMismatchError",
     "RecordTypeMismatchError",
     "IncompatibleReclassError",
     "MissingFsmError",
@@ -47,4 +50,6 @@ __all__ = [
     "AdvanceResult",
     "StateChainParser",
     "FsmChainSpec",
+    "CaseTypeRegistry",
+    "case_type_registry",
 ]
