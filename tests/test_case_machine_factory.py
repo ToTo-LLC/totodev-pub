@@ -30,13 +30,13 @@ class _FactoryCase(FolderBackedCase):
     sleep_secs: float = 0.0
     raise_in_perform: bool = False
 
-    async def perform_go(self, event):
+    async def perform_go(self, tctx):
         if self.raise_in_perform:
             raise ValueError("boom")
         if self.sleep_secs:
             await asyncio.sleep(self.sleep_secs)
 
-    async def perform_bail(self, event):
+    async def perform_bail(self, tctx):
         return None
 
 

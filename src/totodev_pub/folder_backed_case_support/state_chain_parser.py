@@ -208,6 +208,27 @@ def _is_async_callable(fn) -> bool:
     return call is not None and inspect.iscoroutinefunction(call)
 
 
+_TCTX_PROBE = object()
+
+
+def _accepts_tctx(fn) -> bool:
+    """True if `fn` can be invoked with a single positional argument — the trigger context
+    `tctx` the machine hands to EVERY hook (the case runs with `send_event=True`). `fn` is a
+    BOUND method here, so `self` is already applied; this asks whether the hook accepts that
+    one `tctx` value. A `(self, tctx)` or `(self, *args)` hook qualifies; a bare `(self)`
+    hook does not (it would raise TypeError the instant its edge fired). If the signature
+    cannot be introspected (rare C-level callables), assume True rather than false-alarm."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    try:
+        sig.bind(_TCTX_PROBE)
+    except TypeError:
+        return False
+    return True
+
+
 @dataclass
 class FsmChainSpec:
     """The compiled FSM: the dumb intermediate the parser renders and FolderBackedCase
@@ -493,6 +514,7 @@ class FsmChainSpec:
         obj,
         *,
         force_async: bool = True,
+        require_tctx: bool = True,
         hook_patterns=(_PERFORM_HOOK_PATTERN,),
         orphan_detection: str = "error",
     ) -> None:
@@ -514,6 +536,13 @@ class FsmChainSpec:
             async (advance(), the generated triggers); a stray `def` instead of `async def`
             would silently block the event loop, so it is rejected here. Set force_async=False
             for the rare carrier that deliberately mixes in synchronous callables.
+          * ARITY (require_tctx, default True) — every RECOGNIZED hook method (a
+            `perform_`/`before_`/`after_`/`on_enter_`/`on_exit_`/`guard_` whose suffix maps
+            to a known state/trigger/guard) must accept the trigger context `tctx` as its
+            one argument after `self`. The machine runs with send_event=True, so every hook
+            is dispatched with a single `tctx`; a bare `(self)` hook would raise TypeError
+            the instant its edge fired, so it is rejected here at build time instead. A
+            `(self, *args)` hook passes. Set require_tctx=False to skip this scan.
 
         `perform_<trigger>` stays OPTIONAL for manual-only triggers (`==`) — but if present
         it is held to the async rule like everything else.
@@ -572,13 +601,15 @@ class FsmChainSpec:
         orphaned = (
             self._find_orphan_hook_methods(obj) if orphan_detection != "off" else []
         )
+        bad_arity = self._find_bad_arity_hook_methods(obj) if require_tctx else []
 
-        if missing or sync or (orphan_detection == "error" and orphaned):
+        if missing or sync or bad_arity or (orphan_detection == "error" and orphaned):
             raise FsmBindingError(
                 type(obj).__name__,
                 missing=list(missing.values()),
                 sync=list(sync.values()),
                 orphaned=orphaned if orphan_detection == "error" else [],
+                bad_arity=bad_arity,
             )
         if orphan_detection == "warn" and orphaned:
             warnings.warn(
@@ -636,6 +667,30 @@ class FsmChainSpec:
                     orphans.append((name, kind, suffix))
                 break
         return orphans
+
+    def _find_bad_arity_hook_methods(self, obj) -> list[tuple[str, str, str]]:
+        """Return RECOGNIZED hook methods (suffix maps to a known state/trigger/guard) that
+        cannot accept the trigger context `tctx`. Tuples are (method_name, kind, suffix),
+        same shape as _find_orphan_hook_methods. Every hook is dispatched with a single
+        `tctx` argument (the machine runs with send_event=True), so a hook declared `(self)`
+        would raise TypeError the moment its edge fires; this pulls that failure forward to
+        construction. Inverts the orphan suffix test (known, not unknown) and gates on arity
+        instead of name; explicit hand-built callables in compile_fsm() overrides are out of
+        scope (only convention-named carrier methods are scanned)."""
+        expected_by_kind = self._orphan_expected_names_by_kind()
+        bad: list[tuple[str, str, str]] = []
+        for name in dir(type(obj)):
+            fn = getattr(obj, name, None)
+            if not callable(fn):
+                continue
+            for prefix, kind in _HOOK_METHOD_PREFIXES.items():
+                if not name.startswith(prefix):
+                    continue
+                suffix = name[len(prefix):]
+                if suffix and suffix in expected_by_kind[kind] and not _accepts_tctx(fn):
+                    bad.append((name, kind, suffix))
+                break
+        return bad
 
     def _format_orphan_hook_warning(
         self, carrier_name: str, orphaned: list[tuple[str, str, str]]

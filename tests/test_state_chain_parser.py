@@ -46,7 +46,7 @@ def test_required_auto_hook_must_be_async():
     spec = StateChainParser.parse(["^new--assign-->assigned^"])
 
     class Carrier:
-        def perform_assign(self, event):
+        def perform_assign(self, tctx):
             return None
 
     with pytest.raises(FsmBindingError) as excinfo:
@@ -75,10 +75,10 @@ def test_orphan_detection_error_mode_rejects_unknown_hook_methods():
     spec = StateChainParser.parse(["^new--assign-->assigned^"])
 
     class Carrier:
-        async def perform_assign(self, event):
+        async def perform_assign(self, tctx):
             return None
 
-        async def on_enter_assgined(self, event):  # typo: assigned
+        async def on_enter_assgined(self, tctx):  # typo: assigned
             return None
 
     with pytest.raises(FsmBindingError) as excinfo:
@@ -92,10 +92,10 @@ def test_orphan_detection_warn_mode_emits_warning():
     spec = StateChainParser.parse(["^new--assign-->assigned^"])
 
     class Carrier:
-        async def perform_assign(self, event):
+        async def perform_assign(self, tctx):
             return None
 
-        async def before_assgin(self, event):  # typo: assign
+        async def before_assgin(self, tctx):  # typo: assign
             return None
 
     with pytest.warns(UserWarning):
@@ -106,10 +106,10 @@ def test_orphan_detection_off_mode_suppresses_orphan_checks():
     spec = StateChainParser.parse(["^new--assign-->assigned^"])
 
     class Carrier:
-        async def perform_assign(self, event):
+        async def perform_assign(self, tctx):
             return None
 
-        async def after_assgin(self, event):  # typo: assign
+        async def after_assgin(self, tctx):  # typo: assign
             return None
 
     spec.validate_object_compatibility(Carrier(), orphan_detection="off")
@@ -119,7 +119,7 @@ def test_orphan_detection_requires_valid_mode():
     spec = StateChainParser.parse(["^new--assign-->assigned^"])
 
     class Carrier:
-        async def perform_assign(self, event):
+        async def perform_assign(self, tctx):
             return None
 
     with pytest.raises(ValueError):
@@ -141,7 +141,7 @@ def test_missing_guard_method_is_rejected_with_prefixed_name():
     spec = StateChainParser.parse(["^new==funded#finish-->done^"])
 
     class Carrier:
-        async def funded(self, event):  # bare name: not the guard_ convention
+        async def funded(self, tctx):  # bare name: not the guard_ convention
             return True
 
     with pytest.raises(FsmBindingError) as excinfo:
@@ -154,7 +154,7 @@ def test_async_guard_method_binds_cleanly():
     spec = StateChainParser.parse(["^new==funded#finish-->done^"])
 
     class Carrier:
-        async def guard_funded(self, event):
+        async def guard_funded(self, tctx):
             return True
 
     spec.validate_object_compatibility(Carrier())
@@ -164,7 +164,7 @@ def test_sync_guard_method_is_rejected():
     spec = StateChainParser.parse(["^new==funded#finish-->done^"])
 
     class Carrier:
-        def guard_funded(self, event):  # sync: must be async
+        def guard_funded(self, tctx):  # sync: must be async
             return True
 
     with pytest.raises(FsmBindingError) as excinfo:
@@ -178,10 +178,10 @@ def test_orphan_detection_error_mode_rejects_unknown_guard_method():
     spec = StateChainParser.parse(["^new==funded#finish-->done^"])
 
     class Carrier:
-        async def guard_funded(self, event):
+        async def guard_funded(self, tctx):
             return True
 
-        async def guard_fundded(self, event):  # typo: funded
+        async def guard_fundded(self, tctx):  # typo: funded
             return True
 
     with pytest.raises(FsmBindingError) as excinfo:
@@ -196,10 +196,10 @@ def test_orphan_detection_warn_mode_flags_unknown_guard_method():
     spec = StateChainParser.parse(["^new==funded#finish-->done^"])
 
     class Carrier:
-        async def guard_funded(self, event):
+        async def guard_funded(self, tctx):
             return True
 
-        async def guard_fundded(self, event):  # typo: funded
+        async def guard_fundded(self, tctx):  # typo: funded
             return True
 
     with pytest.warns(UserWarning):
@@ -210,10 +210,10 @@ def test_orphan_detection_off_mode_allows_unknown_guard_method():
     spec = StateChainParser.parse(["^new==funded#finish-->done^"])
 
     class Carrier:
-        async def guard_funded(self, event):
+        async def guard_funded(self, tctx):
             return True
 
-        async def guard_fundded(self, event):  # typo: funded
+        async def guard_fundded(self, tctx):  # typo: funded
             return True
 
     spec.validate_object_compatibility(Carrier(), orphan_detection="off")
@@ -229,7 +229,59 @@ def test_factual_guards_do_not_imply_guard_methods():
     assert "conditions" not in spec.transitions[-1]
 
     class Carrier:
-        async def perform_timeout(self, event):  # timeout is auto (`--`)
+        async def perform_timeout(self, tctx):  # timeout is auto (`--`)
             return None
 
     spec.validate_object_compatibility(Carrier())
+
+
+# ---------------------------------------------------------------------------
+# Hook arity: every recognized hook must accept the trigger context `tctx`
+# ---------------------------------------------------------------------------
+
+def test_hook_without_tctx_param_is_rejected():
+    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+
+    class Carrier:
+        async def perform_assign(self):  # missing the tctx parameter
+            return None
+
+    with pytest.raises(FsmBindingError) as excinfo:
+        spec.validate_object_compatibility(Carrier())
+    msg = str(excinfo.value)
+    assert "perform_assign" in msg
+    assert "tctx" in msg
+
+
+def test_guard_without_tctx_param_is_rejected():
+    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+
+    class Carrier:
+        async def guard_funded(self):  # missing the tctx parameter
+            return True
+
+    with pytest.raises(FsmBindingError) as excinfo:
+        spec.validate_object_compatibility(Carrier())
+    msg = str(excinfo.value)
+    assert "guard_funded" in msg
+    assert "tctx" in msg
+
+
+def test_hook_with_varargs_accepts_tctx():
+    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+
+    class Carrier:
+        async def perform_assign(self, *args):  # *args can receive the single tctx
+            return None
+
+    spec.validate_object_compatibility(Carrier())
+
+
+def test_require_tctx_false_skips_arity_check():
+    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+
+    class Carrier:
+        async def perform_assign(self):  # no tctx, but the scan is disabled
+            return None
+
+    spec.validate_object_compatibility(Carrier(), require_tctx=False)

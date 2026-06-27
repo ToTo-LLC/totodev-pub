@@ -409,7 +409,7 @@ def test_guard_method_convention_constructs(tmp_path):
     class GuardedCase(FolderBackedCase):
         fsm_state_chains = ["^new==funded#finish-->done^"]
 
-        async def guard_funded(self, event):
+        async def guard_funded(self, tctx):
             return True
 
     folder = tmp_path / "case-g1"
@@ -426,10 +426,10 @@ def test_orphan_guard_method_fails_construction(tmp_path):
     class TypoGuardCase(FolderBackedCase):
         fsm_state_chains = ["^new==funded#finish-->done^"]
 
-        async def guard_funded(self, event):
+        async def guard_funded(self, tctx):
             return True
 
-        async def guard_fundedd(self, event):  # typo: funded
+        async def guard_fundedd(self, tctx):  # typo: funded
             return True
 
     folder = tmp_path / "case-g2"
@@ -441,6 +441,25 @@ def test_orphan_guard_method_fails_construction(tmp_path):
     assert not (folder / ".case.lease").exists()
 
 
+def test_hook_missing_tctx_param_fails_construction(tmp_path):
+    """Every hook is dispatched with one `tctx` argument (send_event=True); a hook declared
+    without it is rejected at first construction rather than exploding at first transition."""
+    class NoTctxCase(FolderBackedCase):
+        fsm_state_chains = ["^new--begin-->open^"]
+
+        async def perform_begin(self):  # missing tctx
+            return None
+
+    folder = tmp_path / "case-arity"
+    with pytest.raises(FsmBindingError) as excinfo:
+        NoTctxCase.create_in_folder(folder, case_id="a-1")
+    msg = str(excinfo.value)
+    assert "perform_begin" in msg
+    assert "tctx" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
 def test_perform_hook_convention_wires_and_runs(tmp_path):
     """An auto edge (`--`) requires `perform_<trigger>`; the method binds to the
     transition's `before` and runs when the trigger fires."""
@@ -448,7 +467,7 @@ def test_perform_hook_convention_wires_and_runs(tmp_path):
         fsm_state_chains = ["^new--begin-->open==finish-->done^"]
         performed = False
 
-        async def perform_begin(self, event):
+        async def perform_begin(self, tctx):
             self.performed = True
 
     folder = tmp_path / "case-p1"
@@ -466,7 +485,7 @@ def test_legacy_underscore_perform_hook_is_rejected(tmp_path):
     class LegacyCase(FolderBackedCase):
         fsm_state_chains = ["^new--begin-->done^"]
 
-        async def _perform_begin(self, event):  # old name, no longer recognized
+        async def _perform_begin(self, tctx):  # old name, no longer recognized
             return None
 
     folder = tmp_path / "case-legacy"

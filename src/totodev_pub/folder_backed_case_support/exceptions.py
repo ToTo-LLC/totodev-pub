@@ -217,13 +217,18 @@ class FsmBindingError(Exception):
         guard, action method, and callback the FSM touches MUST be a coroutine function
         (`async def`). A stray `def` would silently block the event loop for every other case
         a driver is advancing, so we reject it loudly here. (Relax with force_async=False.)
+      * BAD_ARITY — a recognized hook method cannot accept the trigger context `tctx`. Every
+        hook is dispatched with a single `tctx` argument (the case runs with send_event=True),
+        so a hook declared `(self)` would raise TypeError the instant its edge fired. We
+        reject it at construction instead. (Relax with require_tctx=False.)
 
     The whole point is a loud, early, unambiguous failure: future developers WILL write a sync
-    guard or misspell a method name, and this turns a baffling event-loop stall or an
-    AttributeError deep inside `transitions` into a precise message at construction time.
+    guard, misspell a method name, or forget the `tctx` parameter, and this turns a baffling
+    event-loop stall or an error deep inside `transitions` into a precise message at
+    construction time.
 
-    Carries `carrier_name` and structured `missing` / `sync` / `orphaned` lists for
-    programmatic inspection."""
+    Carries `carrier_name` and structured `missing` / `sync` / `orphaned` / `bad_arity` lists
+    for programmatic inspection."""
 
     # transition-dict slot -> human label, for readable messages.
     _SLOT_LABEL = {
@@ -236,11 +241,14 @@ class FsmBindingError(Exception):
         "auto_hook": "auto-advance trigger action method",
     }
 
-    def __init__(self, carrier_name: str, *, missing=None, sync=None, orphaned=None):
+    def __init__(
+        self, carrier_name: str, *, missing=None, sync=None, orphaned=None, bad_arity=None
+    ):
         self.carrier_name = carrier_name
         self.missing = list(missing or [])
         self.sync = list(sync or [])
         self.orphaned = list(orphaned or [])
+        self.bad_arity = list(bad_arity or [])
         lines = [f"{carrier_name!r} is not a valid carrier for its FSM:"]
         for name, slot, trigger in self.missing:
             label = self._SLOT_LABEL.get(slot, slot)
@@ -248,12 +256,12 @@ class FsmBindingError(Exception):
                 lines.append(
                     f"  - missing {label} {name!r} for auto-advance trigger {trigger!r}; "
                     f"this trigger is reachable from a `--` edge, so define it explicitly "
-                    f"(a no-op is fine): `async def {name}(self, event): ...`"
+                    f"(a no-op is fine): `async def {name}(self, tctx): ...`"
                 )
             else:
                 lines.append(
                     f"  - missing {label} {name!r} (referenced by trigger {trigger!r}); "
-                    f"define `async def {name}(self, event)` on the class (check for a typo)"
+                    f"define `async def {name}(self, tctx)` on the class (check for a typo)"
                 )
         for name, slot, trigger in self.sync:
             label = self._SLOT_LABEL.get(slot, slot)
@@ -261,6 +269,12 @@ class FsmBindingError(Exception):
             lines.append(
                 f"  - {label} {name!r}{where} is synchronous; declare it with 'async def' "
                 "(this case is driven through async methods like advance())"
+            )
+        for name, kind, suffix in self.bad_arity:
+            lines.append(
+                f"  - hook {name!r} cannot accept the trigger context; every hook is called "
+                f"with one `tctx` argument (send_event=True), so declare it "
+                f"`async def {name}(self, tctx)` (use `tctx` even if unused)"
             )
         for name, kind, suffix in self.orphaned:
             lines.append(

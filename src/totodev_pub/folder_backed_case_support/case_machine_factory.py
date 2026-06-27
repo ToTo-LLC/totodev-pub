@@ -86,19 +86,19 @@ class CaseMachineFactory:
         case = self._case
         journal = self._journal
 
-        async def _invoke(event):
-            result = getattr(case, method_name)(event)
+        async def _invoke(tctx):
+            result = getattr(case, method_name)(tctx)
             if inspect.isawaitable(result):
                 result = await result
             return result
 
-        async def _wrapped(event):
+        async def _wrapped(tctx):
             warn = case.trigger_warn_secs(trigger)
             kill = warn * TIMEOUT_KILL_MULTIPLE_OF_WARNING
             start = time.monotonic()
             timed_out = False
             try:
-                return await asyncio.wait_for(_invoke(event), kill)
+                return await asyncio.wait_for(_invoke(tctx), kill)
             except asyncio.TimeoutError:
                 timed_out = True
                 raise TriggerTimeout(
@@ -123,11 +123,11 @@ class CaseMachineFactory:
         case = self._case
         journal = self._journal
         if name == "DWELL":
-            def _dwell_guard(event) -> bool:
+            def _dwell_guard(tctx) -> bool:
                 return cmp(case.dwell_secs(), operand)
             return _dwell_guard
         if name == "FAIL":
-            def _fail_guard(event) -> bool:
+            def _fail_guard(tctx) -> bool:
                 return cmp(journal.count_fails_this_dwell(), operand)
             return _fail_guard
         raise ValueError(f"unknown factual guard {name!r}")   # parser should prevent this
