@@ -47,3 +47,7 @@ EV_TRIGGER_TIMEOUT = "CASE_TRIGGER_TIMEOUT" # a trigger's work was hard-aborted 
 # In-memory listener signal (passed to add_transition_listener callbacks, not logged).
 # The closed signal reuses EV_CLOSED; only the phase-1 closing signal is distinct.
 SIG_CLOSING = "CASE_CLOSING"   # phase-1 close: assets still present
+
+# Trigger timeout policy shared by FolderBackedCase and CaseMachineFactory.
+DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0
+TIMEOUT_KILL_MULTIPLE_OF_WARNING = 2

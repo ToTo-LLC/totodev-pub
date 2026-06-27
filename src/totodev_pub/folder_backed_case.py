@@ -54,14 +54,10 @@ from __future__ import annotations
 import asyncio
 import datetime
 import functools
-import inspect
 import logging
-import operator
 import time
 from abc import ABC
 from pathlib import Path
-
-from transitions.extensions.asyncio import AsyncMachine
 
 from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME,
@@ -71,6 +67,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     KEEP_LIST_NAME,
     CASE_RESERVED_ARTIFACT_NAMES,
     CASE_BASE_EVENT_PREFIX,
+    DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     EV_CLOSED,
     EV_ALERT,
     SIG_CLOSING,
@@ -107,21 +104,8 @@ from totodev_pub.folder_backed_case_support.heartbeat_lease import (
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser,
     FsmChainSpec,
-    _PERFORM_METHOD_PREFIX,
 )
-
-# Comparator name -> callable, for compiling `@FACT<op>N` factual guards into condition
-# functions. Equality is intentionally absent (the DSL forbids ==/!=).
-_FACT_OPS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
-
-# Trigger soft-timeout policy (the `~<dur>` DSL annotation, stored in FsmChainSpec.trigger_timeouts).
-# The SOFT threshold is the elapsed past which a trigger's work is logged CASE_TRIGGER_SLOW — a
-# warning. The HARD-ABORT ceiling is that soft value times TIMEOUT_KILL_MULTIPLE_OF_WARNING; outrun
-# it and the work is cancelled and raised as TriggerTimeout (logged CASE_TRIGGER_TIMEOUT). A trigger
-# with no `~<dur>` annotation inherits the default warning below (so it is still kill-capped by
-# default). Override trigger_warn_secs() for a per-case or dynamic budget.
-DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0
-TIMEOUT_KILL_MULTIPLE_OF_WARNING = 2
+from totodev_pub.folder_backed_case_support.case_machine_factory import CaseMachineFactory
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +364,8 @@ class FolderBackedCase(ABC):
             self._lease.acquire()
         except LeaseAlreadyHeldError as e:
             raise CaseAlreadyOpenError(self._folder, expires_in=e.expires_in) from e
-        self._machine = self._build_machine(self.state)
+        # Instance-time machine binding is delegated to CaseMachineFactory.
+        self._machine = CaseMachineFactory(self, self._fsm, self._journal).build(self.state)
 
     @staticmethod
     def _as_utc(dt: datetime.datetime | None) -> datetime.datetime | None:
@@ -546,113 +531,15 @@ class FolderBackedCase(ABC):
         return self.state in self._fsm.closed_states
 
     # ---- FSM attachment via transitions (async-first composition pattern) ----
-
-    def _build_machine(self, initial_state: str) -> AsyncMachine:
-        # send_event=True so the global after-hook receives EventData and can see
-        # BOTH the source and dest of each transition (needed for the closing edge).
-        # on_exception funnels EVERY callback failure (guard / perform_ / on_enter /
-        # on_exit / after) through one handler regardless of how the trigger was fired.
-        return AsyncMachine(
-            model=self,
-            states=self._fsm.states,
-            transitions=self._prepare_machine_transitions(self._fsm.transitions),
-            initial=initial_state,
-            after_state_change="_on_state_changed",
-            on_exception="_on_fsm_exception",
-            send_event=True,
-        )
-
-    def _prepare_machine_transitions(self, transitions: list[dict]) -> list[dict]:
-        """Return machine-ready transition dicts from the per-class `_fsm` spec, applying
-        the two conventions the parser leaves for the live instance to bind, and stripping
-        the spec's private `_`-prefixed keys (e.g. `_fact_guards`, `_wildcard`) that the
-        `transitions` library would reject. The shared `_fsm` spec is never mutated — each
-        edge is rebuilt as a fresh dict.
-
-        1. FACTUAL GUARDS — each `_fact_guards` entry (from a `@FACT<op>N` token) is compiled
-           into an extra `conditions` callable: `@DWELL` compares dwell_secs(); `@FAIL`
-           compares failed attempts in the current dwell (CASE_FAIL_TRANSITION +
-           CASE_TRIGGER_TIMEOUT; see journal.count_fails_this_dwell). They are pure
-           factual guards; they do not drive anything — something must still attempt
-           the trigger.
-        2. `perform_<trigger>` -> `before` — the work a trigger implies belongs in
-           `before`: if it raises, the transition ABORTS and the case stays in its source
-           state (no CASE_ENTER_STATE logged), so "retry" is just "fire the trigger again"
-           and a crash mid-work resumes cleanly. Opt-in and non-clobbering: wired ONLY when
-           the method exists AND no `before` was already declared (a compile_fsm() override
-           keeps full control). A declarative FSM with no `perform_` methods stays
-           callback-free. The method is wrapped (see _make_perform_wrapper) so its work is
-           TIMED: outrunning the trigger's soft timeout logs CASE_TRIGGER_SLOW."""
-        prepared: list[dict] = []
-        for td in transitions:
-            trigger = td["trigger"]
-            clean = {k: v for k, v in td.items() if not k.startswith("_")}
-            fact_guards = td.get("_fact_guards")
-            if fact_guards:
-                conds = list(clean.get("conditions", []))
-                for fg in fact_guards:
-                    conds.append(self._make_fact_guard(fg["name"], fg["op"], fg["operand"]))
-                clean["conditions"] = conds
-            if "before" not in clean:
-                method = f"{_PERFORM_METHOD_PREFIX}{trigger}"
-                if callable(getattr(type(self), method, None)):
-                    clean["before"] = self._make_perform_wrapper(trigger, method)
-            prepared.append(clean)
-        return prepared
+    # Machine construction + callback wiring live in CaseMachineFactory; the case keeps
+    # the override seams the factory reads back (trigger_warn_secs, dwell_secs) and the
+    # named lifecycle callbacks the machine binds (_on_state_changed, _on_fsm_exception).
 
     def trigger_warn_secs(self, trigger: str) -> float:
         """The SOFT timeout (seconds) for a trigger's work: its `~<dur>` DSL annotation if
         present, else DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS. The override seam for a per-case
         or dynamic budget — keep it cheap, it is consulted on every step that has work."""
         return self._fsm.trigger_timeouts.get(trigger, DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS)
-
-    def _make_perform_wrapper(self, trigger: str, method_name: str):
-        """Wrap a `perform_<trigger>` method as an async `before` callback that TIMES and
-        TIME-BOUNDS the work. Two thresholds, both derived from trigger_warn_secs(trigger):
-          * SOFT (warn): outrunning it logs CASE_TRIGGER_SLOW — a warning, the work continues.
-          * HARD (warn × TIMEOUT_KILL_MULTIPLE_OF_WARNING): outrunning it cancels the work via
-            asyncio.wait_for and raises TriggerTimeout (logged CASE_TRIGGER_TIMEOUT by
-            _on_fsm_exception, counted by @FAIL). Kill is on by default — an un-annotated
-            trigger is still capped at the default warning × the multiple.
-
-        Non-intrusive otherwise: it awaits an async perform_ or calls a sync one, never
-        swallows the result, and re-raises a NON-timeout error unchanged (so the ordinary
-        on_exception path is untouched). A timed-out step logs only the timeout, not also the
-        slow warning; a step that is slow AND fails (non-timeout) records both."""
-        async def _invoke(event):
-            result = getattr(self, method_name)(event)
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-
-        async def _wrapped(event):
-            warn = self.trigger_warn_secs(trigger)
-            kill = warn * TIMEOUT_KILL_MULTIPLE_OF_WARNING
-            start = time.monotonic()
-            timed_out = False
-            try:
-                return await asyncio.wait_for(_invoke(event), kill)
-            except asyncio.TimeoutError:
-                timed_out = True
-                raise TriggerTimeout(
-                    self.case_id, trigger, self.state,
-                    elapsed=time.monotonic() - start, ceiling=kill,
-                ) from None
-            finally:
-                # Slow-warn on a completed-but-slow OR failed-but-slow step; a hard-abort
-                # already speaks for itself via CASE_TRIGGER_TIMEOUT, so don't double-log.
-                if not timed_out:
-                    elapsed = time.monotonic() - start
-                    if elapsed > warn:
-                        self._log_trigger_slow(trigger, elapsed, warn)
-
-        return _wrapped
-
-    def _log_trigger_slow(self, trigger: str, elapsed: float, warn: float) -> None:
-        """Record a CASE_TRIGGER_SLOW event via the journal."""
-        self._journal.log_trigger_slow(
-            trigger, elapsed=elapsed, warn=warn, state=self.state
-        )
 
     async def run_blocking(self, fn, /, *args, **kwargs):
         """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `perform_`. Runs `fn`
@@ -673,28 +560,10 @@ class FolderBackedCase(ABC):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
 
-    def _make_fact_guard(self, name: str, op: str, operand):
-        """Build a `transitions` condition callable for a `@FACT<op>N` factual guard. Bound
-        to this instance so each model checks its own facts (send_event=True => the callable
-        receives EventData, which it ignores). `@DWELL` compares dwell_secs() (seconds in
-        the current state); `@FAIL` compares the journal's count_fails_this_dwell() (failed
-        attempts this dwell)."""
-        cmp = _FACT_OPS[op]
-        if name == "DWELL":
-            def _dwell_guard(event) -> bool:
-                return cmp(self.dwell_secs(), operand)
-            return _dwell_guard
-        if name == "FAIL":
-            def _fail_guard(event) -> bool:
-                return cmp(self._journal.count_fails_this_dwell(), operand)
-            return _fail_guard
-        raise ValueError(f"unknown factual guard {name!r}")   # parser should prevent this
-
     def dwell_secs(self) -> float:
         """Seconds the case has spent in its CURRENT state — the fact the `@DWELL` guard
-        compares against. Measured from `self._state_entered_at` (the latest CASE_ENTER_STATE,
-        or creation for a brand-new case). This is the documented home for "what does DWELL
-        mean": a `@DWELL>30m` guard is simply `dwell_secs() > 1800`."""
+        compares against. Measured from `self._state_entered_at` (the latest
+        CASE_ENTER_STATE, or creation for a brand-new case)."""
         return (_utcnow() - self._state_entered_at).total_seconds()
 
     def _on_state_changed(self, event) -> None:
@@ -741,7 +610,7 @@ class FolderBackedCase(ABC):
             self._notify(EV_CLOSED, src=src, dest=dest)
 
     async def _on_fsm_exception(self, event) -> None:
-        """Machine-level `on_exception` hook (wired in _build_machine): the SINGLE chokepoint
+        """Machine-level `on_exception` hook (wired by the machine factory): the SINGLE chokepoint
         every trigger dispatch funnels through, so it covers both advance() and a direct
         `await case.<trigger>()`. Fires when ANY callback raises — a guard, a
         `perform_<trigger>`, on_exit/on_enter, or an `after`.
