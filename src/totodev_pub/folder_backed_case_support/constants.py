@@ -27,6 +27,13 @@ CASE_RESERVED_ARTIFACT_NAMES = (
 # Event-log labels written by the FolderBackedCase base class. Every label is
 # CASE_-prefixed so an observer can isolate the family's lifecycle events with a
 # single CASE_* glob; subclasses are free to log their own labels alongside.
+#
+# CASE_BASE_EVENT_PREFIX is the class-family INVARIANT: every event label the base
+# class auto-generates (now funneled through CaseJournal) MUST start with it, so a
+# derived class can cleanly separate its own custom events from base lifecycle ones.
+# SIG_CLOSING reuses the prefix but is an in-memory listener signal, never logged.
+CASE_BASE_EVENT_PREFIX = "CASE_"
+
 EV_ENTER_STATE     = "CASE_ENTER_STATE"      # current fine-grained state (value = state name)
 EV_NEW             = "CASE_NEW"              # inception bookend
 EV_CLOSED          = "CASE_CLOSED"          # terminal bookend (value = closing state)

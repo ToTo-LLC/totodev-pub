@@ -12,6 +12,7 @@ from typing import Optional
 
 from totodev_pub.primitive_event_log import PrimitiveEventLog
 from totodev_pub.folder_backed_case_support.constants import (
+    CASE_BASE_EVENT_PREFIX,
     EV_ENTER_STATE,
     EV_CLOSED,
     EVENTS_DIR_NAME,
@@ -32,9 +33,17 @@ class CaseEventLogReader:
 
     @property
     def primitive(self) -> PrimitiveEventLog:
-        """The underlying log — the escape hatch for everything bespoke, INCLUDING
-        writes (e.g. the live case does `reader.primitive.create_event(...)`)."""
+        """The underlying log — the escape hatch for bespoke reads/writes that the
+        journal does not model. The base-class write path should use CaseJournal."""
         return self._log
+
+    @staticmethod
+    def is_base_event_label(label: str) -> bool:
+        """True when `label` belongs to the base-class lifecycle namespace (the
+        CASE_BASE_EVENT_PREFIX family). The read-side companion to CaseJournal's
+        write-side prefix enforcement: both share one definition of the reserved
+        prefix, so an observer can split base events from a subclass's custom ones."""
+        return label.startswith(CASE_BASE_EVENT_PREFIX)
 
     # ---- convention-aware reads ----
 

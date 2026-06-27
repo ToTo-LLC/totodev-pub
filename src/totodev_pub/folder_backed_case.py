@@ -15,6 +15,7 @@ Core pieces
 -----------
 CaseRecord          — skinny Pydantic identity card (case_record.yaml).
 CaseEventLogReader  — read-oriented convention interpreter over PrimitiveEventLog.
+CaseJournal         — domain-aware event-log read/write facade (the case's one log surface).
 CaseAssets          — working-file playground + retention manifest (_keep_assets.txt).
 FolderBackedCase    — ABC you subclass to define a case type.
 StateChainParser    — authoritative source for the state-chains DSL: parser/compiler and
@@ -69,15 +70,9 @@ from totodev_pub.folder_backed_case_support.constants import (
     ASSETS_DIR_NAME,
     KEEP_LIST_NAME,
     CASE_RESERVED_ARTIFACT_NAMES,
-    EV_ENTER_STATE,
-    EV_NEW,
+    CASE_BASE_EVENT_PREFIX,
     EV_CLOSED,
-    EV_RECLASSIFY,
     EV_ALERT,
-    EV_FAIL_TRANSITION,
-    EV_ENTRY_EXCEPTION,
-    EV_TRIGGER_SLOW,
-    EV_TRIGGER_TIMEOUT,
     SIG_CLOSING,
 )
 from totodev_pub.folder_backed_case_support.helpers import _utcnow, _new_time_slug
@@ -97,6 +92,7 @@ from totodev_pub.folder_backed_case_support.exceptions import (
 )
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
 from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
+from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 from totodev_pub.folder_backed_case_support.case_type_registry import (
@@ -136,6 +132,7 @@ __all__ = [
     "HeartbeatLease",
     "CaseRecord",
     "CaseEventLogReader",
+    "CaseJournal",
     "CaseAssets",
     "AdvanceResult",
     "StateChainParser",
@@ -158,6 +155,7 @@ __all__ = [
     "ASSETS_DIR_NAME",
     "KEEP_LIST_NAME",
     "CASE_RESERVED_ARTIFACT_NAMES",
+    "CASE_BASE_EVENT_PREFIX",
 ]
 
 
@@ -358,7 +356,7 @@ class FolderBackedCase(ABC):
             raise CaseTypeMismatchError(
                 on_disk=self._record.case_object_type, loading_class=cls.__name__
             )
-        self._events = CaseEventLogReader.for_folder(self._folder)
+        self._journal = CaseJournal.for_folder(self._folder)
         self._assets = CaseAssets(self._folder)   # asset playground + retention manifest
         self._listeners: list = []        # fn(case, event_name, info)
         # State is derived from the event log on load; transitions then cache on self.state.
@@ -366,13 +364,12 @@ class FolderBackedCase(ABC):
         # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _as_utc() converts them
         # to aware UTC. record.created is already aware UTC (CaseRecord validator).
         self._last_activity: datetime.datetime = (
-            self._as_utc(self._events.last_activity) or self._record.created
+            self._as_utc(self._journal.last_activity) or self._record.created
         )
         # When the CURRENT state was entered — the dwell anchor for time guards (@<dur>),
         # from the latest CASE_ENTER_STATE; a brand-new case has none yet, so fall back.
-        _enter = next(self._events.primitive.events(label_glob=EV_ENTER_STATE), None)
         self._state_entered_at: datetime.datetime = (
-            self._as_utc(_enter.mtime) if _enter is not None else self._record.created
+            self._as_utc(self._journal.last_enter_state_mtime()) or self._record.created
         )
         # Acquire after state is known because TTL can be state-dependent.
         self._lease = HeartbeatLease(
@@ -455,11 +452,12 @@ class FolderBackedCase(ABC):
         # cls.__name__ here, so it satisfies the _flush_record type-name guard.
         record.save(str(case_folder / RECORD_NAME))
         case = cls(case_folder)
-        case._events.primitive.create_event(
-            EV_NEW, cls.__name__,
-            {"case_id": record.case_id, "external_key": record.external_key},
+        case._journal.log_new(
+            cls.__name__,
+            case_id=record.case_id,
+            external_key=record.external_key,
         )
-        case._events.primitive.create_event(EV_ENTER_STATE, cls._fsm.initial_state)
+        case._journal.log_enter_state(cls._fsm.initial_state)
         return case
 
     # Type resolution and rehydrate live in CaseTypeRegistry (case_type_registry singleton).
@@ -516,9 +514,10 @@ class FolderBackedCase(ABC):
             fn(self, event_name, info)
 
     def _derive_state(self) -> str | None:
-        """Current state = the most recent CASE_ENTER_STATE entry. Delegates to the same
-        CaseEventLogReader the peek path uses — no-drift guarantee is structural."""
-        return self._events.current_state
+        """Current state = the most recent CASE_ENTER_STATE entry. Delegates to the
+        journal (over the same CaseEventLogReader the peek path uses) — no-drift
+        guarantee is structural."""
+        return self._journal.current_state
 
     # ---- identity / status properties ----
 
@@ -572,9 +571,10 @@ class FolderBackedCase(ABC):
 
         1. FACTUAL GUARDS — each `_fact_guards` entry (from a `@FACT<op>N` token) is compiled
            into an extra `conditions` callable: `@DWELL` compares dwell_secs(); `@FAIL`
-           compares the count of CASE_FAIL_TRANSITION events since the current state was
-           entered (see _fail_count). They are pure factual guards; they do not drive
-           anything — something must still attempt the trigger.
+           compares failed attempts in the current dwell (CASE_FAIL_TRANSITION +
+           CASE_TRIGGER_TIMEOUT; see journal.count_fails_this_dwell). They are pure
+           factual guards; they do not drive anything — something must still attempt
+           the trigger.
         2. `perform_<trigger>` -> `before` — the work a trigger implies belongs in
            `before`: if it raises, the transition ABORTS and the case stays in its source
            state (no CASE_ENTER_STATE logged), so "retry" is just "fire the trigger again"
@@ -649,13 +649,9 @@ class FolderBackedCase(ABC):
         return _wrapped
 
     def _log_trigger_slow(self, trigger: str, elapsed: float, warn: float) -> None:
-        """Record a CASE_TRIGGER_SLOW event. The elapsed whole-seconds go in the event VALUE
-        (so it shows in the filename and is glob-scannable, e.g. `CASE_TRIGGER_SLOW@12s`); the
-        precise elapsed, the soft limit, and the source state ride in the data."""
-        self._events.primitive.create_event(
-            EV_TRIGGER_SLOW, str(round(elapsed)),
-            {"trigger": trigger, "elapsed_secs": round(elapsed, 3),
-             "warn_secs": warn, "state": self.state},
+        """Record a CASE_TRIGGER_SLOW event via the journal."""
+        self._journal.log_trigger_slow(
+            trigger, elapsed=elapsed, warn=warn, state=self.state
         )
 
     async def run_blocking(self, fn, /, *args, **kwargs):
@@ -681,7 +677,8 @@ class FolderBackedCase(ABC):
         """Build a `transitions` condition callable for a `@FACT<op>N` factual guard. Bound
         to this instance so each model checks its own facts (send_event=True => the callable
         receives EventData, which it ignores). `@DWELL` compares dwell_secs() (seconds in
-        the current state); `@FAIL` compares _fail_count() (failed attempts this dwell)."""
+        the current state); `@FAIL` compares the journal's count_fails_this_dwell() (failed
+        attempts this dwell)."""
         cmp = _FACT_OPS[op]
         if name == "DWELL":
             def _dwell_guard(event) -> bool:
@@ -689,7 +686,7 @@ class FolderBackedCase(ABC):
             return _dwell_guard
         if name == "FAIL":
             def _fail_guard(event) -> bool:
-                return cmp(self._fail_count(), operand)
+                return cmp(self._journal.count_fails_this_dwell(), operand)
             return _fail_guard
         raise ValueError(f"unknown factual guard {name!r}")   # parser should prevent this
 
@@ -699,33 +696,6 @@ class FolderBackedCase(ABC):
         or creation for a brand-new case). This is the documented home for "what does DWELL
         mean": a `@DWELL>30m` guard is simply `dwell_secs() > 1800`."""
         return (_utcnow() - self._state_entered_at).total_seconds()
-
-    def _fail_count(self) -> int:
-        """Count of failed pre-commit attempts since the current state was entered — the fact
-        the `@FAIL` guard compares against. Counts BOTH CASE_FAIL_TRANSITION (the work raised)
-        and CASE_TRIGGER_TIMEOUT (the work was hard-aborted): a timeout IS a failed attempt,
-        and counting it here is what stops a timing-out trigger from re-firing forever under
-        the implicit `@FAIL<1` cap. STATE-scoped: every failed attempt in this dwell counts,
-        regardless of which trigger raised. Derived from the event log (no stored counter), so
-        it is correct across process restarts and resets naturally at the next
-        CASE_ENTER_STATE."""
-        n = 0
-        for ev in self._events.primitive.events(recent_first=True):
-            if ev.label == EV_ENTER_STATE:
-                break                       # reached the boundary of the current dwell
-            if ev.label in (EV_FAIL_TRANSITION, EV_TRIGGER_TIMEOUT):
-                n += 1
-        return n
-
-    def _has_event_since_enter(self, label: str) -> bool:
-        """True if an event with `label` has been logged since the current state was
-        entered. Used to keep blocked-state alerts to one per dwell."""
-        for ev in self._events.primitive.events(recent_first=True):
-            if ev.label == EV_ENTER_STATE:
-                return False
-            if ev.label == label:
-                return True
-        return False
 
     def _on_state_changed(self, event) -> None:
         """Runs after EVERY transition (event is a transitions EventData). Records the
@@ -746,7 +716,7 @@ class FolderBackedCase(ABC):
                signal is detach(), not this. Standalone: no-op.
         """
         src, dest = event.transition.source, event.transition.dest
-        self._events.primitive.create_event(EV_ENTER_STATE, dest)
+        self._journal.log_enter_state(dest)
         self._last_activity = _utcnow()
         self._state_entered_at = self._last_activity   # reset the time-guard dwell anchor
         closing = src not in self._fsm.closed_states and dest in self._fsm.closed_states
@@ -757,7 +727,7 @@ class FolderBackedCase(ABC):
             self.heartbeat()
         else:
             # --- phase 1: pre-finalization --- assets still present ---
-            self._events.primitive.create_event(EV_CLOSED, dest, {"from": src})
+            self._journal.log_closed(dest, from_state=src)
             self.on_closing()
             self._notify(SIG_CLOSING, src=src, dest=dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
@@ -806,8 +776,8 @@ class FolderBackedCase(ABC):
         # close in _on_state_changed was also skipped here; we reconcile the CASE_ENTER_STATE
         # but do NOT attempt the close from inside the exception handler. Terminal-entry
         # failures still need the close path made idempotent/re-runnable.
-        if post_commit and self._events.current_state != dest:
-            self._events.primitive.create_event(EV_ENTER_STATE, dest)
+        if post_commit and self._journal.current_state != dest:
+            self._journal.log_enter_state(dest)
             self._last_activity = _utcnow()
             self._state_entered_at = self._last_activity
 
@@ -826,15 +796,16 @@ class FolderBackedCase(ABC):
 
         # 3. Log the countable failure fact. A TriggerTimeout is pre-commit by construction
         # (the work runs in `before`), but gets its OWN distinct label so a timeout never
-        # reads like an ordinary transition failure — while _fail_count still counts it.
+        # reads like an ordinary transition failure — while count_fails_this_dwell still
+        # counts it.
         detail = {"trigger": trigger, "source": src, "dest": dest,
                   "error": type(err).__name__, "msg": str(err)[:200]}
         if isinstance(err, TriggerTimeout):
-            self._events.primitive.create_event(EV_TRIGGER_TIMEOUT, trigger or src, detail)
+            self._journal.log_trigger_timeout(trigger or src, detail)
         elif post_commit:
-            self._events.primitive.create_event(EV_ENTRY_EXCEPTION, dest or src, detail)
+            self._journal.log_entry_exception(dest or src, detail)
         else:
-            self._events.primitive.create_event(EV_FAIL_TRANSITION, trigger or src, detail)
+            self._journal.log_fail_transition(trigger or src, detail)
 
         # 4. Let the case react. final_state reflects where we actually ended up.
         final_state = dest if post_commit else src
@@ -1029,7 +1000,7 @@ class FolderBackedCase(ABC):
         """Build the AutoAdvanceBlocked marker for the current (provably stuck) state,
         logging a SINGLE CASE_ALERT the first time we detect the block in this dwell so it
         is visible on disk without spamming the low-volume log on every advance() call."""
-        if not self._has_event_since_enter(EV_ALERT):
+        if not self._journal.has_event_since_enter(EV_ALERT):
             self.log_alert(f"auto-advance blocked in {self.state!r}", where=self.state)
         return AutoAdvanceBlocked(
             self.case_id, self.state, candidates=[t for t, _ in candidates]
@@ -1076,9 +1047,8 @@ class FolderBackedCase(ABC):
         # new one. __new__ + _bind_existing_case_dir bypasses __init__'s gated public path.
         fresh = new_cls.__new__(new_cls)
         fresh._bind_existing_case_dir(self._folder, check_type=False)
-        fresh._events.primitive.create_event(
-            EV_RECLASSIFY, new_cls.__name__,
-            {"from": from_name, "at_state": fresh.state},
+        fresh._journal.log_reclassify(
+            new_cls.__name__, from_type=from_name, at_state=fresh.state
         )
         fresh._record.case_object_type = new_cls.__name__   # CONSCIOUS stamp
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
@@ -1118,8 +1088,8 @@ class FolderBackedCase(ABC):
             short_msg: a brief human-readable reason (terse phrase, not a stack trace).
             where: locus of concern; defaults to the current state.
         """
-        self._events.primitive.create_event(
-            EV_ALERT, where or self.state, {"msg": short_msg}
+        self._journal.log_alert(
+            where or self.state, msg=short_msg
         )
 
     # ---- stall handling ----

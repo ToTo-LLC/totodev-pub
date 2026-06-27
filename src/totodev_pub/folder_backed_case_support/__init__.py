@@ -5,7 +5,13 @@
 constants, and helpers that the main module composes. Import the pieces from here
 (or, for the common names, from totodev_pub.folder_backed_case which re-exports them)."""
 
-from .constants import RECORD_NAME, LEASE_NAME, ASSETS_DIR_NAME, KEEP_LIST_NAME
+from .constants import (
+    RECORD_NAME,
+    LEASE_NAME,
+    ASSETS_DIR_NAME,
+    KEEP_LIST_NAME,
+    CASE_BASE_EVENT_PREFIX,
+)
 from .exceptions import (
     CaseAlreadyOpenError,
     OwnershipLostError,
@@ -22,6 +28,7 @@ from .exceptions import (
 )
 from .case_record import CaseRecord
 from .case_event_log_reader import CaseEventLogReader
+from .case_journal import CaseJournal
 from .case_assets import CaseAssets
 from .advance_result import AdvanceResult
 from .state_chain_parser import StateChainParser, FsmChainSpec
@@ -38,6 +45,7 @@ __all__ = [
     "LEASE_NAME",
     "ASSETS_DIR_NAME",
     "KEEP_LIST_NAME",
+    "CASE_BASE_EVENT_PREFIX",
     "CaseAlreadyOpenError",
     "OwnershipLostError",
     "DetachedCaseError",
@@ -52,6 +60,7 @@ __all__ = [
     "TriggerTimeout",
     "CaseRecord",
     "CaseEventLogReader",
+    "CaseJournal",
     "CaseAssets",
     "AdvanceResult",
     "StateChainParser",
