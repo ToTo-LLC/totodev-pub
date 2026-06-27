@@ -12,6 +12,7 @@ from totodev_pub.folder_backed_case import (
     UnregisteredCaseTypeError,
     MissingFsmError,
 )
+from totodev_pub.folder_backed_case_support.exceptions import FsmBindingError
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +20,7 @@ from totodev_pub.folder_backed_case import (
 # ---------------------------------------------------------------------------
 
 class SimpleCase(FolderBackedCase):
-    fsm_state_chains = ["^new--begin-->open--finish-->done^"]
+    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,81 @@ def test_assets_relative_path_from_absolute_and_relative(tmp_path):
             case.assets.relative_path(tmp_path / "outside.txt")
     finally:
         case.detach()
+
+
+def test_guard_method_convention_constructs(tmp_path):
+    """A `<token>#trigger` guard binds to `guard_<token>`; a correctly named async guard
+    lets the case construct cleanly."""
+    class GuardedCase(FolderBackedCase):
+        fsm_state_chains = ["^new==funded#finish-->done^"]
+
+        async def guard_funded(self, event):
+            return True
+
+    folder = tmp_path / "case-g1"
+    case = GuardedCase.create_in_folder(folder, case_id="g-1")
+    try:
+        assert case.state == "new"
+    finally:
+        case.detach()
+
+
+def test_orphan_guard_method_fails_construction(tmp_path):
+    """A `guard_`-prefixed method whose token maps to no chain guard is treated as a typo
+    and fails the build (orphan_detection defaults to error)."""
+    class TypoGuardCase(FolderBackedCase):
+        fsm_state_chains = ["^new==funded#finish-->done^"]
+
+        async def guard_funded(self, event):
+            return True
+
+        async def guard_fundedd(self, event):  # typo: funded
+            return True
+
+    folder = tmp_path / "case-g2"
+    with pytest.raises(FsmBindingError) as excinfo:
+        TypoGuardCase.create_in_folder(folder, case_id="g-2")
+    msg = str(excinfo.value)
+    assert "guard_fundedd" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_perform_hook_convention_wires_and_runs(tmp_path):
+    """An auto edge (`--`) requires `perform_<trigger>`; the method binds to the
+    transition's `before` and runs when the trigger fires."""
+    class PerformCase(FolderBackedCase):
+        fsm_state_chains = ["^new--begin-->open==finish-->done^"]
+        performed = False
+
+        async def perform_begin(self, event):
+            self.performed = True
+
+    folder = tmp_path / "case-p1"
+    with PerformCase.create_in_folder(folder, case_id="p-1") as case:
+        assert case.performed is False
+        asyncio.get_event_loop().run_until_complete(case.begin())
+        assert case.state == "open"
+        assert case.performed is True
+
+
+def test_legacy_underscore_perform_hook_is_rejected(tmp_path):
+    """The trigger action hook dropped its leading underscore. An auto edge whose action
+    method is still named `_perform_<trigger>` no longer satisfies the required
+    `perform_<trigger>`, so the build fails — a deliberate pre-release breaking change."""
+    class LegacyCase(FolderBackedCase):
+        fsm_state_chains = ["^new--begin-->done^"]
+
+        async def _perform_begin(self, event):  # old name, no longer recognized
+            return None
+
+    folder = tmp_path / "case-legacy"
+    with pytest.raises(FsmBindingError) as excinfo:
+        LegacyCase.create_in_folder(folder, case_id="legacy-1")
+    msg = str(excinfo.value)
+    assert "perform_begin" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
 
 
 def test_generate_case_id_auto_bumps_on_same_millisecond(monkeypatch):

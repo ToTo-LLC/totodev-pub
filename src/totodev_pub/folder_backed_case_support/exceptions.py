@@ -95,7 +95,7 @@ class AutoAdvanceBlocked(Exception):
     fire later, so the case is genuinely stuck waiting on out-of-band help.
 
     SCOPE: only the unattended advance() path is walled off — manual or event-driven
-    (`--`) transitions may still be perfectly available, which is why it is "auto
+    (`==`) transitions may still be perfectly available, which is why it is "auto
     advance" blocked, not "all transitions" blocked.
 
     USAGE: advance() does NOT raise this — it CARRIES it in AdvanceResult.exceptions as
@@ -103,8 +103,8 @@ class AutoAdvanceBlocked(Exception):
     call, having no AdvanceResult to return, still raises). It is deterministic and
     idempotent: the same state yields the same block on every call until something changes.
 
-    REMEDY: give the state a timed escape, e.g. `==@DWELL>{N}h#timeout-->somewhere`, or a
-    blanket net like `*==@DWELL>=2d#timeout-->expired^`; or resolve/route it manually.
+    REMEDY: give the state a timed escape, e.g. `--@DWELL>{N}h#timeout-->somewhere`, or a
+    blanket net like `*--@DWELL>=2d#timeout-->expired^`; or resolve/route it manually.
     """
     def __init__(self, case_id: str, state: str, *, candidates: Optional[list] = None):
         super().__init__(
@@ -117,7 +117,7 @@ class AutoAdvanceBlocked(Exception):
 
 
 class TriggerTimeout(Exception):
-    """A trigger's work (`_perform_<trigger>`) was HARD-ABORTED for outrunning its kill
+    """A trigger's work (`perform_<trigger>`) was HARD-ABORTED for outrunning its kill
     ceiling (the `~<dur>` soft timeout, or the default, times the kill multiple). Raised by
     the timing wrapper after asyncio.wait_for cancels the work; it is an ordinary Exception
     so it funnels through the machine's on_exception handler like any other pre-commit
@@ -191,8 +191,10 @@ class FsmBindingError(Exception):
 
       * MISSING — a method guard (or other explicitly-named transition callback) the FSM
         references is not defined on the class. This is almost always a typo in a chain's
-        `guard#trigger`. Additionally, `_perform_<trigger>` is REQUIRED when that trigger is
-        reachable from an auto-advance edge (`==`), so unattended paths are explicit.
+        `guard#trigger`. A DSL guard token maps to a `guard_<token>` method (e.g. `funded#`
+        => `guard_funded`), so that is the name reported as missing. Additionally,
+        `perform_<trigger>` is REQUIRED when that trigger is reachable from an auto-advance
+        edge (`--`), so unattended paths are explicit.
       * SYNC — a referenced callable exists but is synchronous while the case requires async.
         FolderBackedCase is driven through async (advance(), the generated triggers), so every
         guard, action method, and callback the FSM touches MUST be a coroutine function
@@ -228,7 +230,7 @@ class FsmBindingError(Exception):
             if slot == "auto_hook":
                 lines.append(
                     f"  - missing {label} {name!r} for auto-advance trigger {trigger!r}; "
-                    f"this trigger is reachable from a `==` edge, so define it explicitly "
+                    f"this trigger is reachable from a `--` edge, so define it explicitly "
                     f"(a no-op is fine): `async def {name}(self, event): ...`"
                 )
             else:
@@ -243,11 +245,7 @@ class FsmBindingError(Exception):
                 f"  - {label} {name!r}{where} is synchronous; declare it with 'async def' "
                 "(this case is driven through async methods like advance())"
             )
-        for name, slot, suffix in self.orphaned:
-            if slot in {"on_enter", "on_exit"}:
-                kind = "state"
-            else:
-                kind = "trigger"
+        for name, kind, suffix in self.orphaned:
             lines.append(
                 f"  - orphan hook-like method {name!r}: suffix {suffix!r} does not match any "
                 f"known {kind}; rename/fix it or disable orphan detection for this check"

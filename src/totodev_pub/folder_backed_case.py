@@ -27,12 +27,12 @@ Quick start
 -----------
     class TicketCase(FolderBackedCase):
         # State-chains DSL: 
-        #     State_A --trigger--> State_B (manual)    a human-driven transition
-        #     State_A ==trigger--> State_B (auto)      an auto-advance transition
+        #     State_A ==trigger--> State_B (manual)    a human-driven transition
+        #     State_A --trigger--> State_B (auto)      an auto-advance transition
         #     leading  `^` = initial state, 
         #     trailing `^` = terminal state.
-        fsm_state_chains = ["^new==open_ticket-->open--close_ticket-->closed^"
-                            "*==@DWELL>14d#non_responsive-->auto_closed^"]  # timed-escape edge
+        fsm_state_chains = ["^new--open_ticket-->open==close_ticket-->closed^"
+                            "*--@DWELL>14d#non_responsive-->auto_closed^"]  # timed-escape edge
 
     FolderBackedCase.register_case_types(TicketCase)
 
@@ -98,6 +98,7 @@ from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser,
     FsmChainSpec,
+    _PERFORM_METHOD_PREFIX,
 )
 
 # Comparator name -> callable, for compiling `@FACT<op>N` factual guards into condition
@@ -158,26 +159,32 @@ class FolderBackedCase(ABC):
     Subclasses declare ONE thing for the FSM: `fsm_state_chains`, a list of
     Mermaid-flavoured chain strings. A trivial example:
 
-        fsm_state_chains = ["^new==assign-->assigned--work-->closed^"]
+        fsm_state_chains = ["^new--assign-->assigned==work-->closed^"]
 
     reads left-to-right as states joined by `--trigger-->` connectors, where a leading
-    `^` marks the initial state, a trailing `^` a terminal (closing) state, and `==`
-    opts an edge into auto-advance (`--` stays manual). Connectors also carry guards, `@DWELL`/
+    `^` marks the initial state, a trailing `^` a terminal (closing) state, and `--`
+    opts an edge into auto-advance (`==` stays manual). Connectors also carry guards, `@DWELL`/
     `@FAIL` factual guards, and `~<dur>` soft timeouts — see StateChainParser for the
-    full grammar. Side-effecting work for a trigger goes in a `_perform_<trigger>`
+    full grammar. Side-effecting work for a trigger goes in a `perform_<trigger>`
     method, auto-wired as the transition's `before` (a raise aborts the step); the
     parser renders the chains into the per-class singleton `_fsm`.
 
     Implicit hook conventions (derived from your declared states/triggers):
       * `on_enter_<state>`, `on_exit_<state>` fire only when `<state>` is an exact
         known FSM state name.
-      * `_perform_<trigger>`, `before_<trigger>`, `after_<trigger>` map only when
+      * `perform_<trigger>`, `before_<trigger>`, `after_<trigger>` map only when
         `<trigger>` is an exact known FSM trigger name.
-      * `<guard>` in `guard#trigger` DSL segments must be an exact method name on the
-        class (or an explicitly provided callable in a hand-built transition dict).
-    In short: hook suffixes are strict exact matches to parsed state/trigger/guard
-    names; typos are treated as non-matching methods and may be flagged by compatibility
-    validation depending on `orphan_detection`.
+      * a method `<guard>` in a `guard#trigger` DSL segment is bound by the `guard_`
+        convention: the token `<guard>` resolves to the method `guard_<guard>` (so
+        `funded#finish` requires `async def guard_funded`). A hand-built transition dict
+        may instead supply an explicit callable. The `guard_` prefix keeps guards in their
+        own namespace, away from ordinary helpers and lifecycle hooks.
+    In short: hook/guard suffixes are strict exact matches to parsed state/trigger/guard
+    names. Typos are caught at first construction: compatibility validation runs with
+    `orphan_detection="error"` by DEFAULT, so a method that looks like a hook/guard
+    (`on_enter_`, `on_exit_`, `guard_`, `perform_`, `before_`, `after_`) but maps to no
+    known name fails the build. A deliberately-named coincidental method can opt out via
+    `orphan_detection="off"`.
 
     Need the full power of `transitions` (callbacks, `unless`, `*`/multi-source, state
     objects)? Override compile_fsm() and return an FsmChainSpec you build yourself
@@ -321,7 +328,9 @@ class FolderBackedCase(ABC):
         if not cls._fsm.states:
             raise MissingFsmError(cls.__name__)
         # 2) One-time carrier binding check, keyed on cls.__dict__ so subclasses don't
-        # inherit a parent's "already checked" sentinel.
+        # inherit a parent's "already checked" sentinel. Uses the method's default
+        # orphan_detection="error": a hook/guard-looking method that maps to no known
+        # state/trigger/guard is treated as a typo and fails the build.
         if "_fsm_binding_checked" not in cls.__dict__:
             cls._fsm.validate_object_compatibility(self)
             cls._fsm_binding_checked = True
@@ -337,7 +346,6 @@ class FolderBackedCase(ABC):
         self._events = CaseEventLogReader.for_folder(self._folder)
         self._assets = CaseAssets(self._folder)   # asset playground + retention manifest
         self._listeners: list = []        # fn(case, event_name, info)
-        self._stepping = False            # in-memory: a step is executing right now (this process)
         # State is derived from the event log on load; transitions then cache on self.state.
         self.state: str = self._derive_state() or self._fsm.initial_state
         # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _as_utc() converts them
@@ -538,43 +546,12 @@ class FolderBackedCase(ABC):
     def is_closed(self) -> bool:
         return self.state in self._fsm.closed_states
 
-    def is_idle_for(self, seconds: float) -> bool:
-        return (_utcnow() - self._last_activity).total_seconds() >= seconds
-
-    # ---- activity / lifecycle introspection ----
-
-    @property
-    def next_step(self) -> str | None:
-        """The first auto-advance trigger from the current state, else None. With guards,
-        this names the highest-priority CANDIDATE; whether it actually fires depends on its
-        guard at advance()-time."""
-        candidates = self._forward_candidates(self.state)
-        return candidates[0][0] if candidates else None
-
-    @property
-    def is_runnable(self) -> bool:
-        """Open AND at least one auto-advance candidate is DEFINED from the current state.
-        Note: with guards, a runnable case can still no-op if every guard declines —
-        runnable means 'there is something to try', not 'a step is guaranteed'."""
-        return self.is_open and self.next_step is not None
-
-    @property
-    def is_awaiting(self) -> bool:
-        """Open but with no auto-advance candidate defined — blocked on external input / a
-        human / an event-driven (`--`) transition."""
-        return self.is_open and self.next_step is None
-
-    @property
-    def is_stepping(self) -> bool:
-        """In-memory: a step is mid-execution in THIS process."""
-        return self._stepping
-
     # ---- FSM attachment via transitions (async-first composition pattern) ----
 
     def _build_machine(self, initial_state: str) -> AsyncMachine:
         # send_event=True so the global after-hook receives EventData and can see
         # BOTH the source and dest of each transition (needed for the closing edge).
-        # on_exception funnels EVERY callback failure (guard / _perform_ / on_enter /
+        # on_exception funnels EVERY callback failure (guard / perform_ / on_enter /
         # on_exit / after) through one handler regardless of how the trigger was fired.
         return AsyncMachine(
             model=self,
@@ -598,12 +575,12 @@ class FolderBackedCase(ABC):
            compares the count of CASE_FAIL_TRANSITION events since the current state was
            entered (see _fail_count). They are pure factual guards; they do not drive
            anything — something must still attempt the trigger.
-        2. `_perform_<trigger>` -> `before` — the work a trigger implies belongs in
+        2. `perform_<trigger>` -> `before` — the work a trigger implies belongs in
            `before`: if it raises, the transition ABORTS and the case stays in its source
            state (no CASE_ENTER_STATE logged), so "retry" is just "fire the trigger again"
            and a crash mid-work resumes cleanly. Opt-in and non-clobbering: wired ONLY when
            the method exists AND no `before` was already declared (a compile_fsm() override
-           keeps full control). A declarative FSM with no `_perform_` methods stays
+           keeps full control). A declarative FSM with no `perform_` methods stays
            callback-free. The method is wrapped (see _make_perform_wrapper) so its work is
            TIMED: outrunning the trigger's soft timeout logs CASE_TRIGGER_SLOW."""
         prepared: list[dict] = []
@@ -617,7 +594,7 @@ class FolderBackedCase(ABC):
                     conds.append(self._make_fact_guard(fg["name"], fg["op"], fg["operand"]))
                 clean["conditions"] = conds
             if "before" not in clean:
-                method = f"_perform_{trigger}"
+                method = f"{_PERFORM_METHOD_PREFIX}{trigger}"
                 if callable(getattr(type(self), method, None)):
                     clean["before"] = self._make_perform_wrapper(trigger, method)
             prepared.append(clean)
@@ -630,7 +607,7 @@ class FolderBackedCase(ABC):
         return self._fsm.trigger_timeouts.get(trigger, DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS)
 
     def _make_perform_wrapper(self, trigger: str, method_name: str):
-        """Wrap a `_perform_<trigger>` method as an async `before` callback that TIMES and
+        """Wrap a `perform_<trigger>` method as an async `before` callback that TIMES and
         TIME-BOUNDS the work. Two thresholds, both derived from trigger_warn_secs(trigger):
           * SOFT (warn): outrunning it logs CASE_TRIGGER_SLOW — a warning, the work continues.
           * HARD (warn × TIMEOUT_KILL_MULTIPLE_OF_WARNING): outrunning it cancels the work via
@@ -638,7 +615,7 @@ class FolderBackedCase(ABC):
             _on_fsm_exception, counted by @FAIL). Kill is on by default — an un-annotated
             trigger is still capped at the default warning × the multiple.
 
-        Non-intrusive otherwise: it awaits an async _perform_ or calls a sync one, never
+        Non-intrusive otherwise: it awaits an async perform_ or calls a sync one, never
         swallows the result, and re-raises a NON-timeout error unchanged (so the ordinary
         on_exception path is untouched). A timed-out step logs only the timeout, not also the
         slow warning; a step that is slow AND fails (non-timeout) records both."""
@@ -673,7 +650,7 @@ class FolderBackedCase(ABC):
 
     def _log_trigger_slow(self, trigger: str, elapsed: float, warn: float) -> None:
         """Record a CASE_TRIGGER_SLOW event. The elapsed whole-seconds go in the event VALUE
-        (so it shows in the filename and is glob-scannable, e.g. `CASE_TRIGGER_SLOW@12`); the
+        (so it shows in the filename and is glob-scannable, e.g. `CASE_TRIGGER_SLOW@12s`); the
         precise elapsed, the soft limit, and the source state ride in the data."""
         self._events.primitive.create_event(
             EV_TRIGGER_SLOW, str(round(elapsed)),
@@ -682,12 +659,12 @@ class FolderBackedCase(ABC):
         )
 
     async def run_blocking(self, fn, /, *args, **kwargs):
-        """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `_perform_`. Runs `fn`
+        """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `perform_`. Runs `fn`
         on the default thread-pool executor and awaits it, so the call does NOT freeze the
         event loop (which would stall every other case sharing it). Use ONLY when a library
         gives you no async API:
 
-            async def _perform_fetch(self, event):
+            async def perform_fetch(self, event):
                 resp = await self.run_blocking(requests.get, url)
 
         SECOND-CLASS by design, with two caveats vs. an async-native client:
@@ -797,7 +774,7 @@ class FolderBackedCase(ABC):
         """Machine-level `on_exception` hook (wired in _build_machine): the SINGLE chokepoint
         every trigger dispatch funnels through, so it covers both advance() and a direct
         `await case.<trigger>()`. Fires when ANY callback raises — a guard, a
-        `_perform_<trigger>`, on_exit/on_enter, or an `after`.
+        `perform_<trigger>`, on_exit/on_enter, or an `after`.
 
         It distinguishes the COMMIT BOUNDARY without needing to know which callback slot
         raised: `transitions` sets `self.state` to the dest during the state change, BEFORE
@@ -1066,20 +1043,16 @@ class FolderBackedCase(ABC):
         self.heartbeat()
         candidates = self._forward_candidates(self.state)
         exceptions: list[Exception] = []
-        self._stepping = True
-        try:
-            for trigger, _dest in candidates:
-                try:
-                    # A guard-blocked transition returns falsy WITHOUT changing state (and
-                    # without firing the after-hook), so we fall through to the next.
-                    if await getattr(self, trigger)():
-                        return AdvanceResult(initial, self.state, trigger=trigger)
-                except Exception as err:    # absorbed: reported as data, not raised at driver
-                    exceptions.append(err)
-                    return AdvanceResult(initial, self.state, trigger=trigger,
-                                         exceptions=tuple(exceptions))
-        finally:
-            self._stepping = False
+        for trigger, _dest in candidates:
+            try:
+                # A guard-blocked transition returns falsy WITHOUT changing state (and
+                # without firing the after-hook), so we fall through to the next.
+                if await getattr(self, trigger)():
+                    return AdvanceResult(initial, self.state, trigger=trigger)
+            except Exception as err:    # absorbed: reported as data, not raised at driver
+                exceptions.append(err)
+                return AdvanceResult(initial, self.state, trigger=trigger,
+                                     exceptions=tuple(exceptions))
         # Nothing fired and nothing raised: no forward progress this pass. If the state has
         # no guaranteed timed escape, it is provably auto-advance blocked.
         if self.state not in self._fsm.timed_escape_states:
@@ -1101,8 +1074,7 @@ class FolderBackedCase(ABC):
     ) -> AdvanceResult | None:
         """Drive forward until closed, until nothing auto-advances (no progress — including
         a failed attempt or a block), or until an auto step from the current state could
-        ENTER `stop_before` (for staged inspection / testing). Delegates to advance() so
-        _stepping is set correctly for each step. Returns the LAST AdvanceResult (so a
+        ENTER `stop_before` (for staged inspection / testing). Returns the LAST AdvanceResult (so a
         caller can inspect why the drive stopped), or None if it never stepped."""
         last: AdvanceResult | None = None
         while self.is_open:
