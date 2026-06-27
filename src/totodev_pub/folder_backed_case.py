@@ -56,7 +56,6 @@ import functools
 import inspect
 import logging
 import operator
-import os
 import time
 from abc import ABC
 from pathlib import Path
@@ -104,6 +103,11 @@ from totodev_pub.folder_backed_case_support.case_type_registry import (
     CaseTypeRegistry,
     case_type_registry,
 )
+from totodev_pub.folder_backed_case_support.heartbeat_lease import (
+    HeartbeatLease,
+    LeaseAlreadyHeldError,
+    LeaseOwnershipLostError,
+)
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser,
     FsmChainSpec,
@@ -129,6 +133,7 @@ __all__ = [
     "FolderBackedCase",
     "CaseTypeRegistry",
     "case_type_registry",
+    "HeartbeatLease",
     "CaseRecord",
     "CaseEventLogReader",
     "CaseAssets",
@@ -338,8 +343,8 @@ class FolderBackedCase(ABC):
                 "Use create_in_folder() to incept a new case, or "
                 "case_type_registry.rehydrate(folder) to open an existing one by type."
             )
-        self._holds_lease = False         # set True only on a successful _acquire_lease()
-        self._detached = False
+        # Initialized after state load so TTL can depend on current state.
+        self._lease: HeartbeatLease | None = None
         # without_lock=True: the case lease is our single-owner mechanism; the mixin's file
         # lock is redundant for reads and would block re-opens. save() still acquires its
         # own short-lived lock per write.
@@ -369,10 +374,15 @@ class FolderBackedCase(ABC):
         self._state_entered_at: datetime.datetime = (
             self._as_utc(_enter.mtime) if _enter is not None else self._record.created
         )
-        # Acquire ownership AFTER state is known because lease TTL is state-aware.
-        self._my_mtime: float | None = None
-        self._last_beat_local: float = 0.0
-        self._acquire_lease()
+        # Acquire after state is known because TTL can be state-dependent.
+        self._lease = HeartbeatLease(
+            self._folder / LEASE_NAME,
+            ttl_provider=lambda: self.lease_ttl_for(self.state),
+        )
+        try:
+            self._lease.acquire()
+        except LeaseAlreadyHeldError as e:
+            raise CaseAlreadyOpenError(self._folder, expires_in=e.expires_in) from e
         self._machine = self._build_machine(self.state)
 
     @staticmethod
@@ -894,18 +904,7 @@ class FolderBackedCase(ABC):
         return self._record.detached_copy()
 
     # ---- single-owner protection: the heartbeat lease ----
-    # A content-free `.case.lease` file whose mtime is a "valid-until" expiry. A FUTURE
-    # mtime => still held; past/absent => free. The owner re-beats to push the expiry
-    # forward; the exact mtime it last wrote also serves as its claim token.
-
-    def _lease_path(self) -> Path:
-        return self._folder / LEASE_NAME
-
-    def _on_disk_mtime(self) -> float | None:
-        try:
-            return self._lease_path().stat().st_mtime
-        except FileNotFoundError:
-            return None
+    # Lease mechanics live in HeartbeatLease; this class keeps a domain-flavored facade.
 
     def lease_ttl_for(self, state: str) -> float:
         """Seconds the lease stays valid after a beat, for `state`. Override per state
@@ -914,38 +913,21 @@ class FolderBackedCase(ABC):
         be reclaimed."""
         return 300.0
 
-    def _beat(self) -> None:
-        expiry = time.time() + self.lease_ttl_for(self.state)
-        self._lease_path().touch(exist_ok=True)
-        os.utime(self._lease_path(), (expiry, expiry))
-        self._my_mtime = self._on_disk_mtime()   # remember EXACTLY what we wrote
-        self._last_beat_local = time.monotonic()  # throttle clock (jump-immune)
-        self._holds_lease = True
-        self._detached = False
-
-    def _acquire_lease(self) -> None:
-        m = self._on_disk_mtime()
-        if m is not None and m > time.time():    # future expiry => still held
-            raise CaseAlreadyOpenError(self._folder, expires_in=m - time.time())
-        self._beat()                             # absent/expired => claim (or reclaim)
-
     def heartbeat(
         self,
         *,
         min_update_secs: float = 15.0,
         validate_ownership: bool = True,
     ) -> None:
-        """Extend our lease (mtime = now + lease_ttl_for(state)). Throttled: a no-op if
-        < min_update_secs since our last beat, so tight loops may call freely; pass
-        min_update_secs=0 to FORCE a check+beat now. With validate_ownership (default),
-        raises OwnershipLostError (FATAL) if the on-disk mtime no longer matches what we
-        last wrote — another owner reclaimed us past our TTL, or the lease vanished."""
+        """Extend our lease. Raises `OwnershipLostError` when ownership is displaced."""
         self._check_active()
-        if time.monotonic() - self._last_beat_local < min_update_secs:
-            return
-        if validate_ownership and self._on_disk_mtime() != self._my_mtime:
-            raise OwnershipLostError(self._folder)
-        self._beat()
+        try:
+            self._lease.heartbeat(
+                min_update_secs=min_update_secs,
+                validate_ownership=validate_ownership,
+            )
+        except LeaseOwnershipLostError as e:
+            raise OwnershipLostError(self._folder) from e
 
     def detach(self) -> None:
         """Unbind this object from its folder: delete the lease (clearing the conceptual
@@ -959,14 +941,11 @@ class FolderBackedCase(ABC):
 
         Any later mutating use raises DetachedCaseError. Wired to __exit__ (context
         manager) and best-effort __del__; on a crash the lease simply expires via its TTL."""
-        if self._detached or not self._holds_lease:
-            return                               # never acquired => never delete
-        self._lease_path().unlink(missing_ok=True)
-        self._detached = True
-        self._holds_lease = False
+        if self._lease is not None:
+            self._lease.release()
 
     def _check_active(self) -> None:
-        if self._detached:
+        if self._lease is None or not self._lease.is_active():
             raise DetachedCaseError(self._folder)
 
     def __enter__(self):
@@ -986,10 +965,7 @@ class FolderBackedCase(ABC):
         """Lock-free staleness read for a manager's recovery sweep: True if the lease
         has expired (reclaimable), False if still held, None if unheld. Policy-free —
         the expiry is baked into the mtime, so no state/TTL lookup is needed here."""
-        try:
-            return (Path(folder) / LEASE_NAME).stat().st_mtime <= time.time()
-        except FileNotFoundError:
-            return None
+        return HeartbeatLease.is_expired(Path(folder) / LEASE_NAME)
 
     # ---- flat pipeline driver ----
 

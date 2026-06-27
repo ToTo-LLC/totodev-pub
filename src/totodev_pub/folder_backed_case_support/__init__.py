@@ -26,6 +26,12 @@ from .case_assets import CaseAssets
 from .advance_result import AdvanceResult
 from .state_chain_parser import StateChainParser, FsmChainSpec
 from .case_type_registry import CaseTypeRegistry, case_type_registry
+from .heartbeat_lease import (
+    HeartbeatLease,
+    LeaseAlreadyHeldError,
+    LeaseOwnershipLostError,
+    LeaseReleasedError,
+)
 
 __all__ = [
     "RECORD_NAME",
@@ -52,4 +58,8 @@ __all__ = [
     "FsmChainSpec",
     "CaseTypeRegistry",
     "case_type_registry",
+    "HeartbeatLease",
+    "LeaseAlreadyHeldError",
+    "LeaseOwnershipLostError",
+    "LeaseReleasedError",
 ]
