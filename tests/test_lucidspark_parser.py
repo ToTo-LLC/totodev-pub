@@ -10,6 +10,8 @@ Tests the parsing, analysis, and rendering capabilities of the LucidSpark module
 import pytest
 from pathlib import Path
 
+pytest.importorskip("networkx")  # 'lucidspark' extra; skip when unavailable
+
 from totodev_pub.lucidspark.lucidspark_models import LucidSparkShapeRecord
 from totodev_pub.lucidspark.lucidspark_collection import LucidSparkShapeCollection, LucidSparkLeafRecord
 

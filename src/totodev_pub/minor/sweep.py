@@ -58,7 +58,13 @@ import logging
 
 _g_pattern = re.compile(r'#\s*(DEBUG|FIXME|DIAG)')
 _g_acceptable_diag = re.compile(r'^\s*#.*#\s*DIAG') # commented out diag is okay
-_g_filepath_pattern = re.compile(r'(?<!r)(?<!R)["\'][\\/].*([\\/].*){2,}["\'](?:\s*)$')
+# Match a single quoted string literal that looks like an absolute filesystem
+# path (starts with a separator, has 3+ separators). Restricting the inner
+# content to non-quote chars and closing on the same quote (backreference)
+# keeps the match within one literal, so it can't span across unrelated quotes
+# such as a separator literal feeding a runtime-built URL, e.g.
+# f"{base.rstrip('/')}/workdrive/api/v1".
+_g_filepath_pattern = re.compile(r'(?<!r)(?<!R)(["\'])[\\/][^"\']*(?:[\\/][^"\']*){2,}\1\s*$')
 _g_class_pattern = re.compile(r'^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)')
 
 # Constants for exceptions

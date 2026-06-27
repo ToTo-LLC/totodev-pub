@@ -34,6 +34,8 @@ import pytest
 from pathlib import Path
 from datetime import datetime, timedelta
 
+pytest.importorskip("luigi")  # 'pipes' extra; skip when luigi is unavailable
+
 from totodev_pub.pipes.toto_example_factory import (
     spawn_text_stats_pipe,
     create_factory,

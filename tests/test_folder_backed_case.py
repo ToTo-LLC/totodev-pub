@@ -60,9 +60,9 @@ def test_second_open_raises(tmp_path):
 def test_fsm_transitions(tmp_path):
     folder = tmp_path / "case-004"
     with SimpleCase.create_in_folder(folder) as case:
-        asyncio.get_event_loop().run_until_complete(case.begin())
+        asyncio.run(case.begin())
         assert case.state == "open"
-        asyncio.get_event_loop().run_until_complete(case.finish())
+        asyncio.run(case.finish())
         assert case.state == "done"
         assert case.is_closed
 
@@ -70,7 +70,7 @@ def test_fsm_transitions(tmp_path):
 def test_peek_record_and_events(tmp_path):
     folder = tmp_path / "case-005"
     with SimpleCase.create_in_folder(folder, case_id="c-005") as case:
-        asyncio.get_event_loop().run_until_complete(case.begin())
+        asyncio.run(case.begin())
 
     record = FolderBackedCase.peek_record(folder)
     assert record.case_id == "c-005"
@@ -219,7 +219,7 @@ def test_perform_hook_convention_wires_and_runs(tmp_path):
     folder = tmp_path / "case-p1"
     with PerformCase.create_in_folder(folder, case_id="p-1") as case:
         assert case.performed is False
-        asyncio.get_event_loop().run_until_complete(case.begin())
+        asyncio.run(case.begin())
         assert case.state == "open"
         assert case.performed is True
 

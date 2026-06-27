@@ -12,6 +12,9 @@ from pathlib import Path
 import tempfile
 import yaml
 import asyncio
+
+pytest.importorskip("luigi")  # 'pipes' extra; skip when luigi is unavailable
+
 import luigi
 from totodev_pub.pytest_tools import very_lazy_test
 

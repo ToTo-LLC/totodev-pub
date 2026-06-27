@@ -108,3 +108,45 @@ print(cache.get((42,)))  # second call uses cache until expiry
 - `totodev_pub.pipes.*` (Luigi paths) -> `pipes`
 
 Detailed rationale and governance policy are documented in `docs/dependency-strategy.md`.
+
+## Testing Profiles
+
+The test suite mirrors the progressive dependency model: optional-feature tests are
+gated so a minimal install never fails at collection time.
+
+### Core lane (minimal install)
+
+```bash
+uv sync --extra dev
+PYTHONPATH=src pytest -m "not pipes and not connectors and not lucidspark and not llm and not git"
+```
+
+This protects the core-install contract. Tests that need an optional stack are
+automatically skipped at collection when their dependency is missing (see
+`tests/conftest.py`), so a plain `PYTHONPATH=src pytest` also runs cleanly in a
+core environment.
+
+### Full lane (all extras)
+
+```bash
+uv sync --extra dev --extra all
+PYTHONPATH=src pytest
+```
+
+This installs every runtime extra and runs the entire suite, exposing real
+regressions across all feature areas.
+
+### How optional-feature gating works
+
+- Optional-feature tests are tagged with markers (`pipes`, `connectors`,
+  `lucidspark`, `llm`, `git`) that map to the extras in `pyproject.toml`.
+- `tests/conftest.py` holds a single data-driven mapping (path -> required
+  importable modules). When a required module is missing, the test is skipped at
+  collection rather than raising `ModuleNotFoundError`.
+- Test modules that import an optional package at module top level also call
+  `pytest.importorskip("<module>")` as a local safeguard, so they skip cleanly
+  even when run directly.
+
+When adding a test that imports an optional stack, follow the same pattern: add a
+rule to `_OPTIONAL_TEST_RULES` in `tests/conftest.py` and guard top-level
+optional imports with `pytest.importorskip(...)`.
