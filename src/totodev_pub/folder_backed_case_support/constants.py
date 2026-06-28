@@ -52,8 +52,32 @@ SIG_CLOSING = "CASE_CLOSING"   # phase-1 close: assets still present
 DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0
 TIMEOUT_KILL_MULTIPLE_OF_WARNING = 2
 
-# In-flight lease keepalive: while a trigger's awaited work runs, a sibling "pulse" task
-# beats the lease every lease_ttl_for(state) / LEASE_PULSE_FRACTION_DIVISOR seconds, so a
-# legitimately long step does not let the lease lapse out from under a live owner. The
-# default of 3 gives two beats before expiry (a missed beat still leaves a margin).
+# ---- Heartbeat-lease timing (fixed, non-overridable by design) ----
+# These three numbers fully describe the lease's timing. They are deliberately NOT exposed as
+# per-case/per-state override seams (YAGNI): one fixed policy is far easier to reason about,
+# and the in-flight pulse already decouples a long single step from the TTL. A later release
+# may add an override mechanism if a real need appears; until then, change them HERE.
+#
+# DEFAULT_LEASE_TTL_SECS is purely a CRASH-RECOVERY WINDOW: how long another owner waits,
+# after this one vanishes (crash / freeze / kill), before treating the folder as abandoned and
+# reclaiming it. It is NOT a knob for "how long a state idles" — a live owner stays alive
+# indefinitely by beating, and keeping an idle case alive is the holder's / CaseManager's job,
+# never a longer TTL. Kept short so a dead owner is reclaimed promptly; a live owner renews it
+# cheaply (one stat + touch) far inside the window, so a short TTL costs almost nothing.
+DEFAULT_LEASE_TTL_SECS = 30.0
+
+# Opportunistic beats (case_advance() pre-step + each transition boundary) are throttled to at
+# most one actual file write this often, so a tight drive loop does not hammer the disk. Must
+# stay well under the TTL so a live-but-quiet owner always re-stamps before expiry.
+LEASE_HEARTBEAT_THROTTLE_SECS = 10.0
+
+# In-flight keepalive cadence: while a trigger's awaited work runs, a sibling "pulse" task
+# beats the lease every DEFAULT_LEASE_TTL_SECS / LEASE_PULSE_FRACTION_DIVISOR seconds, so a
+# legitimately long step never lets the lease lapse out from under a live owner. A divisor of
+# 3 gives two beats before expiry (a single missed beat still leaves a margin).
 LEASE_PULSE_FRACTION_DIVISOR = 3.0
+
+# Fail-fast invariants — checked once at import because the values are fixed. A live owner must
+# get at least two writes in per TTL via BOTH the opportunistic-beat throttle and the pulse.
+assert 0.0 < LEASE_HEARTBEAT_THROTTLE_SECS <= DEFAULT_LEASE_TTL_SECS / 2.0
+assert LEASE_PULSE_FRACTION_DIVISOR >= 2.0

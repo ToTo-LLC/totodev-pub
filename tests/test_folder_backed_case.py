@@ -14,6 +14,8 @@ from totodev_pub.folder_backed_case import (
     CaseTypeMismatchError,
     MissingFsmError,
 )
+import totodev_pub.folder_backed_case as _fbc
+import totodev_pub.folder_backed_case_support.case_machine_factory as _cmf
 from totodev_pub.folder_backed_case_support.case_type_registry import (
     CaseTypeRegistry,
     case_type_registry,
@@ -538,18 +540,23 @@ def test_generate_case_id_auto_bumps_on_same_millisecond(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # In-flight lease keepalive (the _LeaseKeepalive pulse), end-to-end via the case API.
-# Real-time tests with a tiny TTL (~0.3s) so the work outlives the un-pulsed lease window.
+# Real-time tests that shrink the fixed TTL to ~0.3s so the work outlives the un-pulsed window.
 # ---------------------------------------------------------------------------
 
+def _use_short_ttl(monkeypatch, ttl=0.3):
+    """Shrink the (now-fixed) lease TTL for real-time keepalive tests. The TTL is no longer a
+    per-case seam, so patch BOTH module bindings the running code reads: the lease window
+    (folder_backed_case) and the pulse cadence (the factory). Pulse beats ~every ttl / 3."""
+    monkeypatch.setattr(_fbc, "DEFAULT_LEASE_TTL_SECS", ttl)
+    monkeypatch.setattr(_cmf, "DEFAULT_LEASE_TTL_SECS", ttl)
+
+
 class _SlowKeepaliveCase(FolderBackedCase):
-    """Slow work behind both an AUTO (`go`) and a MANUAL (`step`) edge, with a short lease
-    TTL so the keepalive pulse is what keeps the lease from lapsing during the step."""
+    """Slow work behind both an AUTO (`go`) and a MANUAL (`step`) edge. The tests pair this with
+    _use_short_ttl so the keepalive pulse is what keeps the lease from lapsing during the step."""
 
     fsm_state_chains = ["^new--go-->open==step-->done^"]
     sleep_secs: float = 0.0
-
-    def lease_ttl_for(self, state: str) -> float:
-        return 0.3                                  # pulse interval defaults to ~0.1s
 
     async def perform_go(self, tctx):
         if self.sleep_secs:
@@ -560,14 +567,8 @@ class _SlowKeepaliveCase(FolderBackedCase):
             await asyncio.sleep(self.sleep_secs)
 
 
-def test_lease_pulse_interval_for_defaults_to_third_of_ttl(tmp_path):
-    with SimpleCase.create_case_in_folder(tmp_path / "iv", case_id="iv-1") as case:
-        assert case.lease_pulse_interval_for("new") == pytest.approx(
-            case.lease_ttl_for("new") / 3.0
-        )
-
-
-def test_case_advance_keeps_lease_alive_during_slow_auto_step(tmp_path):
+def test_case_advance_keeps_lease_alive_during_slow_auto_step(tmp_path, monkeypatch):
+    _use_short_ttl(monkeypatch)
     async def scenario():
         with _SlowKeepaliveCase.create_case_in_folder(
             tmp_path / "adv", case_id="adv-1"
@@ -585,7 +586,8 @@ def test_case_advance_keeps_lease_alive_during_slow_auto_step(tmp_path):
     asyncio.run(scenario())
 
 
-def test_case_advance_raises_ownership_lost_not_folded(tmp_path):
+def test_case_advance_raises_ownership_lost_not_folded(tmp_path, monkeypatch):
+    _use_short_ttl(monkeypatch)
     async def scenario():
         with _SlowKeepaliveCase.create_case_in_folder(
             tmp_path / "lost", case_id="lost-1"
@@ -603,7 +605,8 @@ def test_case_advance_raises_ownership_lost_not_folded(tmp_path):
     asyncio.run(scenario())
 
 
-def test_manual_trigger_keeps_lease_alive_during_slow_work(tmp_path):
+def test_manual_trigger_keeps_lease_alive_during_slow_work(tmp_path, monkeypatch):
+    _use_short_ttl(monkeypatch)
     async def scenario():
         with _SlowKeepaliveCase.create_case_in_folder(
             tmp_path / "man", case_id="man-1"

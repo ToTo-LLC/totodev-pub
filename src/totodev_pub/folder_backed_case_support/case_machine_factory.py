@@ -22,6 +22,8 @@ from transitions.extensions.asyncio import AsyncMachine
 from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
 from totodev_pub.folder_backed_case_support.constants import (
     TIMEOUT_KILL_MULTIPLE_OF_WARNING,
+    DEFAULT_LEASE_TTL_SECS,
+    LEASE_PULSE_FRACTION_DIVISOR,
 )
 from totodev_pub.folder_backed_case_support.exceptions import (
     OwnershipLostError, TriggerTimeout,
@@ -61,19 +63,19 @@ class _LeaseKeepalive:
     wrapping `case_advance()` in `asyncio.wait_for`) is left untouched and propagates.
     """
 
-    def __init__(self, case: "FolderBackedCase", state: str) -> None:
+    def __init__(self, case: "FolderBackedCase") -> None:
         self._case = case
-        self._interval = max(0.0, case.lease_pulse_interval_for(state))
+        # Fixed cadence derived from the lease TTL (constants.py): two beats before expiry.
+        self._interval = DEFAULT_LEASE_TTL_SECS / LEASE_PULSE_FRACTION_DIVISOR
         self._work_task: asyncio.Task | None = None
         self._pulse: asyncio.Task | None = None
         self._lost: OwnershipLostError | None = None
 
     async def __aenter__(self) -> "_LeaseKeepalive":
         # The work runs in the task entering this context; the pulse cancels THIS task if it
-        # loses ownership. interval <= 0 disables the pulse (see lease_pulse_interval_for).
+        # loses ownership.
         self._work_task = asyncio.current_task()
-        if self._interval > 0:
-            self._pulse = asyncio.create_task(self._run())
+        self._pulse = asyncio.create_task(self._run())
         return self
 
     async def _run(self) -> None:
@@ -186,16 +188,16 @@ class _CaseMachineFactory:
             kill = warn * TIMEOUT_KILL_MULTIPLE_OF_WARNING
             # Defense-in-depth: if the work could run longer than the lease lives, the pulse
             # normally covers it — but a step that BLOCKS the event loop starves the pulse and
-            # the lease can still lapse. Warn once per state so a misconfigured TTL is visible.
-            ttl = case.lease_ttl_for(state)
-            if kill > ttl and state not in ttl_warned_states:
+            # the lease can still lapse. Warn once per state so an over-long trigger budget
+            # (its `~<dur>` warning, doubled to the kill ceiling) is visible against the TTL.
+            if kill > DEFAULT_LEASE_TTL_SECS and state not in ttl_warned_states:
                 ttl_warned_states.add(state)
                 logger.warning(
                     "Case %s: trigger %r in state %r has a kill ceiling (%.1fs) above the "
                     "lease TTL (%.1fs). The in-flight keepalive will refresh the lease for "
-                    "well-behaved async work, but verify lease_ttl_for/trigger_warn_secs — a "
-                    "step that blocks the event loop could still let the lease lapse.",
-                    case.case_id, trigger, state, kill, ttl,
+                    "well-behaved async work, but a step that blocks the event loop could "
+                    "still let the lease lapse; consider a shorter trigger_warn_secs.",
+                    case.case_id, trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
                 )
             start = time.monotonic()
             completed = False
@@ -203,7 +205,7 @@ class _CaseMachineFactory:
                 # The keepalive beats the lease for the duration of this (possibly long but
                 # kill-bounded) awaited step, so a slow step does not lapse the lease. It
                 # only spans the work — guards already ran and passed before `before` fires.
-                async with _LeaseKeepalive(case, case.case_state):
+                async with _LeaseKeepalive(case):
                     result = await asyncio.wait_for(_invoke(tctx), kill)
                 completed = True
                 return result

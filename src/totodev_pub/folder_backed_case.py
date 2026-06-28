@@ -77,7 +77,8 @@ from pathlib import Path
 from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME, LEASE_NAME, EVENTS_DIR_NAME, ASSETS_DIR_NAME, KEEP_LIST_NAME,
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
-    DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS, LEASE_PULSE_FRACTION_DIVISOR,
+    DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
+    DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
     EV_CLOSED, EV_ALERT, SIG_CLOSING,
 )
 from totodev_pub.folder_backed_case_support.helpers import _utcnow, _new_time_slug
@@ -233,8 +234,9 @@ class FolderBackedCase(ABC):
         knobs for the peculiar use case: the rarely-needed DEFINE-TIME
         seams (`_record_cls` for a custom record schema, `compile_fsm()`
         for full manual FSM control), recovery hooks, `generate_case_id()`,
-        lease/heartbeat tuning, timeout budgets, archive grouping, the
-        `case_run_blocking()` escape hatch, and `case_reclassify_to()`.
+        timeout budgets, archive grouping, the `case_run_blocking()` escape
+        hatch, and `case_reclassify_to()`. (Lease/heartbeat timing is a fixed
+        policy in constants.py, not a per-case seam.)
       * SECTION 4 — Internal mechanics. Construction/binding, the FSM
         state-change and exception choke points, record flush, the
         pipeline candidate finder, and other private machinery. Read
@@ -762,38 +764,24 @@ class FolderBackedCase(ABC):
         cls._last_generated_case_id_ms = mint_ms
         return _new_time_slug(mint_ms)
 
-    def lease_ttl_for(self, state: str) -> float:
-        """Seconds the lease stays valid after a beat, for `state`. Override per state
-        for long-idle windows. MUST comfortably exceed the gap between case_heartbeat() calls
-        (i.e. the driver's case_advance() poll cadence + slack), or a live-but-quiet owner can
-        be reclaimed."""
-        return 300.0
-
-    def lease_pulse_interval_for(self, state: str) -> float:
-        """Seconds between in-flight lease beats while a trigger's awaited work
-        (`perform_`/`before`) runs, for `state`.
-
-        Maintainer notes:
-          The keepalive pulse (see _LeaseKeepalive) beats this often so a long, AWAITED step
-          does not let the lease lapse out from under a live owner. The default is a third of
-          `lease_ttl_for(state)` — two beats before expiry, so a single missed beat still
-          leaves a margin. MUST stay comfortably BELOW `lease_ttl_for(state)`. Return 0 (or a
-          non-positive value) to DISABLE the pulse for this state (the pre-step beat then
-          remains the only protection, so the lease can lapse during a step longer than the
-          TTL — opt out only when no step in this state can outlive the TTL)."""
-        return self.lease_ttl_for(state) / LEASE_PULSE_FRACTION_DIVISOR
+    # Lease timing (TTL, beat throttle, in-flight pulse cadence) is a single FIXED policy in
+    # constants.py (DEFAULT_LEASE_TTL_SECS et al.), deliberately not a per-case/per-state seam.
+    # See "single-owner protection" in SECTION 4 for the crash-recovery-window rationale and
+    # the idle-ownership contract.
 
     def case_heartbeat(
         self,
         *,
-        min_update_secs: float = 15.0,
+        min_update_secs: float = LEASE_HEARTBEAT_THROTTLE_SECS,
         validate_ownership: bool = True,
     ) -> None:
         """Extend our lease. Raises `OwnershipLostError` when ownership is displaced.
 
         Quick use:
           The mainstream driver does NOT need to call this — case_advance() beats the lease
-          for you. Call it directly only in a custom drive loop that dwells without advancing."""
+          for you. Call it directly only when you HOLD a bound case without advancing it (a
+          custom dwell loop, or an idle holder choosing to keep the folder spoken-for rather
+          than detaching — see the idle-ownership contract in SECTION 4)."""
         self._check_active()
         try:
             self._lease.heartbeat(
@@ -900,8 +888,8 @@ class FolderBackedCase(ABC):
     # never be shadowed by a subclass. The binding check (validate_object_compatibility,
     # passed these via _bind_existing_case_dir) fails fast if a subclass redefines one in
     # its body, so descendants are free to use short names everywhere else. Deliberately
-    # excludes the override SEAMS (compile_fsm, generate_case_id, on_closing, lease_ttl_for,
-    # case_dwell_secs, ...) — those are MEANT to be overridden — and the hook-name conventions
+    # excludes the override SEAMS (compile_fsm, generate_case_id, on_closing, case_dwell_secs,
+    # ...) — those are MEANT to be overridden — and the hook-name conventions
     # (perform_/before_/after_/on_enter_/on_exit_/guard_), which belong to the subclass.
     _SEALED_MEMBER_NAMES: frozenset[str] = frozenset({
         "case_state", "case_folder", "case_assets", "case_nickname", "case_external_key",
@@ -995,7 +983,6 @@ class FolderBackedCase(ABC):
                 "Use create_case_in_folder() to incept a new case, or "
                 "case_type_registry.rehydrate(folder) to open an existing one by type."
             )
-        # Initialized after state load so TTL can depend on current state.
         self._lease: HeartbeatLease | None = None
         # without_lock=True: the case lease is our single-owner mechanism; the mixin's file
         # lock is redundant for reads and would block re-opens. save() still acquires its
@@ -1026,10 +1013,11 @@ class FolderBackedCase(ABC):
         self._state_entered_at: datetime.datetime = (
             self._as_utc(self._journal.last_enter_state_mtime()) or self._record.created
         )
-        # Acquire after state is known because TTL can be state-dependent.
+        # The lease TTL is a single fixed crash-recovery window (see constants.py); the
+        # provider is a constant function, not a per-state policy.
         self._lease = HeartbeatLease(
             self._folder / LEASE_NAME,
-            ttl_provider=lambda: self.lease_ttl_for(self.case_state),
+            ttl_provider=lambda: DEFAULT_LEASE_TTL_SECS,
         )
         try:
             self._lease.acquire()
@@ -1204,8 +1192,34 @@ class FolderBackedCase(ABC):
             self._record.save()
 
     # ---- single-owner protection: the heartbeat lease (mechanics) ----
-    # Lease mechanics live in HeartbeatLease; the domain-flavored facade (heartbeat,
-    # lease_ttl_for) is an override seam in SECTION 3, and case_detach() is in SECTION 2.
+    # Lease mechanics live in HeartbeatLease; the domain-flavored facade (case_heartbeat) is in
+    # SECTION 3 and case_detach() is in SECTION 2.
+    #
+    # What the TTL is for (the mental model). The lease TTL is ONLY a crash-recovery window:
+    # how long another owner waits, after this one vanishes, before reclaiming the folder. It
+    # is fixed and short (constants.py) — a live owner never trips it, because it keeps the
+    # lease warm while it WORKS:
+    #   * case_advance() beats once before each step (throttled);
+    #   * _on_state_changed beats at every transition boundary;
+    #   * the in-flight _LeaseKeepalive pulse beats throughout a slow awaited step.
+    # The TTL is therefore NOT a knob for tolerating idleness; do not lengthen it to "hold"
+    # an idle case (that just slows crash recovery). A longer-running OWNER is fine; a longer
+    # IDLE window is the holder's problem, per the contract below.
+    #
+    # Idle-ownership contract (the blind spot a holder MUST resolve). A bound case beats the
+    # lease only while it is actively advancing. While you HOLD a case but are not advancing it
+    # (e.g. a web app parked on human input), the lease decays toward expiry. Choose one:
+    #   (A) DETACH and re-open  — release now (case_detach()), reconstruct on the next
+    #       interaction. The folder is fully self-contained, so this is cheap and correct, and
+    #       a conflicting re-open surfaces as CaseAlreadyOpenError (the right answer for "two
+    #       holders raced"). This is the recommended default for long idle gaps.
+    #   (B) KEEP IT WARM yourself — call case_heartbeat() on a timer to deliberately keep the
+    #       folder spoken-for across the idle window.
+    #   (C) HAND IT TO A MANAGER — let the envisioned CaseManager own one keepalive/reclaim
+    #       sweep across many cases (the right home for any idle auto-pulse: a per-instance
+    #       daemon thread would conflict with the single-owner model AND keep a frozen owner's
+    #       lease alive, defeating crash detection). NOTE: HeartbeatLease.handoff() is for a hot
+    #       transfer WITHIN one TTL, not for long idle — it does not extend the window.
 
     def _check_active(self) -> None:
         if self._lease is None or not self._lease.is_active():
