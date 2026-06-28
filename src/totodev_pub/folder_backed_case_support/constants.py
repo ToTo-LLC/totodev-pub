@@ -51,3 +51,9 @@ SIG_CLOSING = "CASE_CLOSING"   # phase-1 close: assets still present
 # Trigger timeout policy shared by FolderBackedCase and _CaseMachineFactory.
 DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0
 TIMEOUT_KILL_MULTIPLE_OF_WARNING = 2
+
+# In-flight lease keepalive: while a trigger's awaited work runs, a sibling "pulse" task
+# beats the lease every lease_ttl_for(state) / LEASE_PULSE_FRACTION_DIVISOR seconds, so a
+# legitimately long step does not let the lease lapse out from under a live owner. The
+# default of 3 gives two beats before expiry (a missed beat still leaves a margin).
+LEASE_PULSE_FRACTION_DIVISOR = 3.0

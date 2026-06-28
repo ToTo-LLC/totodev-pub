@@ -77,7 +77,8 @@ from pathlib import Path
 from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME, LEASE_NAME, EVENTS_DIR_NAME, ASSETS_DIR_NAME, KEEP_LIST_NAME,
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
-    DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS, EV_CLOSED, EV_ALERT, SIG_CLOSING,
+    DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS, LEASE_PULSE_FRACTION_DIVISOR,
+    EV_CLOSED, EV_ALERT, SIG_CLOSING,
 )
 from totodev_pub.folder_backed_case_support.helpers import _utcnow, _new_time_slug
 from totodev_pub.folder_backed_case_support.exceptions import (
@@ -283,6 +284,14 @@ class FolderBackedCase(ABC):
     #   (`async def perform_x(self, tctx)`); see "Creating Hook Functions" in the class
     #   docstring for what `tctx` is and how it is populated.
     #
+    # WELL-BEHAVED ASYNC: hooks must yield the event loop at reasonable intervals and offload
+    #   blocking/CPU-bound work via case_run_blocking() (or their own thread/executor). A hook
+    #   that monopolizes the loop starves the other cases a driver is advancing AND the lease
+    #   keepalive (see case_advance's Contract note). The keepalive beats the lease only for
+    #   the duration of the trigger's WORK slot (perform_/before), which runs AFTER guards
+    #   pass; guards and on_enter/on_exit/after are expected to be quick. If a guard must run
+    #   pathologically long (e.g. it awaits something), it owns its own self.case_heartbeat().
+    #
     # See the class docstring for the full rules. The remaining overridable hooks
     # (on_closing, on_transition_exception, etc.) live in SECTION 3.
     #
@@ -433,7 +442,19 @@ class FolderBackedCase(ABC):
               synthetic AutoAdvanceBlocked is carried in result.exceptions (one CASE_ALERT is
               logged on first detection per dwell). Deterministic: same state, same block.
           Still RAISES the misuse guard DetachedCaseError (acting on a detached husk is a
-          programming error, not a flow condition)."""
+          programming error, not a flow condition). Also RAISES OwnershipLostError (NOT folded
+          into the result) if a beat — the pre-step one below or the in-flight keepalive —
+          finds the folder reclaimed by another owner: a fatal invariant breach, not a step
+          outcome.
+
+        Contract (well-behaved async hooks):
+          The lease keepalive — and cooperative scheduling generally — depends on a trigger's
+          work actually YIELDING the event loop. Hooks MUST be well-behaved async: await at
+          reasonable intervals and offload blocking/CPU-bound work via case_run_blocking()
+          (or their own executor/thread). A hook that monopolizes the loop starves every other
+          case sharing it AND its own heartbeat, so the lease can lapse despite the keepalive.
+          The keepalive protects only the trigger's WORK slot (perform_/before); guards and
+          on_enter/on_exit/after are expected to be light (see the hook conventions)."""
         initial = self.case_state
         if self.case_is_closed:         # terminal short-circuits first (a closed case stays
             return AdvanceResult(initial, self.case_state)   # bound; lease cleared only by case_detach())
@@ -442,7 +463,8 @@ class FolderBackedCase(ABC):
         # no-op if < min_update_secs since our last beat). This covers the long-dwelling
         # case that keeps no-opping and never transitions, which _on_state_changed's
         # per-transition beat would otherwise leave to expire. Done BEFORE the step so the
-        # lease is fresh for the duration of a (possibly slow, awaited) transition.
+        # lease is fresh going in; the in-flight keepalive (the _LeaseKeepalive pulse in the
+        # perform wrapper) then keeps beating for the duration of a slow, awaited step.
         self.case_heartbeat()
         candidates = self._forward_candidates(self.case_state)
         exceptions: list[Exception] = []
@@ -452,6 +474,9 @@ class FolderBackedCase(ABC):
                 # without firing the after-hook), so we fall through to the next.
                 if await getattr(self, trigger)():
                     return AdvanceResult(initial, self.case_state, trigger=trigger)
+            except OwnershipLostError:  # FATAL: the keepalive (or pre-step beat) found the
+                raise                   # folder reclaimed mid-step — not a flow condition to
+                                        # fold; surface it exactly like the line-446 beat does.
             except Exception as err:    # absorbed: reported as data, not raised at driver
                 exceptions.append(err)
                 return AdvanceResult(initial, self.case_state, trigger=trigger,
@@ -743,6 +768,20 @@ class FolderBackedCase(ABC):
         (i.e. the driver's case_advance() poll cadence + slack), or a live-but-quiet owner can
         be reclaimed."""
         return 300.0
+
+    def lease_pulse_interval_for(self, state: str) -> float:
+        """Seconds between in-flight lease beats while a trigger's awaited work
+        (`perform_`/`before`) runs, for `state`.
+
+        Maintainer notes:
+          The keepalive pulse (see _LeaseKeepalive) beats this often so a long, AWAITED step
+          does not let the lease lapse out from under a live owner. The default is a third of
+          `lease_ttl_for(state)` — two beats before expiry, so a single missed beat still
+          leaves a margin. MUST stay comfortably BELOW `lease_ttl_for(state)`. Return 0 (or a
+          non-positive value) to DISABLE the pulse for this state (the pre-step beat then
+          remains the only protection, so the lease can lapse during a step longer than the
+          TTL — opt out only when no step in this state can outlive the TTL)."""
+        return self.lease_ttl_for(state) / LEASE_PULSE_FRACTION_DIVISOR
 
     def case_heartbeat(
         self,
@@ -1088,6 +1127,11 @@ class FolderBackedCase(ABC):
           5. RE-RAISE the original exception. case_advance() catches it and folds it into an
              AdvanceResult; a direct caller gets the raise (fail-fast preserved)."""
         err = event.error
+        # Lost the folder to another owner mid-step (raised by the keepalive pulse): a fatal
+        # invariant breach, not a transition failure. Surface it WITHOUT logging a fail or
+        # counting it toward @FAIL — the displaced owner must simply stop operating.
+        if isinstance(err, OwnershipLostError):
+            raise err
         trigger = event.event.name if event.event is not None else None
         trans = event.transition
         src = trans.source if trans is not None else self.case_state

@@ -2,6 +2,8 @@
 class is still evolving — expand once the API stabilises."""
 
 import asyncio
+import os
+import time
 import pytest
 from pathlib import Path
 
@@ -18,8 +20,11 @@ from totodev_pub.folder_backed_case_support.case_type_registry import (
 )
 from totodev_pub.folder_backed_case_support.exceptions import (
     FsmBindingError,
+    OwnershipLostError,
     UnregisteredCaseTypeError,
 )
+from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
+from totodev_pub.folder_backed_case_support.heartbeat_lease import HeartbeatLease
 
 
 # ---------------------------------------------------------------------------
@@ -529,3 +534,90 @@ def test_generate_case_id_auto_bumps_on_same_millisecond(monkeypatch):
     second = SimpleCase.generate_case_id()
     assert second != first
     assert int(second, 36) == int(first, 36) + 1
+
+
+# ---------------------------------------------------------------------------
+# In-flight lease keepalive (the _LeaseKeepalive pulse), end-to-end via the case API.
+# Real-time tests with a tiny TTL (~0.3s) so the work outlives the un-pulsed lease window.
+# ---------------------------------------------------------------------------
+
+class _SlowKeepaliveCase(FolderBackedCase):
+    """Slow work behind both an AUTO (`go`) and a MANUAL (`step`) edge, with a short lease
+    TTL so the keepalive pulse is what keeps the lease from lapsing during the step."""
+
+    fsm_state_chains = ["^new--go-->open==step-->done^"]
+    sleep_secs: float = 0.0
+
+    def lease_ttl_for(self, state: str) -> float:
+        return 0.3                                  # pulse interval defaults to ~0.1s
+
+    async def perform_go(self, tctx):
+        if self.sleep_secs:
+            await asyncio.sleep(self.sleep_secs)
+
+    async def perform_step(self, tctx):
+        if self.sleep_secs:
+            await asyncio.sleep(self.sleep_secs)
+
+
+def test_lease_pulse_interval_for_defaults_to_third_of_ttl(tmp_path):
+    with SimpleCase.create_case_in_folder(tmp_path / "iv", case_id="iv-1") as case:
+        assert case.lease_pulse_interval_for("new") == pytest.approx(
+            case.lease_ttl_for("new") / 3.0
+        )
+
+
+def test_case_advance_keeps_lease_alive_during_slow_auto_step(tmp_path):
+    async def scenario():
+        with _SlowKeepaliveCase.create_case_in_folder(
+            tmp_path / "adv", case_id="adv-1"
+        ) as case:
+            case.sleep_secs = 0.8                   # outlives the 0.3s TTL
+            lease_path = case.case_folder / LEASE_NAME
+            task = asyncio.create_task(case.case_advance())
+            await asyncio.sleep(0.5)                # past one un-pulsed TTL window
+            assert HeartbeatLease.is_expired(lease_path) is False
+            result = await task
+            assert result.progressed
+            assert case.case_state == "open"
+            assert HeartbeatLease.is_expired(lease_path) is False
+
+    asyncio.run(scenario())
+
+
+def test_case_advance_raises_ownership_lost_not_folded(tmp_path):
+    async def scenario():
+        with _SlowKeepaliveCase.create_case_in_folder(
+            tmp_path / "lost", case_id="lost-1"
+        ) as case:
+            case.sleep_secs = 1.0
+            lease_path = case.case_folder / LEASE_NAME
+            task = asyncio.create_task(case.case_advance())
+            await asyncio.sleep(0.15)              # let the first pulse re-stamp our token
+            foreign = time.time() + 999            # another owner overwrites the lease
+            os.utime(lease_path, (foreign, foreign))
+            # Surfaced as a raise, NOT folded into AdvanceResult.exceptions.
+            with pytest.raises(OwnershipLostError):
+                await task
+
+    asyncio.run(scenario())
+
+
+def test_manual_trigger_keeps_lease_alive_during_slow_work(tmp_path):
+    async def scenario():
+        with _SlowKeepaliveCase.create_case_in_folder(
+            tmp_path / "man", case_id="man-1"
+        ) as case:
+            # Advance onto `open` first (fast), then fire the slow MANUAL edge directly.
+            case.sleep_secs = 0.0
+            await case.case_advance()
+            assert case.case_state == "open"
+            case.sleep_secs = 0.8
+            lease_path = case.case_folder / LEASE_NAME
+            task = asyncio.create_task(case.step())
+            await asyncio.sleep(0.5)
+            assert HeartbeatLease.is_expired(lease_path) is False
+            await task
+            assert case.case_state == "done"
+
+    asyncio.run(scenario())
