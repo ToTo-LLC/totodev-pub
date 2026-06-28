@@ -9,13 +9,17 @@ from totodev_pub.folder_backed_case import (
     FolderBackedCase,
     CaseRecord,
     CaseAlreadyOpenError,
-    UnregisteredCaseTypeError,
     CaseTypeMismatchError,
     MissingFsmError,
+)
+from totodev_pub.folder_backed_case_support.case_type_registry import (
     CaseTypeRegistry,
     case_type_registry,
 )
-from totodev_pub.folder_backed_case_support.exceptions import FsmBindingError
+from totodev_pub.folder_backed_case_support.exceptions import (
+    FsmBindingError,
+    UnregisteredCaseTypeError,
+)
 
 
 # ---------------------------------------------------------------------------

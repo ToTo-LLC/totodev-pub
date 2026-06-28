@@ -1,4 +1,4 @@
-"""Standalone tests for CaseMachineFactory — instance-time FSM binding.
+"""Standalone tests for _CaseMachineFactory — instance-time FSM binding.
 
 These exercise the factory directly against a real (tmp-folder) FolderBackedCase, proving
 it owns machine construction and the two parser-left conventions: compiling `@FACT<op>N`
@@ -13,7 +13,7 @@ import pytest
 from transitions.extensions.asyncio import AsyncMachine
 
 from totodev_pub.folder_backed_case import FolderBackedCase
-from totodev_pub.folder_backed_case_support.case_machine_factory import CaseMachineFactory
+from totodev_pub.folder_backed_case_support.case_machine_factory import _CaseMachineFactory
 from totodev_pub.folder_backed_case_support.exceptions import TriggerTimeout
 from totodev_pub.folder_backed_case_support.constants import EV_TRIGGER_SLOW
 
@@ -44,8 +44,8 @@ def _case(tmp_path, name="c"):
     return _FactoryCase.create_case_in_folder(tmp_path / name, case_id=name)
 
 
-def _factory(case) -> CaseMachineFactory:
-    return CaseMachineFactory(case, case._fsm, case._journal)
+def _factory(case) -> _CaseMachineFactory:
+    return _CaseMachineFactory(case, case._fsm, case._journal)
 
 
 def _slow_events(case) -> list:

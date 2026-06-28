@@ -22,7 +22,12 @@ StateChainParser    — authoritative source for the state-chains DSL: parser/co
                       validation logic used by FolderBackedCase.compile_fsm().
 
 The tightly-coupled supporting classes live in the folder_backed_case_support
-package and are re-exported here for convenience and backward compatibility.
+package and are re-exported here for convenience. This facade exposes only the
+case's OWN surface — what a case is composed of, returns, and raises. Layers that
+sit ABOVE the individual case are NOT re-exported and must be imported from their
+own modules: name-driven resolution lives in CaseTypeRegistry / case_type_registry
+(folder_backed_case_support.case_type_registry), and the case-driving/scheduling
+seam lives in CasePoolDriver (folder_backed_case_support.case_pool_driver).
 
 Quick start
 -----------
@@ -45,7 +50,7 @@ Quick start
         # Functions" in the class docstring for what `tctx` is and how it is populated.
      
 
-    from totodev_pub.folder_backed_case import case_type_registry
+    from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
     case_type_registry.register_case_types(TicketCase)
 
     case = TicketCase.create_case_in_folder(Path("/data/cases/t-001"), case_id="t-001")
@@ -77,7 +82,7 @@ from totodev_pub.folder_backed_case_support.constants import (
 from totodev_pub.folder_backed_case_support.helpers import _utcnow, _new_time_slug
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
-    UnregisteredCaseTypeError, CaseTypeMismatchError, RecordTypeMismatchError,
+    CaseTypeMismatchError, RecordTypeMismatchError,
     IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
     AutoAdvanceBlocked, TriggerTimeout,)
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
@@ -85,24 +90,20 @@ from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEve
 from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
-from totodev_pub.folder_backed_case_support.case_pool_driver import CasePoolDriver
-from totodev_pub.folder_backed_case_support.case_type_registry import (
-    CaseTypeRegistry, case_type_registry,)
 from totodev_pub.folder_backed_case_support.heartbeat_lease import (
     HeartbeatLease, LeaseAlreadyHeldError, LeaseOwnershipLostError,)
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser, FsmChainSpec,)
-from totodev_pub.folder_backed_case_support.case_machine_factory import CaseMachineFactory
+from totodev_pub.folder_backed_case_support.case_machine_factory import _CaseMachineFactory
 
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "FolderBackedCase", "CaseTypeRegistry", "case_type_registry", "HeartbeatLease",
+    "FolderBackedCase", "HeartbeatLease",
     "CaseRecord", "CaseEventLogReader", "CaseJournal", "CaseAssets", "AdvanceResult",
-    "CasePoolDriver",
     "StateChainParser", "FsmChainSpec", "CaseAlreadyOpenError", "OwnershipLostError",
-    "DetachedCaseError", "UnregisteredCaseTypeError", "CaseTypeMismatchError",
+    "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
     "RECORD_NAME", "LEASE_NAME", "EVENTS_DIR_NAME", "ASSETS_DIR_NAME", "KEEP_LIST_NAME",
@@ -526,7 +527,7 @@ class FolderBackedCase(ABC):
         case).
 
         It is ALSO an override SEAM: a subclass may override this property (e.g. to fake the
-        clock in tests), and the CaseMachineFactory reads it back for the `@DWELL` guard."""
+        clock in tests), and the _CaseMachineFactory reads it back for the `@DWELL` guard."""
         return (_utcnow() - self._state_entered_at).total_seconds()
 
     # ---- assets (playground + retention), grouped on CaseAssets ----
@@ -995,8 +996,8 @@ class FolderBackedCase(ABC):
             self._lease.acquire()
         except LeaseAlreadyHeldError as e:
             raise CaseAlreadyOpenError(self._folder, expires_in=e.expires_in) from e
-        # Instance-time machine binding is delegated to CaseMachineFactory.
-        self._machine = CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
+        # Instance-time machine binding is delegated to _CaseMachineFactory.
+        self._machine = _CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
 
     @staticmethod
     def _as_utc(dt: datetime.datetime | None) -> datetime.datetime | None:
@@ -1014,7 +1015,7 @@ class FolderBackedCase(ABC):
             fn(self, event_name, info)
 
     # ---- FSM attachment via transitions (async-first composition pattern) ----
-    # Machine construction + callback wiring live in CaseMachineFactory; the case keeps
+    # Machine construction + callback wiring live in _CaseMachineFactory; the case keeps
     # the override seams the factory reads back (trigger_warn_secs, case_dwell_secs) and the
     # named lifecycle callbacks the machine binds (_on_state_changed, _on_fsm_exception).
 

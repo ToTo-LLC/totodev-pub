@@ -7,7 +7,8 @@ This is intentionally NOT part of the shipped library. Driving a single case to
 its terminal state (seizing a worker until one case finishes) is an anti-pattern
 for the framework's intended many-cases / round-robin deployment, so it lives
 here purely as a testing convenience. Production driving is a scheduler concern
-that belongs to a driver layer (see totodev_pub.folder_backed_case.CasePoolDriver),
+that belongs to a driver layer
+(see totodev_pub.folder_backed_case_support.case_pool_driver.CasePoolDriver),
 not to the case.
 """
 

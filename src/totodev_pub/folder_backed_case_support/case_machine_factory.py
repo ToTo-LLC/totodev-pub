@@ -35,8 +35,11 @@ if TYPE_CHECKING:
 # functions. Equality is intentionally absent (the DSL forbids ==/!=).
 _FACT_OPS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
 
-class CaseMachineFactory:
-    """Builds an AsyncMachine from a case's compiled `_fsm` spec."""
+class _CaseMachineFactory:
+    """Builds an AsyncMachine from a case's compiled `_fsm` spec.
+
+    Internal by convention (leading underscore): not part of any public surface and
+    not re-exported from the support package. Don't depend on or use it directly."""
 
     def __init__(
         self, case: "FolderBackedCase", fsm: FsmChainSpec, journal: CaseJournal
