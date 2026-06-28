@@ -63,47 +63,47 @@ class ReclassTarget(FolderBackedCase):
 
 def test_create_and_basic_properties(tmp_path):
     folder = tmp_path / "case-001"
-    case = SimpleCase.create_in_folder(folder, case_id="c-001")
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-001")
     try:
         assert case.case_id == "c-001"
-        assert case.state == "new"
-        assert case.is_open
-        assert not case.is_closed
+        assert case.case_state == "new"
+        assert case.case_is_open
+        assert not case.case_is_closed
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_context_manager_releases_lease(tmp_path):
     folder = tmp_path / "case-002"
-    with SimpleCase.create_in_folder(folder, case_id="c-002") as case:
-        assert case.is_open
+    with SimpleCase.create_case_in_folder(folder, case_id="c-002") as case:
+        assert case.case_is_open
     # Lease file should be gone after the with-block exits
     assert not (folder / ".case.lease").exists()
 
 
 def test_second_open_raises(tmp_path):
     folder = tmp_path / "case-003"
-    first = SimpleCase.create_in_folder(folder)
+    first = SimpleCase.create_case_in_folder(folder)
     try:
         with pytest.raises(CaseAlreadyOpenError):
             SimpleCase(folder)
     finally:
-        first.detach()
+        first.case_detach()
 
 
 def test_fsm_transitions(tmp_path):
     folder = tmp_path / "case-004"
-    with SimpleCase.create_in_folder(folder) as case:
+    with SimpleCase.create_case_in_folder(folder) as case:
         asyncio.run(case.begin())
-        assert case.state == "open"
+        assert case.case_state == "open"
         asyncio.run(case.finish())
-        assert case.state == "done"
-        assert case.is_closed
+        assert case.case_state == "done"
+        assert case.case_is_closed
 
 
 def test_peek_record_and_events(tmp_path):
     folder = tmp_path / "case-005"
-    with SimpleCase.create_in_folder(folder, case_id="c-005") as case:
+    with SimpleCase.create_case_in_folder(folder, case_id="c-005") as case:
         asyncio.run(case.begin())
 
     record = FolderBackedCase.peek_case_record(folder)
@@ -117,7 +117,7 @@ def test_peek_record_and_events(tmp_path):
 
 def test_rehydrate_requires_registration(tmp_path):
     folder = tmp_path / "case-006"
-    with SimpleCase.create_in_folder(folder):
+    with SimpleCase.create_case_in_folder(folder):
         pass
     with pytest.raises(UnregisteredCaseTypeError):
         case_type_registry.rehydrate(folder)
@@ -126,11 +126,11 @@ def test_rehydrate_requires_registration(tmp_path):
 def test_rehydrate_with_registration(tmp_path):
     case_type_registry.register_case_types(SimpleCase)
     folder = tmp_path / "case-007"
-    with SimpleCase.create_in_folder(folder):
+    with SimpleCase.create_case_in_folder(folder):
         pass
     with case_type_registry.rehydrate(folder) as case:
         assert isinstance(case, SimpleCase)
-        assert case.state == "new"
+        assert case.case_state == "new"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def test_resolve_case_type_none_unknown_and_override():
 
 def test_peek_case_record_typed_vs_fallback(tmp_path):
     folder = tmp_path / "case-typed"
-    with TypedCase.create_in_folder(folder, case_id="t-typed"):
+    with TypedCase.create_case_in_folder(folder, case_id="t-typed"):
         pass
 
     # Caller supplies the case class -> its _record_cls -> the CORRECT typed record.
@@ -189,7 +189,7 @@ def test_peek_case_record_typed_vs_fallback(tmp_path):
 
 def test_peek_case_record_explicit_record_cls(tmp_path):
     folder = tmp_path / "case-explicit"
-    with SimpleCase.create_in_folder(folder, case_id="s-explicit"):
+    with SimpleCase.create_case_in_folder(folder, case_id="s-explicit"):
         pass
     # record_cls given -> used directly (and wins over case_cls).
     rec = FolderBackedCase.peek_case_record(folder, record_cls=TypedRecord, case_cls=SimpleCase)
@@ -199,7 +199,7 @@ def test_peek_case_record_explicit_record_cls(tmp_path):
 
 def test_peek_case_record_is_static_and_registry_free(tmp_path):
     folder = tmp_path / "case-static"
-    with SimpleCase.create_in_folder(folder, case_id="s-static"):
+    with SimpleCase.create_case_in_folder(folder, case_id="s-static"):
         pass
     # A static on FolderBackedCase: callable with no instance or registry in play.
     rec = FolderBackedCase.peek_case_record(folder)
@@ -209,7 +209,7 @@ def test_peek_case_record_is_static_and_registry_free(tmp_path):
 
 def test_peek_class_returns_name_registry_free(tmp_path):
     folder = tmp_path / "case-name"
-    with SimpleCase.create_in_folder(folder, case_id="n-1"):
+    with SimpleCase.create_case_in_folder(folder, case_id="n-1"):
         pass
     # Default: the bare type NAME, sniffed from disk; no registration required.
     assert case_type_registry.peek_class(folder) == "SimpleCase"
@@ -217,7 +217,7 @@ def test_peek_class_returns_name_registry_free(tmp_path):
 
 def test_peek_class_resolves_registered_class_object(tmp_path):
     folder = tmp_path / "case-obj"
-    with SimpleCase.create_in_folder(folder):
+    with SimpleCase.create_case_in_folder(folder):
         pass
     cls = case_type_registry.peek_class(
         folder, return_class_object=True, registry={"SimpleCase": SimpleCase}
@@ -227,7 +227,7 @@ def test_peek_class_resolves_registered_class_object(tmp_path):
 
 def test_peek_class_unregistered_raises_for_class_object(tmp_path):
     folder = tmp_path / "case-unreg-obj"
-    with SimpleCase.create_in_folder(folder):
+    with SimpleCase.create_case_in_folder(folder):
         pass
     # Strict: a class object cannot be produced for an unregistered name.
     with pytest.raises(UnregisteredCaseTypeError) as excinfo:
@@ -247,7 +247,7 @@ def test_peek_class_uninitialized_folder_raises(tmp_path):
 def test_peek_class_then_peek_case_record_roundtrip(tmp_path):
     # The deduce-then-read path: resolve the class via the registry, then read the record.
     folder = tmp_path / "case-roundtrip"
-    with TypedCase.create_in_folder(folder, case_id="rt-1"):
+    with TypedCase.create_case_in_folder(folder, case_id="rt-1"):
         pass
     cls = case_type_registry.peek_class(
         folder, return_class_object=True, registry={"TypedCase": TypedCase}
@@ -259,7 +259,7 @@ def test_peek_class_then_peek_case_record_roundtrip(tmp_path):
 
 def test_peek_case_record_does_not_acquire_lease(tmp_path):
     folder = tmp_path / "case-nolease"
-    with SimpleCase.create_in_folder(folder, case_id="s-nolease"):
+    with SimpleCase.create_case_in_folder(folder, case_id="s-nolease"):
         pass
     assert not (folder / ".case.lease").exists()
     FolderBackedCase.peek_case_record(folder)
@@ -269,7 +269,7 @@ def test_peek_case_record_does_not_acquire_lease(tmp_path):
 
 def test_peek_case_assets_without_live_case(tmp_path):
     folder = tmp_path / "case-assets-peek"
-    with SimpleCase.create_in_folder(folder, case_id="s-assets"):
+    with SimpleCase.create_case_in_folder(folder, case_id="s-assets"):
         pass
     assets = FolderBackedCase.peek_case_assets(folder)
     assert assets.folder == folder / "assets"
@@ -278,7 +278,7 @@ def test_peek_case_assets_without_live_case(tmp_path):
 
 def test_rehydrate_unregistered_carries_type_name(tmp_path):
     folder = tmp_path / "case-unreg"
-    with SimpleCase.create_in_folder(folder):
+    with SimpleCase.create_case_in_folder(folder):
         pass
     # Isolated registry that does not know SimpleCase -> strict failure with the name.
     with pytest.raises(UnregisteredCaseTypeError) as excinfo:
@@ -296,7 +296,7 @@ def test_fresh_registry_isolated_from_singleton():
 
 def test_constructing_wrong_class_raises_and_leaves_no_lease(tmp_path):
     folder = tmp_path / "case-wrongclass"
-    with SimpleCase.create_in_folder(folder, case_id="w-1"):
+    with SimpleCase.create_case_in_folder(folder, case_id="w-1"):
         pass
     # TypedCase also has a 'new' state, so without the gate this would silently succeed.
     with pytest.raises(CaseTypeMismatchError) as excinfo:
@@ -315,23 +315,23 @@ def test_init_on_uninitialized_folder_points_to_create(tmp_path):
     with pytest.raises(FileNotFoundError) as excinfo:
         SimpleCase(folder)
     msg = str(excinfo.value)
-    assert "create_in_folder()" in msg
+    assert "create_case_in_folder()" in msg
     assert "rehydrate" in msg
     assert not (folder / ".case.lease").exists()
 
 
 def test_reclassify_to_succeeds_through_type_gate(tmp_path):
     folder = tmp_path / "case-reclass"
-    case = SimpleCase.create_in_folder(folder, case_id="r-1")
-    fresh = case.reclassify_to(ReclassTarget)
+    case = SimpleCase.create_case_in_folder(folder, case_id="r-1")
+    fresh = case.case_reclassify_to(ReclassTarget)
     try:
         assert isinstance(fresh, ReclassTarget)
-        assert fresh.state == "new"
+        assert fresh.case_state == "new"
         # New name is stamped in memory and persisted to disk.
         assert fresh._record.case_object_type == "ReclassTarget"
         assert FolderBackedCase.peek_case_record(folder).case_object_type == "ReclassTarget"
     finally:
-        fresh.detach()
+        fresh.case_detach()
 
 
 def test_missing_fsm_raises_actionable_error(tmp_path):
@@ -342,7 +342,7 @@ def test_missing_fsm_raises_actionable_error(tmp_path):
 
     folder = tmp_path / "case-008"
     with pytest.raises(MissingFsmError) as excinfo:
-        NoFsmCase.create_in_folder(folder, case_id="c-008")
+        NoFsmCase.create_case_in_folder(folder, case_id="c-008")
     msg = str(excinfo.value)
     assert "NoFsmCase" in msg
     assert "fsm_state_chains" in msg
@@ -354,7 +354,7 @@ def test_missing_fsm_raises_actionable_error(tmp_path):
 def test_create_requires_existing_parent(tmp_path):
     folder = tmp_path / "missing-parent" / "case-009"
     with pytest.raises(FileNotFoundError) as excinfo:
-        SimpleCase.create_in_folder(folder, case_id="c-009")
+        SimpleCase.create_case_in_folder(folder, case_id="c-009")
     assert "Create/confirm the parent folder first" in str(excinfo.value)
     assert not folder.exists()
 
@@ -363,11 +363,11 @@ def test_create_reuses_existing_folder_with_unrelated_files(tmp_path):
     folder = tmp_path / "case-010"
     folder.mkdir()
     (folder / "notes.txt").write_text("unrelated")
-    case = SimpleCase.create_in_folder(folder, case_id="c-010")
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-010")
     try:
         assert case.case_id == "c-010"
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_create_rejects_existing_case_artifacts(tmp_path):
@@ -375,32 +375,32 @@ def test_create_rejects_existing_case_artifacts(tmp_path):
     folder.mkdir()
     (folder / "events").mkdir()
     with pytest.raises(FileExistsError) as excinfo:
-        SimpleCase.create_in_folder(folder, case_id="c-011")
+        SimpleCase.create_case_in_folder(folder, case_id="c-011")
     assert "existing case artifacts" in str(excinfo.value)
     assert "events" in str(excinfo.value)
 
 
 def test_assets_folder_and_asset_path(tmp_path):
     folder = tmp_path / "case-012"
-    case = SimpleCase.create_in_folder(folder, case_id="c-012")
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-012")
     try:
-        assert case.assets.folder == folder / "assets"
-        assert case.assets.asset_path("a/b.txt") == folder / "assets" / "a" / "b.txt"
+        assert case.case_assets.folder == folder / "assets"
+        assert case.case_assets.asset_path("a/b.txt") == folder / "assets" / "a" / "b.txt"
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_assets_relative_path_from_absolute_and_relative(tmp_path):
     folder = tmp_path / "case-013"
-    case = SimpleCase.create_in_folder(folder, case_id="c-013")
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-013")
     try:
         abs_inside = folder / "assets" / "sub" / "x.txt"
-        assert case.assets.relative_path(abs_inside) == "sub/x.txt"
-        assert case.assets.relative_path("sub/./x.txt") == "sub/x.txt"
+        assert case.case_assets.relative_path(abs_inside) == "sub/x.txt"
+        assert case.case_assets.relative_path("sub/./x.txt") == "sub/x.txt"
         with pytest.raises(ValueError):
-            case.assets.relative_path(tmp_path / "outside.txt")
+            case.case_assets.relative_path(tmp_path / "outside.txt")
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_guard_method_convention_constructs(tmp_path):
@@ -413,11 +413,11 @@ def test_guard_method_convention_constructs(tmp_path):
             return True
 
     folder = tmp_path / "case-g1"
-    case = GuardedCase.create_in_folder(folder, case_id="g-1")
+    case = GuardedCase.create_case_in_folder(folder, case_id="g-1")
     try:
-        assert case.state == "new"
+        assert case.case_state == "new"
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_orphan_guard_method_fails_construction(tmp_path):
@@ -434,7 +434,7 @@ def test_orphan_guard_method_fails_construction(tmp_path):
 
     folder = tmp_path / "case-g2"
     with pytest.raises(FsmBindingError) as excinfo:
-        TypoGuardCase.create_in_folder(folder, case_id="g-2")
+        TypoGuardCase.create_case_in_folder(folder, case_id="g-2")
     msg = str(excinfo.value)
     assert "guard_fundedd" in msg
     # Binding runs before any disk/lease I/O, so nothing is left claimed.
@@ -452,7 +452,7 @@ def test_hook_missing_tctx_param_fails_construction(tmp_path):
 
     folder = tmp_path / "case-arity"
     with pytest.raises(FsmBindingError) as excinfo:
-        NoTctxCase.create_in_folder(folder, case_id="a-1")
+        NoTctxCase.create_case_in_folder(folder, case_id="a-1")
     msg = str(excinfo.value)
     assert "perform_begin" in msg
     assert "tctx" in msg
@@ -471,10 +471,10 @@ def test_perform_hook_convention_wires_and_runs(tmp_path):
             self.performed = True
 
     folder = tmp_path / "case-p1"
-    with PerformCase.create_in_folder(folder, case_id="p-1") as case:
+    with PerformCase.create_case_in_folder(folder, case_id="p-1") as case:
         assert case.performed is False
         asyncio.run(case.begin())
-        assert case.state == "open"
+        assert case.case_state == "open"
         assert case.performed is True
 
 
@@ -490,9 +490,30 @@ def test_legacy_underscore_perform_hook_is_rejected(tmp_path):
 
     folder = tmp_path / "case-legacy"
     with pytest.raises(FsmBindingError) as excinfo:
-        LegacyCase.create_in_folder(folder, case_id="legacy-1")
+        LegacyCase.create_case_in_folder(folder, case_id="legacy-1")
     msg = str(excinfo.value)
     assert "perform_begin" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_sealed_member_override_fails_construction(tmp_path):
+    """A subclass that redefines a sealed base member (a reserved part of the core call
+    surface, e.g. `case_state`) is rejected at first construction with FsmBindingError —
+    the defensive guard that protects the base namespace from accidental shadowing."""
+    class ClobberCase(FolderBackedCase):
+        fsm_state_chains = ["^new==begin-->done^"]
+
+        def case_state(self):  # clobbers the sealed base member
+            return "nope"
+
+    folder = tmp_path / "case-sealed"
+    with pytest.raises(FsmBindingError) as excinfo:
+        ClobberCase.create_case_in_folder(folder, case_id="sealed-1")
+    msg = str(excinfo.value)
+    assert "case_state" in msg
+    assert "sealed" in msg
+    assert ("case_state", "ClobberCase") in excinfo.value.sealed
     # Binding runs before any disk/lease I/O, so nothing is left claimed.
     assert not (folder / ".case.lease").exists()
 

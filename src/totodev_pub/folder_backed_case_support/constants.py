@@ -14,7 +14,7 @@ EVENTS_DIR_NAME = "events"           # case event-log folder (PrimitiveEventLog 
 ASSETS_DIR_NAME = "assets"           # the downstream-owned asset "playground"
 KEEP_LIST_NAME  = "_keep_assets.txt" # retention manifest at the CASE ROOT (NOT under assets/)
 
-# Reserved case-owned artifacts at the case root; create_in_folder() rejects targets
+# Reserved case-owned artifacts at the case root; create_case_in_folder() rejects targets
 # that already contain any of these names to avoid colliding with a prior case.
 CASE_RESERVED_ARTIFACT_NAMES = (
     RECORD_NAME,

@@ -168,14 +168,11 @@ class CaseJournal:
         re-firing forever under the implicit `@FAIL<1` cap. STATE-scoped: every failed
         attempt in this dwell counts, regardless of which trigger raised. Derived from the
         event log (no stored counter), so it is correct across process restarts and resets
-        naturally at the next CASE_ENTER_STATE."""
-        n = 0
-        for ev in self._reader.primitive.events(recent_first=True):
-            if ev.label == EV_ENTER_STATE:
-                break                       # reached the boundary of the current dwell
-            if ev.label in (EV_FAIL_TRANSITION, EV_TRIGGER_TIMEOUT):
-                n += 1
-        return n
+        naturally at the next CASE_ENTER_STATE.
+
+        The interpretation itself lives on the reader (`transition_fail_count`); this stays
+        as the journal's domain-named read surface, delegating like `last_activity`."""
+        return self._reader.transition_fail_count
 
     def has_event_since_enter(self, label: str) -> bool:
         """True if an event with `label` has been logged since the current state was

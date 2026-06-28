@@ -48,7 +48,7 @@ Quick start
     from totodev_pub.folder_backed_case import case_type_registry
     case_type_registry.register_case_types(TicketCase)
 
-    case = TicketCase.create_in_folder(Path("/data/cases/t-001"), case_id="t-001")
+    case = TicketCase.create_case_in_folder(Path("/data/cases/t-001"), case_id="t-001")
     with case:
         await case.open_ticket()
         await case.close_ticket()
@@ -85,6 +85,7 @@ from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEve
 from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
+from totodev_pub.folder_backed_case_support.case_pool_driver import CasePoolDriver
 from totodev_pub.folder_backed_case_support.case_type_registry import (
     CaseTypeRegistry, case_type_registry,)
 from totodev_pub.folder_backed_case_support.heartbeat_lease import (
@@ -99,6 +100,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "FolderBackedCase", "CaseTypeRegistry", "case_type_registry", "HeartbeatLease",
     "CaseRecord", "CaseEventLogReader", "CaseJournal", "CaseAssets", "AdvanceResult",
+    "CasePoolDriver",
     "StateChainParser", "FsmChainSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "UnregisteredCaseTypeError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
@@ -113,101 +115,128 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 class FolderBackedCase(ABC):
-    """
+    """ions`.
+    That's deliberately been made possible but beyond the scope of this documentation.
+
+    How this class is organized
+    ---------------------------
+    The class body is laid out in four labeled sections so each kind
+    of reader can jump straight to what they need:
+
+      * SECTION 1 — START HERE: define your case type. The declarative
+        FSM input (`fsm_state_chains`) and the hook/guard naming
+        conventions. EVERY developer starts here, usually before writing
+        any Python; the ~80% case needs nothing else to define a type.
+
     Base class for all folder-backed case types.
 
     Provides: case folder (record + event log + assets), async FSM via
     `transitions`, a flat pipeline driver, ephemeral-file retention,
     the two-phase closing-edge hook, and a single-owner heartbeat lease.
 
-    Subclasses declare ONE thing for the FSM: `fsm_state_chains`, a list of
-    Mermaid-flavoured chain strings. A trivial example:
+    Subclasses declare fsm_state_chains to explain the states,
+    transitions, and guards that their "case" will obey. A trivial
+    example:
 
         fsm_state_chains = ["^new--assign-->assigned==work-->closed^"]
 
-    What it is FOR: this single declaration defines the case's STATES, the TRIGGERS that
-    move between them, and the GUARDS that gate those moves — i.e. the entire finite-state
-    machine that governs the case's behavior over its life. The same parsed state, trigger,
-    and guard names ALSO dictate the names of the "hook" methods the object can/will call as
-    it runs (your `perform_`/`guard_`/`on_enter_`/... methods; see "Implicit hook
-    conventions" below).
+    The names appearing in fsm_state_chains are used to automagically
+    wire up "hook" methods that you may optionally declare in your
+    subclass (see below). They also allow declaring a small amount of
+    error and aging-based flow-control (eg. '@FAIL>3#', '@DWELL>7d#').
+    Hook methods all have the same signature.
 
-    The chain SYNTAX is only sketched here on purpose. For the AUTHORITATIVE, complete
-    grammar — connectors (`--` auto-advance vs `==` manual), initial/terminal `^` markers,
-    method guards (`cond#trigger`), factual guards (`@DWELL`/`@FAIL`), soft timeouts
-    (`~<dur>`), and wildcard (`*`) chains — read StateChainParser in
-    folder_backed_case_support/state_chain_parser.py, the single source of truth that
-    compile_fsm() parses into the per-class `_fsm` singleton.
+    Based on the names provided in your fsm_state_chains, instance
+    initialization will search for corresponding methods in your
+    subclass. If found, they are wired up.
+       - `async def on_enter_<state>(self, tctx)` 
+       - `async def on_exit_<state>(self, tctx)` 
+       - `async def perform_<trigger>(self, tctx)` 
+            - `async def before_<trigger>(self, tctx)` 
+            - `async def after_<trigger>(self, tctx)` 
+       - `async def guard_<guard>(self, tctx)` 
 
-    Implicit hook conventions (derived from your declared states/triggers):
-      * SIGNATURE: every hook and guard takes the trigger context `tctx` after `self`
-        (e.g. `async def perform_x(self, tctx)`); see "Creating Hook Functions" below.
-      * `on_enter_<state>`, `on_exit_<state>` fire only when `<state>` is an exact
-        known FSM state name.
-      * `perform_<trigger>`, `before_<trigger>`, `after_<trigger>` map only when
-        `<trigger>` is an exact known FSM trigger name.
-      * a method `<guard>` in a `guard#trigger` DSL segment is bound by the `guard_`
-        convention: the token `<guard>` resolves to the method `guard_<guard>` (so
-        `funded#finish` requires `async def guard_funded`). A hand-built transition dict
-        may instead supply an explicit callable. The `guard_` prefix keeps guards in their
-        own namespace, away from ordinary helpers and lifecycle hooks.
-    In short: hook/guard suffixes are strict exact matches to parsed state/trigger/guard
-    names. Typos are caught at first construction: compatibility validation runs with
-    `orphan_detection="error"` by DEFAULT, so a method that looks like a hook/guard
-    (`on_enter_`, `on_exit_`, `guard_`, `perform_`, `before_`, `after_`) but maps to no
-    known name fails the build. A deliberately-named coincidental method can opt out via
-    `orphan_detection="off"`.
+    Note that these are built almost directly on the behavior and logic of the `transitions` library.
+    Examine their documentation for semantics and timing.  Note that raising an exception in the trigger, a guard, or the before_*
+    will abort a tranition and counts as a "transition fail".
 
-    Creating Hook Functions
-    -----------------------
-    When you implement a hook (`perform_<trigger>`, `before_<trigger>`,
-    `after_<trigger>`, `on_enter_<state>`, `on_exit_<state>`, or `guard_`),
-    give it the signature `async def <hook>(self, tctx)`. The machine hands
-    EVERY hook a single trigger-context argument, conventionally named `tctx`:
+    Guards
+    ------
+    Guards are a way to gate the firing of a trigger.  They are declared
+    in the fsm_state_chains using the `guard#trigger` DSL segment.  They
+    are declared as a method in your subclass with the name `guard_<guard>`.
+    The method must return a boolean value.  If the method returns False,
+    the trigger will not fire.  Guards should be fast, idempotent, and side-effect free.
+    Guards may be called many many times in automated loops awaiting transitions.
 
-      * What it is: the `transitions` EventData for the firing — a property bag, NOT a case
-        event. (It is named `tctx`, not `event`, precisely to avoid confusion with the case
-        EVENTS in the journal/event log.) Alongside any caller payload it also exposes the
-        model (`tctx.model is self`) and the source state / transition metadata.
-      * Where it comes from: whatever you pass when firing a MANUAL (`==`) trigger lands in
-        `tctx.kwargs` — e.g. `await case.assign(owner="alice")` makes
-        `tctx.kwargs == {"owner": "alice"}` inside `perform_assign` and its guards.
-      * Why it is often empty: AUTO (`--`) edges are fired by the driver
-        (`advance()`/`run_to_completion()`), and a manual trigger called with no arguments
-        passes nothing — so in those (very common) cases `tctx` is present but EMPTY
-        (`tctx.kwargs == {}`). Accept `tctx` anyway; simply don't read from it.
+    One exception that is permitted is if the guard yields with an await,
+    async sleep, or other async operation.  Implementers should be aware
+    that this will block transitions on that case objevct until the async operation completes,
+    but it technically permitted.  Use this with caution.
 
-    Two house rules: declare the parameter even when unused (the build REJECTS a hook that
-    cannot accept it — see ARITY in validate_object_compatibility), and treat `tctx` as
-    inbound data only — do NOT branch on which trigger produced it (trigger-specific logic
-    belongs on the transition, e.g. `perform_<trigger>`, not in a state's enter/exit hook).
+    Two special purpose guards are provided by the library:
+      * @FAIL(>|>=|<|<=)n# - allows proceeding only if the number of transition fails
+        in since arriving in the current state is greater/less/etc. than the given number.
+      * @DWELL(>|>=|<|<=)dur# - a guard that returns True if the number of seconds
+        since the current dwell started is greater/less/etc. the given duration.  Units
+        are permitted to be s/m/h/d.  Float values are permitted.
+    
+    By default, all transitions have an implied guard of `@FAIL<1#` unless explicitly overridden.
+    This means that when a trigger fails in a given state, no other trigger may exit the
+    state except those who have an explicit guard permitting failures. 
 
-    Need the full power of `transitions` (callbacks, `unless`, `*`/multi-source, state
-    objects)? Override compile_fsm() and return an FsmChainSpec you build yourself
-    (optionally by parsing the chains first and then tweaking the result). There is no
-    second declarative attribute to keep in sync — compile_fsm() is the single seam.
 
-    How this class is organized
-    ---------------------------
-    The class body is laid out in four labeled sections so each kind of reader can
-    jump straight to what they need:
+    Any State Triggers
+    ------------------
 
-      * SECTION 1 — START HERE: define your case type. The declarative FSM input
-        (`fsm_state_chains`) and the hook/guard naming conventions. EVERY developer
-        starts here, usually before writing any Python; the ~80% case needs nothing
-        else to define a type.
-      * SECTION 2 — Quick-start runtime API. The mainstream "do the work" surface:
-        create/open, the context-manager + `detach()`, `advance()`/`run_to_completion()`,
-        identity & status properties, `assets`, `fetch_record()`, `log_alert()`, and the
-        lock-free `peek_*` inspectors. ~80% of users need only Sections 1 and 2.
-      * SECTION 3 — Customization seams. Overridable hooks and policy knobs for the
-        peculiar use case: the rarely-needed DEFINE-TIME seams (`_record_cls` for a custom
-        record schema, `compile_fsm()` for full manual FSM control), recovery hooks,
-        `generate_case_id()`, lease/heartbeat tuning, timeout budgets, archive grouping,
-        the `run_blocking()` escape hatch, and `reclassify_to()`.
-      * SECTION 4 — Internal mechanics. Construction/binding, the FSM state-change and
-        exception choke points, record flush, the pipeline candidate finder, and other
-        private machinery. Read this to MAINTAIN the class; you should not need it to USE it.
+    The event Chains notation supports a wildcard source:
+       `*--guard#trigger-->X` 
+       
+    which means from any source, the trigger may move it to state X.
+    A common use of this is combining it with the @FAIL or @DWELL guards
+    to create error or aging based flow control.
+       `*--@FAIL>3#abort-->aborted`
+       `*--@DWELL>10d#timeout-->expired`
+
+
+    Creating Hook Methods - Passing Arguments to Triggers
+    -----------------------------------------------------
+    The machine hands EVERY hook a single trigger-context argument,
+    conventionally named `tctx`.
+
+      * Although the `transitions` library calls it the EventData object
+        (a property bag of whatever was passed to the trigger method) we
+        refer to it as the trigger context `tctx`, not `event`. By doing
+        this we hope to avoid confusion with the event log which is part
+        of the FolderBackedCase class itself.
+      * When you call a trigger method directly, you may choose to pass
+        arguments that are bundled up into this tctx object. These
+        arguments are then available in the hook methods as
+        `tctx.kwargs`.
+      * Note that when triggers are fired by invocation of the
+        case_advance() method, the tctx.kwargs is empty. This means that if
+        your code uses AUTO edges ('--') then you won't be seeing any
+        tctx.kwargs passed to your hook methods.
+
+    Very very advanced users of this library may need the full power of
+    `transitions` library.  That's deliberately been made possible but
+    beyond the scope of this documentation.
+
+      * SECTION 2 — Quick-start runtime API. The mainstream "do the work"
+        surface: create/open, the context-manager + `case_detach()`,
+        `case_advance()` (the one-step driving primitive), identity & status properties,
+        `case_assets`, `case_fetch_record()`, `case_log_alert()`, and the lock-free
+        `peek_*` inspectors. ~80% of users need only Sections 1 and 2.
+      * SECTION 3 — Customization seams. Overridable hooks and policy
+        knobs for the peculiar use case: the rarely-needed DEFINE-TIME
+        seams (`_record_cls` for a custom record schema, `compile_fsm()`
+        for full manual FSM control), recovery hooks, `generate_case_id()`,
+        lease/heartbeat tuning, timeout budgets, archive grouping, the
+        `case_run_blocking()` escape hatch, and `case_reclassify_to()`.
+      * SECTION 4 — Internal mechanics. Construction/binding, the FSM
+        state-change and exception choke points, record flush, the
+        pipeline candidate finder, and other private machinery. Read
+        this to MAINTAIN the class; you should not need it to USE it.
     """
 
     # =======================================================================
@@ -226,7 +255,7 @@ class FolderBackedCase(ABC):
     #   ^state           leading  `^` = initial state
     #   state^           trailing `^` = terminal (closing) state
     #   A==trigger-->B   `==` connector = MANUAL edge (fired by `await case.trigger()`)
-    #   A--trigger-->B   `--` connector = AUTO edge (fired by advance()/run_to_completion())
+    #   A--trigger-->B   `--` connector = AUTO edge (fired by case_advance(); a driver loops it)
     #   guard#trigger    binds method `guard_<guard>` as the edge's guard
     #   @DWELL>14d       factual time guard: true once dwell in this state exceeds 14 days
     #   @FAIL>=n         factual guard: true once n failures accrued this dwell
@@ -269,7 +298,7 @@ class FolderBackedCase(ABC):
     # =======================================================================
 
     @classmethod
-    def create_in_folder(
+    def create_case_in_folder(
         cls,
         case_folder: Path,
         *,
@@ -307,7 +336,7 @@ class FolderBackedCase(ABC):
         if not parent.exists():
             raise FileNotFoundError(
                 f"Parent folder {parent} does not exist. "
-                "Create/confirm the parent folder first, then retry create_in_folder()."
+                "Create/confirm the parent folder first, then retry create_case_in_folder()."
             )
         if not parent.is_dir():
             raise NotADirectoryError(
@@ -358,9 +387,9 @@ class FolderBackedCase(ABC):
         return self
 
     def __exit__(self, *exc):
-        self.detach()
+        self.case_detach()
 
-    def detach(self) -> None:
+    def case_detach(self) -> None:
         """Unbind this object from its folder: delete the lease (clearing the conceptual
         lock) and mark this instance detached.
 
@@ -380,12 +409,12 @@ class FolderBackedCase(ABC):
         if self._lease is not None:
             self._lease.release()
 
-    async def advance(self) -> AdvanceResult:
-        """Fire ONE forward step from the current state and report the outcome as an
-        AdvanceResult (a NON-throwing reporter — see that class).
+    async def case_advance(self) -> AdvanceResult:
+        """Fire ONE auto (`--`) forward step from the current state and report the
+        outcome as an AdvanceResult (a NON-throwing reporter — see that class).
 
         Quick use:
-          Call repeatedly (or use run_to_completion()) to drive AUTO (`--`) edges. It
+          Call repeatedly (a driver loops it across cases) to drive AUTO (`--`) edges. It
           tries each auto-advance candidate in declared order, firing the first whose
           guard permits. Transition failures are REPORTED, not raised: inspect
           `result.progressed` and `result.exceptions` rather than wrapping in try/except.
@@ -404,91 +433,110 @@ class FolderBackedCase(ABC):
               logged on first detection per dwell). Deterministic: same state, same block.
           Still RAISES the misuse guard DetachedCaseError (acting on a detached husk is a
           programming error, not a flow condition)."""
-        initial = self.state
-        if self.is_closed:              # terminal short-circuits first (a closed case stays
-            return AdvanceResult(initial, self.state)   # bound; lease cleared only by detach())
+        initial = self.case_state
+        if self.case_is_closed:         # terminal short-circuits first (a closed case stays
+            return AdvanceResult(initial, self.case_state)   # bound; lease cleared only by case_detach())
         self._check_active()            # else refuse to drive a detached husk
         # Every poll is proof of active ownership, so beat the lease here (throttled — a
         # no-op if < min_update_secs since our last beat). This covers the long-dwelling
         # case that keeps no-opping and never transitions, which _on_state_changed's
         # per-transition beat would otherwise leave to expire. Done BEFORE the step so the
         # lease is fresh for the duration of a (possibly slow, awaited) transition.
-        self.heartbeat()
-        candidates = self._forward_candidates(self.state)
+        self.case_heartbeat()
+        candidates = self._forward_candidates(self.case_state)
         exceptions: list[Exception] = []
         for trigger, _dest in candidates:
             try:
                 # A guard-blocked transition returns falsy WITHOUT changing state (and
                 # without firing the after-hook), so we fall through to the next.
                 if await getattr(self, trigger)():
-                    return AdvanceResult(initial, self.state, trigger=trigger)
+                    return AdvanceResult(initial, self.case_state, trigger=trigger)
             except Exception as err:    # absorbed: reported as data, not raised at driver
                 exceptions.append(err)
-                return AdvanceResult(initial, self.state, trigger=trigger,
+                return AdvanceResult(initial, self.case_state, trigger=trigger,
                                      exceptions=tuple(exceptions))
         # Nothing fired and nothing raised: no forward progress this pass. If the state has
         # no guaranteed timed escape, it is provably auto-advance blocked.
-        if self.state not in self._fsm.timed_escape_states:
+        if self.case_state not in self._fsm.timed_escape_states:
             exceptions.append(self._make_blocked(candidates))
-        return AdvanceResult(initial, self.state, exceptions=tuple(exceptions))
+        return AdvanceResult(initial, self.case_state, exceptions=tuple(exceptions))
 
-    async def run_to_completion(
-        self, *, stop_before: str | None = None
-    ) -> AdvanceResult | None:
-        """Drive forward until closed, until nothing auto-advances (no progress — including
-        a failed attempt or a block), or until an auto step from the current state could
-        ENTER `stop_before` (for staged inspection / testing).
+    # Note: there is deliberately NO run_to_completion()/drive loop on the case itself.
+    # A case knows how to take ONE step (case_advance()); deciding WHICH case to drive, in what
+    # order, with what fairness/concurrency/backpressure is a SCHEDULER concern that belongs
+    # to a driver layer (see CasePoolDriver), not to the domain object. A built-in single-case
+    # loop would quietly endorse a one-case-at-a-time fleet model, which is the opposite of
+    # the intended round-robin-over-many-cases deployment. Tests that genuinely want to run a
+    # single case to its end use the drive_to_completion() helper in the test utilities.
 
-        Quick use:
-          The one-call way to run a case's AUTO edges as far as they go. Returns the LAST
-          AdvanceResult (so a caller can inspect why the drive stopped), or None if it
-          never stepped."""
-        last: AdvanceResult | None = None
-        while self.is_open:
-            candidates = self._forward_candidates(self.state)
-            if not candidates:
-                break
-            if stop_before and any(dest == stop_before for _, dest in candidates):
-                break
-            last = await self.advance()
-            if not last.progressed:          # failed / all guards declined / blocked
-                break
-        return last
 
-    # ---- identity / status properties ----
+    # ---- at-a-glance attributes (cheap, useful facts about the case) ----
+    
+    # The bucket of "things worth asking the case about itself at a glance": identity,
+    # open/closed status, and the two live facts the built-in guards compare against —
+    # `case_dwell_secs` (the `@DWELL` value) and `case_transition_fail_count` (the `@FAIL`
+    # value). These are everyday status reads and belong here in the mainstream surface,
+    # NOT down among the advanced customization seams where a casual reader never looks.
+    #
+    # One wrinkle, flagged so it isn't mistaken for an omission: case_state — the case's
+    # CURRENT state, the single most at-a-glance fact there is — is a plain public instance
+    # ATTRIBUTE, not a @property: the FSM owns it as its model_attribute and writes it
+    # directly on every transition, so it can't be a read-only property. Read `case.case_state`.
+    #
+    # (case_dwell_secs is also an override seam, read back by the factory for the `@DWELL`
+    # guard; being a seam is no reason to bury a common read, so it lives here. See its docstring.)
 
     @property
     def case_id(self) -> str:
         return self._record.case_id
 
     @property
-    def external_key(self) -> str | None:
+    def case_external_key(self) -> str | None:
         return self._record.external_key
 
     @property
-    def nickname(self) -> str | None:
+    def case_nickname(self) -> str | None:
         return self._record.nickname
 
     @property
-    def folder(self) -> Path:
+    def case_folder(self) -> Path:
         return self._folder
 
     @property
-    def is_open(self) -> bool:
-        return self.state not in self._fsm.closed_states
+    def case_is_open(self) -> bool:
+        return self.case_state not in self._fsm.closed_states
 
     @property
-    def is_closed(self) -> bool:
-        return self.state in self._fsm.closed_states
+    def case_is_closed(self) -> bool:
+        return self.case_state in self._fsm.closed_states
+
+    @property
+    def case_transition_fail_count(self) -> int:
+        """The value the `@FAIL` guard compares against: the count of failed transition
+        attempts since the case entered its current state. See
+        `CaseJournal.count_fails_this_dwell` for exactly what counts as a failure and how it
+        is derived."""
+        return self._journal.count_fails_this_dwell()
+
+    @property
+    def case_dwell_secs(self) -> float:
+        """Seconds the case has spent in its CURRENT state — the value the `@DWELL` guard
+        compares against (the sibling of `case_transition_fail_count`). Measured from
+        `self._state_entered_at` (the latest CASE_ENTER_STATE, or creation for a brand-new
+        case).
+
+        It is ALSO an override SEAM: a subclass may override this property (e.g. to fake the
+        clock in tests), and the CaseMachineFactory reads it back for the `@DWELL` guard."""
+        return (_utcnow() - self._state_entered_at).total_seconds()
 
     # ---- assets (playground + retention), grouped on CaseAssets ----
 
     @property
-    def assets(self) -> CaseAssets:
+    def case_assets(self) -> CaseAssets:
         """The case's CaseAssets: file playground under assets/ plus the keep manifest.
 
         Quick use:
-          Your working files live here. Use case.assets.folder, .asset_path(...),
+          Your working files live here. Use case.case_assets.folder, .asset_path(...),
           .relative_path(...), .write(...), .keep_asset(...), .list_assets(), etc.
           Anything not kept via the manifest is purged when the case closes.
 
@@ -498,7 +546,7 @@ class FolderBackedCase(ABC):
 
     # ---- record read accessor ----
 
-    def fetch_record(self, *, force: bool = False) -> CaseRecord:
+    def case_fetch_record(self, *, force: bool = False) -> CaseRecord:
         """Public read accessor for the identity record — the read companion to
         _flush_record().
 
@@ -520,7 +568,7 @@ class FolderBackedCase(ABC):
 
     # ---- operator alert channel (type-agnostic escalation marker) ----
 
-    def log_alert(self, short_msg: str = "", *, where: str | None = None) -> None:
+    def case_log_alert(self, short_msg: str = "", *, where: str | None = None) -> None:
         """Record a CASE_ALERT: the case family's single type-agnostic "this case needs a
         human to look at it" marker.
 
@@ -536,7 +584,7 @@ class FolderBackedCase(ABC):
             where: locus of concern; defaults to the current state.
         """
         self._journal.log_alert(
-            where or self.state, msg=short_msg
+            where or self.case_state, msg=short_msg
         )
 
     # ---- folder peek: read a case folder without constructing a live instance ----
@@ -579,7 +627,7 @@ class FolderBackedCase(ABC):
     def peek_case_assets(folder: Path) -> CaseAssets:
         """A CaseAssets over the folder — lock-free, no live case, no registry. Uniform
         across every case type. Exposes list_assets(), keep_list(), asset_path(), etc.
-        The peek analog of a live case's .assets property."""
+        The peek analog of a live case's .case_assets property."""
         return CaseAssets(Path(folder))
 
     @staticmethod
@@ -602,7 +650,7 @@ class FolderBackedCase(ABC):
     # The record-type seam: defaults to CaseRecord, so the ~80% case never sets it. It is
     # NOT something you must declare — only override it when you need extra fields: subclass
     # CaseRecord and set `_record_cls = MyRecord`, and every case then carries that schema.
-    # Read the live record back via fetch_record().
+    # Read the live record back via case_fetch_record().
     _record_cls: type[CaseRecord] = CaseRecord
 
     @classmethod
@@ -654,7 +702,7 @@ class FolderBackedCase(ABC):
 
           DO NOT fire a transition from within this hook — re-entering the machine
           mid-dispatch is unsupported. To route to a fault state, prefer the declarative
-          `@FAIL>=n` divert edge, or record intent here and let the next advance() carry
+          `@FAIL>=n` divert edge, or record intent here and let the next case_advance() carry
           it out."""
 
     def on_closing(self) -> None:
@@ -665,7 +713,7 @@ class FolderBackedCase(ABC):
 
     @classmethod
     def generate_case_id(cls) -> str:
-        """Auto-ID factory used by create_in_folder() when no explicit case_id is
+        """Auto-ID factory used by create_case_in_folder() when no explicit case_id is
         supplied.
 
         Advanced:
@@ -690,12 +738,12 @@ class FolderBackedCase(ABC):
 
     def lease_ttl_for(self, state: str) -> float:
         """Seconds the lease stays valid after a beat, for `state`. Override per state
-        for long-idle windows. MUST comfortably exceed the gap between heartbeat() calls
-        (i.e. the driver's advance() poll cadence + slack), or a live-but-quiet owner can
+        for long-idle windows. MUST comfortably exceed the gap between case_heartbeat() calls
+        (i.e. the driver's case_advance() poll cadence + slack), or a live-but-quiet owner can
         be reclaimed."""
         return 300.0
 
-    def heartbeat(
+    def case_heartbeat(
         self,
         *,
         min_update_secs: float = 15.0,
@@ -704,8 +752,8 @@ class FolderBackedCase(ABC):
         """Extend our lease. Raises `OwnershipLostError` when ownership is displaced.
 
         Quick use:
-          The mainstream driver does NOT need to call this — advance() beats the lease for
-          you. Call it directly only in a custom drive loop that dwells without advancing."""
+          The mainstream driver does NOT need to call this — case_advance() beats the lease
+          for you. Call it directly only in a custom drive loop that dwells without advancing."""
         self._check_active()
         try:
             self._lease.heartbeat(
@@ -721,25 +769,22 @@ class FolderBackedCase(ABC):
         or dynamic budget — keep it cheap, it is consulted on every step that has work."""
         return self._fsm.trigger_timeouts.get(trigger, DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS)
 
-    def dwell_secs(self) -> float:
-        """Seconds the case has spent in its CURRENT state — the fact the `@DWELL` guard
-        compares against. Measured from `self._state_entered_at` (the latest
-        CASE_ENTER_STATE, or creation for a brand-new case)."""
-        return (_utcnow() - self._state_entered_at).total_seconds()
+    # The case's other factory-read override seam, case_dwell_secs, is an everyday status read
+    # (the `@DWELL` value), so it lives up in SECTION 2's at-a-glance reads. Override it there.
 
     def archive_grouping_label(self) -> str:
         """Destination archive grouping when this case closes. Default: close month.
         Override to key on creation date, fiscal period, tenant, etc."""
         return _utcnow().strftime("%Y-%m-archive")
 
-    async def run_blocking(self, fn, /, *args, **kwargs):
+    async def case_run_blocking(self, fn, /, *args, **kwargs):
         """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `perform_`. Runs `fn`
         on the default thread-pool executor and awaits it, so the call does NOT freeze the
         event loop (which would stall every other case sharing it). Use ONLY when a library
         gives you no async API:
 
             async def perform_fetch(self, tctx):
-                resp = await self.run_blocking(requests.get, url)
+                resp = await self.case_run_blocking(requests.get, url)
 
         SECOND-CLASS by design, with two caveats vs. an async-native client:
           * Concurrency is bounded by the executor's thread pool (not the ~unbounded
@@ -753,7 +798,7 @@ class FolderBackedCase(ABC):
 
     # ---- reclassify ("call an audible" to a different subclass) ----
 
-    def reclassify_to(
+    def case_reclassify_to(
         self, new_cls: type[FolderBackedCase]
     ) -> FolderBackedCase:
         """Rebind this case to a different FolderBackedCase subclass via a two-phase
@@ -770,27 +815,27 @@ class FolderBackedCase(ABC):
             Phase 2 — NEW class acquires the now-free lease, CONSCIOUSLY stamps its
                       own name, force-commits in its own schema.
           A crash between phases reopens cleanly as the OLD class (name not switched)."""
-        if self.state not in new_cls._fsm.states:
-            raise IncompatibleReclassError(self.state, new_cls.__name__)
+        if self.case_state not in new_cls._fsm.states:
+            raise IncompatibleReclassError(self.case_state, new_cls.__name__)
         from_name = self._record.case_object_type
         self._flush_record(force=True)           # phase 1: snapshot old repr (old name)
-        self.detach()                            # serialize-then-DETACH, then re-acquire
+        self.case_detach()                       # serialize-then-DETACH, then re-acquire
         # Bind without the type gate: the old name is still on disk until phase 2 stamps the
         # new one. __new__ + _bind_existing_case_dir bypasses __init__'s gated public path.
         fresh = new_cls.__new__(new_cls)
         fresh._bind_existing_case_dir(self._folder, check_type=False)
         fresh._journal.log_reclassify(
-            new_cls.__name__, from_type=from_name, at_state=fresh.state
+            new_cls.__name__, from_type=from_name, at_state=fresh.case_state
         )
         fresh._record.case_object_type = new_cls.__name__   # CONSCIOUS stamp
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
         for fn in self._listeners:
-            fresh.add_transition_listener(fn)
+            fresh.case_add_transition_listener(fn)
         return fresh
 
     # ---- lifecycle-signal subscription ----
 
-    def add_transition_listener(self, fn) -> None:
+    def case_add_transition_listener(self, fn) -> None:
         """Subscribe to post-transition notifications: fn(case, event_name, info).
         This is how a CaseManager attaches archival behavior without the case having
         any knowledge of the manager. Standalone cases have no listeners."""
@@ -810,6 +855,21 @@ class FolderBackedCase(ABC):
     # (the overridable default lives in SECTION 3). Empty on the base until a subclass
     # supplies chains.
     _fsm: FsmChainSpec = FsmChainSpec.empty()
+
+    # The base's RESERVED instance call-surface: names that back core machinery and must
+    # never be shadowed by a subclass. The binding check (validate_object_compatibility,
+    # passed these via _bind_existing_case_dir) fails fast if a subclass redefines one in
+    # its body, so descendants are free to use short names everywhere else. Deliberately
+    # excludes the override SEAMS (compile_fsm, generate_case_id, on_closing, lease_ttl_for,
+    # case_dwell_secs, ...) — those are MEANT to be overridden — and the hook-name conventions
+    # (perform_/before_/after_/on_enter_/on_exit_/guard_), which belong to the subclass.
+    _SEALED_MEMBER_NAMES: frozenset[str] = frozenset({
+        "case_state", "case_folder", "case_assets", "case_nickname", "case_external_key",
+        "case_is_open", "case_is_closed", "case_transition_fail_count", "case_id",
+        "case_advance", "case_detach", "case_heartbeat", "case_fetch_record",
+        "case_log_alert", "case_run_blocking", "case_reclassify_to",
+        "case_add_transition_listener",
+    })
 
     def __init_subclass__(cls, **kwargs) -> None:
         # Parse + validate at class-definition time: fail-fast (a malformed chain blows
@@ -841,11 +901,11 @@ class FolderBackedCase(ABC):
         already exist on disk, then loads them, acquires the lease, and builds
         the in-memory FSM carrier. Two ways it fails fast and points elsewhere:
           * The folder is not an initialized case (no record) -> FileNotFoundError
-            naming `create_in_folder()` (inception) and `rehydrate()`.
+            naming `create_case_in_folder()` (inception) and `rehydrate()`.
           * The record names a DIFFERENT case type than this class -> the
             CaseTypeMismatchError gate.
 
-        Brand-new cases are created via `create_in_folder(...)`, which first
+        Brand-new cases are created via `create_case_in_folder(...)`, which first
         materializes the folder + record (minting `case_id` via
         `generate_case_id()` when needed), then immediately calls this
         constructor to attach the live object.
@@ -861,7 +921,7 @@ class FolderBackedCase(ABC):
 
         Shared worker behind two entry points:
           * `__init__` calls it with `check_type=True` (the normal public path).
-          * `reclassify_to` calls it with `check_type=False` on a freshly
+          * `case_reclassify_to` calls it with `check_type=False` on a freshly
             `__new__`-ed instance, because phase 1 deliberately leaves the OLD
             type name on disk until phase 2 stamps the new one.
 
@@ -879,16 +939,20 @@ class FolderBackedCase(ABC):
         # orphan_detection="error": a hook/guard-looking method that maps to no known
         # state/trigger/guard is treated as a typo and fails the build.
         if "_fsm_binding_checked" not in cls.__dict__:
-            cls._fsm.validate_object_compatibility(self)
+            cls._fsm.validate_object_compatibility(
+                self,
+                sealed_names=FolderBackedCase._SEALED_MEMBER_NAMES,
+                sealed_owner=FolderBackedCase,
+            )
             cls._fsm_binding_checked = True
         self._folder = Path(case_folder)
         # Uninitialized-folder gate: this is the BIND path, not inception. A missing
-        # record means the caller wanted create_in_folder() (new) or rehydrate() (by type).
+        # record means the caller wanted create_case_in_folder() (new) or rehydrate() (by type).
         record_path = self._folder / RECORD_NAME
         if not record_path.exists():
             raise FileNotFoundError(
                 f"No case record at {record_path}: this folder is not an initialized case. "
-                "Use create_in_folder() to incept a new case, or "
+                "Use create_case_in_folder() to incept a new case, or "
                 "case_type_registry.rehydrate(folder) to open an existing one by type."
             )
         # Initialized after state load so TTL can depend on current state.
@@ -900,7 +964,7 @@ class FolderBackedCase(ABC):
             str(record_path), without_lock=True
         )
         # Wrong-type gate (before the lease, so a reject claims nothing): this class is not
-        # the one the record names. reclassify_to passes check_type=False to build over the
+        # the one the record names. case_reclassify_to passes check_type=False to build over the
         # old name on purpose; every other caller gets the gate.
         if check_type and self._record.case_object_type != cls.__name__:
             raise CaseTypeMismatchError(
@@ -909,8 +973,9 @@ class FolderBackedCase(ABC):
         self._journal = CaseJournal.for_folder(self._folder)
         self._assets = CaseAssets(self._folder)   # asset playground + retention manifest
         self._listeners: list = []        # fn(case, event_name, info)
-        # State is derived from the event log on load; transitions then cache on self.state.
-        self.state: str = self._derive_state() or self._fsm.initial_state
+        # State is derived from the event log on load; transitions then cache on
+        # self.case_state (the machine's model_attribute).
+        self.case_state: str = self._derive_state() or self._fsm.initial_state
         # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _as_utc() converts them
         # to aware UTC. record.created is already aware UTC (CaseRecord validator).
         self._last_activity: datetime.datetime = (
@@ -924,14 +989,14 @@ class FolderBackedCase(ABC):
         # Acquire after state is known because TTL can be state-dependent.
         self._lease = HeartbeatLease(
             self._folder / LEASE_NAME,
-            ttl_provider=lambda: self.lease_ttl_for(self.state),
+            ttl_provider=lambda: self.lease_ttl_for(self.case_state),
         )
         try:
             self._lease.acquire()
         except LeaseAlreadyHeldError as e:
             raise CaseAlreadyOpenError(self._folder, expires_in=e.expires_in) from e
         # Instance-time machine binding is delegated to CaseMachineFactory.
-        self._machine = CaseMachineFactory(self, self._fsm, self._journal).build(self.state)
+        self._machine = CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
 
     @staticmethod
     def _as_utc(dt: datetime.datetime | None) -> datetime.datetime | None:
@@ -950,7 +1015,7 @@ class FolderBackedCase(ABC):
 
     # ---- FSM attachment via transitions (async-first composition pattern) ----
     # Machine construction + callback wiring live in CaseMachineFactory; the case keeps
-    # the override seams the factory reads back (trigger_warn_secs, dwell_secs) and the
+    # the override seams the factory reads back (trigger_warn_secs, case_dwell_secs) and the
     # named lifecycle callbacks the machine binds (_on_state_changed, _on_fsm_exception).
 
     def _on_state_changed(self, event) -> None:
@@ -967,9 +1032,9 @@ class FolderBackedCase(ABC):
             4. assets.purge_ephemeral() — drop everything not in the keep manifest
             5. _record.closed stamped + FORCE-flushed (authoritative seal)
             6. heartbeat(force) — keep the lock fresh; closure does NOT detach (the
-               object stays bound so owners can harvest before calling detach())
+               object stays bound so owners can harvest before calling case_detach())
             7. _notify("CASE_CLOSED") — finalized-but-still-bound; the "safe to move"
-               signal is detach(), not this. Standalone: no-op.
+               signal is case_detach(), not this. Standalone: no-op.
         """
         src, dest = event.transition.source, event.transition.dest
         self._journal.log_enter_state(dest)
@@ -980,7 +1045,7 @@ class FolderBackedCase(ABC):
             # Throttled flush + lease beat at the boundary. Skipped on the closing edge:
             # the forced phase-2 seal supersedes the flush, and phase 2 beats explicitly.
             self._flush_record()
-            self.heartbeat()
+            self.case_heartbeat()
         else:
             # --- phase 1: pre-finalization --- assets still present ---
             self._journal.log_closed(dest, from_state=src)
@@ -992,19 +1057,19 @@ class FolderBackedCase(ABC):
             self._flush_record(force=True)
             # Closure keeps the lock; it does NOT detach. Force a fresh beat so the now-idle
             # (un-advanced) closed case holds a full-TTL grace window for owners to harvest
-            # before they call detach(). A crash still lapses the lock via the TTL.
-            self.heartbeat(min_update_secs=0)
+            # before they call case_detach(). A crash still lapses the lock via the TTL.
+            self.case_heartbeat(min_update_secs=0)
             self._notify(EV_CLOSED, src=src, dest=dest)
 
     async def _on_fsm_exception(self, event) -> None:
         """Machine-level `on_exception` hook (wired by the machine factory): the SINGLE chokepoint
-        every trigger dispatch funnels through, so it covers both advance() and a direct
+        every trigger dispatch funnels through, so it covers both case_advance() and a direct
         `await case.<trigger>()`. Fires when ANY callback raises — a guard, a
         `perform_<trigger>`, on_exit/on_enter, or an `after`.
 
         It distinguishes the COMMIT BOUNDARY without needing to know which callback slot
-        raised: `transitions` sets `self.state` to the dest during the state change, BEFORE
-        on_enter/after run, so `self.state == dest` means we are POST-commit.
+        raised: `transitions` sets `self.case_state` to the dest during the state change, BEFORE
+        on_enter/after run, so `self.case_state == dest` means we are POST-commit.
 
         Steps, in order:
           1. NO-DRIFT REMEDY (post-commit only): if we advanced in memory but the durable
@@ -1019,14 +1084,14 @@ class FolderBackedCase(ABC):
              and hooked, but NOT counted by @FAIL). A pre-commit TriggerTimeout is logged as
              CASE_TRIGGER_TIMEOUT instead — visually distinct, still @FAIL-counted.
           4. Call on_transition_exception(...) so the case may compensate.
-          5. RE-RAISE the original exception. advance() catches it and folds it into an
+          5. RE-RAISE the original exception. case_advance() catches it and folds it into an
              AdvanceResult; a direct caller gets the raise (fail-fast preserved)."""
         err = event.error
         trigger = event.event.name if event.event is not None else None
         trans = event.transition
-        src = trans.source if trans is not None else self.state
+        src = trans.source if trans is not None else self.case_state
         dest = trans.dest if trans is not None else None
-        post_commit = dest is not None and self.state == dest
+        post_commit = dest is not None and self.case_state == dest
 
         # 1. No-drift remedy. NOTE (sharp edge): if dest is a TERMINAL state, the two-phase
         # close in _on_state_changed was also skipped here; we reconcile the CASE_ENTER_STATE
@@ -1070,7 +1135,7 @@ class FolderBackedCase(ABC):
         except Exception:                     # a misbehaving hook must not mask the real error
             logger.exception("on_transition_exception hook raised for case %s", self.case_id)
 
-        # 5. Re-raise so advance() can fold it in (and direct callers stay fail-fast).
+        # 5. Re-raise so case_advance() can fold it in (and direct callers stay fail-fast).
         raise err
 
     # ---- record flush protocol (single guarded chokepoint) ----
@@ -1078,7 +1143,7 @@ class FolderBackedCase(ABC):
     # instance lifetime, which conflicts with our single-owner lease model).
     # Writes use the mixin's save() as normal — it acquires a brief transient
     # lock only for the duration of the write and releases immediately after.
-    # The public read companion, fetch_record(), lives in SECTION 2.
+    # The public read companion, case_fetch_record(), lives in SECTION 2.
 
     def _flush_record(self, *, force: bool = False) -> None:
         """Persist the owned record. Default is THROTTLED — writes only when
@@ -1095,7 +1160,7 @@ class FolderBackedCase(ABC):
 
     # ---- single-owner protection: the heartbeat lease (mechanics) ----
     # Lease mechanics live in HeartbeatLease; the domain-flavored facade (heartbeat,
-    # lease_ttl_for) is an override seam in SECTION 3, and detach() is in SECTION 2.
+    # lease_ttl_for) is an override seam in SECTION 3, and case_detach() is in SECTION 2.
 
     def _check_active(self) -> None:
         if self._lease is None or not self._lease.is_active():
@@ -1103,16 +1168,16 @@ class FolderBackedCase(ABC):
 
     def __del__(self):
         try:
-            self.detach()
+            self.case_detach()
         except Exception:
             pass
 
-    # ---- flat pipeline driver (internals behind advance()/run_to_completion()) ----
+    # ---- flat pipeline driver (internals behind case_advance()) ----
 
     def _forward_candidates(self, state: str):
         """The auto-advance edges leaving `state`, as (trigger, dest) in declared order.
         Empty when terminal / nothing auto-advances from here (e.g. awaiting input). With
-        guards, more than one candidate may be eligible; advance() tries them in order."""
+        guards, more than one candidate may be eligible; case_advance() tries them in order."""
         out = []
         for t in self._fsm.transitions:
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
@@ -1123,20 +1188,20 @@ class FolderBackedCase(ABC):
     def _make_blocked(self, candidates) -> AutoAdvanceBlocked:
         """Build the AutoAdvanceBlocked marker for the current (provably stuck) state,
         logging a SINGLE CASE_ALERT the first time we detect the block in this dwell so it
-        is visible on disk without spamming the low-volume log on every advance() call."""
+        is visible on disk without spamming the low-volume log on every case_advance() call."""
         if not self._journal.has_event_since_enter(EV_ALERT):
-            self.log_alert(f"auto-advance blocked in {self.state!r}", where=self.state)
+            self.case_log_alert(f"auto-advance blocked in {self.case_state!r}", where=self.case_state)
         return AutoAdvanceBlocked(
-            self.case_id, self.state, candidates=[t for t, _ in candidates]
+            self.case_id, self.case_state, candidates=[t for t, _ in candidates]
         )
 
     # ---- stall handling ----
-    # There is deliberately NO self-pulse: a case cannot watchdog its own advance() from
+    # There is deliberately NO self-pulse: a case cannot watchdog its own case_advance() from
     # inside a single suspended coroutine. Stall handling is split by failure mode instead:
-    #   * a stalled external job   -> a `@DWELL>...` timed-escape edge ripens and advance()
+    #   * a stalled external job   -> a `@DWELL>...` timed-escape edge ripens and case_advance()
     #                                 fires it (in-band, declarative, self-healing);
     #   * a genuinely stuck state  -> AutoAdvanceBlocked, carried in AdvanceResult + one
     #                                 CASE_ALERT per dwell;
-    #   * a hung advance() call     -> an out-of-band concern for the driver (e.g. wrapping
-    #                                 advance() in asyncio.wait_for); the case cannot observe
+    #   * a hung case_advance() call -> an out-of-band concern for the driver (e.g. wrapping
+    #                                 case_advance() in asyncio.wait_for); the case cannot observe
     #                                 it itself.

@@ -16,7 +16,7 @@ class CaseAlreadyOpenError(Exception):
     def __init__(self, folder: Path, *, expires_in: float):
         super().__init__(
             f"{folder} is already open (lease valid for ~{expires_in:.0f}s more). "
-            "Wait for the current owner to detach() or for the lease to expire."
+            "Wait for the current owner to case_detach() or for the lease to expire."
         )
         self.folder = folder
         self.expires_in = expires_in
@@ -34,7 +34,7 @@ class OwnershipLostError(Exception):
 
 
 class DetachedCaseError(Exception):
-    """A mutating operation was attempted on a case husk that has already detach()ed from
+    """A mutating operation was attempted on a case husk that has already case_detach()ed from
     its folder (lease cleared). Construct a fresh instance (rehydrate) to act on it again."""
     def __init__(self, folder: Path):
         super().__init__(
@@ -76,7 +76,7 @@ class RecordTypeMismatchError(Exception):
     """Raised by _flush_record when the record's case_object_type doesn't match the
     class attempting the write. A FolderBackedCase may only ever write its OWN name.
 
-    If you hit this inside reclassify_to(): the friction is DELIBERATE. Phase 2
+    If you hit this inside case_reclassify_to(): the friction is DELIBERATE. Phase 2
     constructs the NEW class over a record that still carries the OLD name (so a
     crash mid-reclassify reopens cleanly as the old class). Before the committing
     flush you must CONSCIOUSLY stamp the new name (and migrate any new-schema
@@ -96,7 +96,7 @@ class RecordTypeMismatchError(Exception):
 
 
 class IncompatibleReclassError(Exception):
-    """Raised when reclassify_to() is called but the current FSM state is not present
+    """Raised when case_reclassify_to() is called but the current FSM state is not present
     among the target class's FSM states."""
     def __init__(self, current_state: str, target_class: str):
         super().__init__(
@@ -111,11 +111,11 @@ class AutoAdvanceBlocked(Exception):
     the state has no self-relaxing time guard (`@DWELL>...`) that would ripen to let one
     fire later, so the case is genuinely stuck waiting on out-of-band help.
 
-    SCOPE: only the unattended advance() path is walled off — manual or event-driven
+    SCOPE: only the unattended case_advance() path is walled off — manual or event-driven
     (`==`) transitions may still be perfectly available, which is why it is "auto
     advance" blocked, not "all transitions" blocked.
 
-    USAGE: advance() does NOT raise this — it CARRIES it in AdvanceResult.exceptions as
+    USAGE: case_advance() does NOT raise this — it CARRIES it in AdvanceResult.exceptions as
     data, so a blind driver can inspect it without a try/except (a direct/manual trigger
     call, having no AdvanceResult to return, still raises). It is deterministic and
     idempotent: the same state yields the same block on every call until something changes.
@@ -143,7 +143,7 @@ class TriggerTimeout(Exception):
 
     A timeout IS a failed pre-commit attempt: the case never left its source state, and it
     counts toward @FAIL (see CaseJournal.count_fails_this_dwell) so the retry cap applies and
-    a timing-out trigger cannot hammer forever. advance() folds it into AdvanceResult.failed like any other
+    a timing-out trigger cannot hammer forever. case_advance() folds it into AdvanceResult.failed like any other
     absorbed failure.
 
     NOTE: aborting an async-native await cancels it cleanly; a call offloaded via
@@ -213,7 +213,7 @@ class FsmBindingError(Exception):
         `perform_<trigger>` is REQUIRED when that trigger is reachable from an auto-advance
         edge (`--`), so unattended paths are explicit.
       * SYNC — a referenced callable exists but is synchronous while the case requires async.
-        FolderBackedCase is driven through async (advance(), the generated triggers), so every
+        FolderBackedCase is driven through async (case_advance(), the generated triggers), so every
         guard, action method, and callback the FSM touches MUST be a coroutine function
         (`async def`). A stray `def` would silently block the event loop for every other case
         a driver is advancing, so we reject it loudly here. (Relax with force_async=False.)
@@ -221,14 +221,18 @@ class FsmBindingError(Exception):
         hook is dispatched with a single `tctx` argument (the case runs with send_event=True),
         so a hook declared `(self)` would raise TypeError the instant its edge fired. We
         reject it at construction instead. (Relax with require_tctx=False.)
+      * SEALED — a subclass redefined a name the base class reserves for its own machinery
+        (e.g. `case_state`, `case_advance`). These names back core behavior and must not be
+        shadowed; a subclass that wrote `def case_state(self)` has silently broken the base,
+        so we reject it at construction with the offending name and the class that redefined it.
 
     The whole point is a loud, early, unambiguous failure: future developers WILL write a sync
-    guard, misspell a method name, or forget the `tctx` parameter, and this turns a baffling
-    event-loop stall or an error deep inside `transitions` into a precise message at
-    construction time.
+    guard, misspell a method name, forget the `tctx` parameter, or clobber a base member, and
+    this turns a baffling event-loop stall or an error deep inside `transitions` into a precise
+    message at construction time.
 
-    Carries `carrier_name` and structured `missing` / `sync` / `orphaned` / `bad_arity` lists
-    for programmatic inspection."""
+    Carries `carrier_name` and structured `missing` / `sync` / `orphaned` / `bad_arity` /
+    `sealed` lists for programmatic inspection."""
 
     # transition-dict slot -> human label, for readable messages.
     _SLOT_LABEL = {
@@ -242,13 +246,15 @@ class FsmBindingError(Exception):
     }
 
     def __init__(
-        self, carrier_name: str, *, missing=None, sync=None, orphaned=None, bad_arity=None
+        self, carrier_name: str, *, missing=None, sync=None, orphaned=None, bad_arity=None,
+        sealed=None,
     ):
         self.carrier_name = carrier_name
         self.missing = list(missing or [])
         self.sync = list(sync or [])
         self.orphaned = list(orphaned or [])
         self.bad_arity = list(bad_arity or [])
+        self.sealed = list(sealed or [])
         lines = [f"{carrier_name!r} is not a valid carrier for its FSM:"]
         for name, slot, trigger in self.missing:
             label = self._SLOT_LABEL.get(slot, slot)
@@ -268,7 +274,7 @@ class FsmBindingError(Exception):
             where = f" for trigger {trigger!r}" if trigger else ""
             lines.append(
                 f"  - {label} {name!r}{where} is synchronous; declare it with 'async def' "
-                "(this case is driven through async methods like advance())"
+                "(this case is driven through async methods like case_advance())"
             )
         for name, kind, suffix in self.bad_arity:
             lines.append(
@@ -280,5 +286,11 @@ class FsmBindingError(Exception):
             lines.append(
                 f"  - orphan hook-like method {name!r}: suffix {suffix!r} does not match any "
                 f"known {kind}; rename/fix it or disable orphan detection for this check"
+            )
+        for name, defining_class in self.sealed:
+            lines.append(
+                f"  - sealed member {name!r} is overridden by {defining_class!r}; this name "
+                "backs core FolderBackedCase behavior and must not be redefined — rename your "
+                "member"
             )
         super().__init__("\n".join(lines))

@@ -4,7 +4,7 @@ These exercise the factory directly against a real (tmp-folder) FolderBackedCase
 it owns machine construction and the two parser-left conventions: compiling `@FACT<op>N`
 factual guards into `conditions`, and wrapping `perform_<trigger>` work as a TIMED `before`
 (soft CASE_TRIGGER_SLOW warning, hard TriggerTimeout kill). The override seams the factory
-reads back (`trigger_warn_secs`, `dwell_secs`) stay on the case."""
+reads back (`trigger_warn_secs`, `case_dwell_secs`) stay on the case."""
 
 import asyncio
 import datetime
@@ -41,7 +41,7 @@ class _FactoryCase(FolderBackedCase):
 
 
 def _case(tmp_path, name="c"):
-    return _FactoryCase.create_in_folder(tmp_path / name, case_id=name)
+    return _FactoryCase.create_case_in_folder(tmp_path / name, case_id=name)
 
 
 def _factory(case) -> CaseMachineFactory:
@@ -67,16 +67,16 @@ def test_build_produces_async_machine_bound_to_the_case(tmp_path):
         # The case's machine is built by the factory at construction time.
         assert isinstance(case._machine, AsyncMachine)
         assert case in case._machine.models
-        assert case.state == "new"
+        assert case.case_state == "new"
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_built_machine_runs_an_auto_step(tmp_path):
     """End-to-end proof the factory wired a usable machine: firing `go` advances."""
     with _case(tmp_path) as case:
         asyncio.run(case.go())
-        assert case.state == "open"
+        assert case.case_state == "open"
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def test_prepare_transitions_strips_private_keys(tmp_path):
         for td in prepared:
             assert not any(k.startswith("_") for k in td), td
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_prepare_transitions_wires_perform_into_before(tmp_path):
@@ -102,7 +102,7 @@ def test_prepare_transitions_wires_perform_into_before(tmp_path):
         assert callable(go.get("before"))      # perform_go exists -> wrapped
         assert "before" not in finish          # manual edge, no perform_finish
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_prepare_transitions_compiles_fact_guard_conditions(tmp_path):
@@ -114,7 +114,7 @@ def test_prepare_transitions_compiles_fact_guard_conditions(tmp_path):
         assert bail.get("conditions")
         assert all(callable(c) for c in bail["conditions"])
     finally:
-        case.detach()
+        case.case_detach()
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +127,11 @@ def test_dwell_fact_guard_reads_case_dwell_secs(tmp_path):
         guard = _factory(case)._make_fact_guard("DWELL", ">", 100.0)
         # Fresh case: dwell is tiny -> guard is False.
         assert guard(None) is False
-        # Backdate the dwell anchor so dwell_secs() clears the threshold.
+        # Backdate the dwell anchor so case_dwell_secs clears the threshold.
         case._state_entered_at = case._state_entered_at - datetime.timedelta(seconds=500)
         assert guard(None) is True
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_fail_fact_guard_reads_journal_count(tmp_path):
@@ -142,7 +142,7 @@ def test_fail_fact_guard_reads_journal_count(tmp_path):
         case._journal.log_fail_transition("go", {"trigger": "go"})
         assert guard(None) is True
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_make_fact_guard_rejects_unknown_name(tmp_path):
@@ -151,7 +151,7 @@ def test_make_fact_guard_rejects_unknown_name(tmp_path):
         with pytest.raises(ValueError):
             _factory(case)._make_fact_guard("MYSTERY", ">", 1)
     finally:
-        case.detach()
+        case.case_detach()
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def test_perform_wrapper_hard_aborts_with_trigger_timeout(tmp_path):
         # job, and a hard-abort never doubles as a slow warning.
         assert _slow_events(case) == []
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_perform_wrapper_logs_slow_when_over_soft_but_under_kill(tmp_path):
@@ -187,7 +187,7 @@ def test_perform_wrapper_logs_slow_when_over_soft_but_under_kill(tmp_path):
         assert data["state"] == "new"
         assert data["warn_secs"] == 0.2
     finally:
-        case.detach()
+        case.case_detach()
 
 
 def test_perform_wrapper_reraises_non_timeout_error_unchanged(tmp_path):
@@ -200,4 +200,4 @@ def test_perform_wrapper_reraises_non_timeout_error_unchanged(tmp_path):
         # A fast failure is not slow, so nothing is logged by the wrapper.
         assert _slow_events(case) == []
     finally:
-        case.detach()
+        case.case_detach()

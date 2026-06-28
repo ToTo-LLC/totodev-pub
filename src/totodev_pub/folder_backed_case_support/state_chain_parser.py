@@ -16,7 +16,7 @@ States
   directly to DSL state names.
 * A LEADING `^` marks an INITIAL state (a valid entry/root): `^new`. Initial states
   are also the reachability anchors (they are exempt from the "must have an incoming
-  edge" rule), which is how an entry reached only via reclassify_to() is declared.
+  edge" rule), which is how an entry reached only via case_reclassify_to() is declared.
 * A TRAILING `^` marks a TERMINAL/closed state: `closed^`. Entering one fires the
   two-phase close hook.
 * Initial and terminal are independent flags and may compose (`^x^`). A run of trailing
@@ -26,7 +26,7 @@ States
 Connectors  `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
 ----------
 * `A==trigger-->B` is one transition (trigger `trigger`, source `A`, dest `B`).
-* `A--trigger-->B` marks the edge AUTO-ADVANCE: advance()/run_to_completion() may fire it
+* `A--trigger-->B` marks the edge AUTO-ADVANCE: advance() (looped by a driver) may fire it
   unattended. `--` is opt-in (fail-safe): a `==` edge never auto-fires, so a case
   simply waits rather than silently running past a human/event gate. The connector form
   itself carries this "may auto-fire" policy.
@@ -44,7 +44,7 @@ Connectors  `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
   test would create false expectations). Two facts are recognized:
     * `@DWELL<op><dur>` — seconds spent in the SOURCE state (dwell since the latest
       CASE_ENTER_STATE). The operand is a duration, units s|m|h|d, float allowed
-      (`@DWELL>90s`, `@DWELL>=1.5h`, `@DWELL>0.5d`). `dwell_secs()` on the case computes it.
+      (`@DWELL>90s`, `@DWELL>=1.5h`, `@DWELL>0.5d`). `case_dwell_secs` on the case computes it.
       A `>`/`>=` dwell guard is SELF-RELAXING (it ripens with time) and is what gives a
       state a guaranteed TIMED ESCAPE (see classify()/AutoAdvanceBlocked).
     * `@FAIL<op>N` — count of `CASE_FAIL_TRANSITION` events logged since the current state
@@ -87,7 +87,7 @@ Wildcard ("from any source") chains  `*[--|==]...-->DEST`
 Conventions
 -----------
 * Chains COLLECTIVELY must declare at least one initial and one terminal state.
-* The DEFAULT initial state (used by create_in_folder) is the first initial-marked state
+* The DEFAULT initial state (used by create_case_in_folder) is the first initial-marked state
   encountered scanning chains in order — so an initial in the first chain wins.
 
 The parser is PURE and instance-unaware: `StateChainParser.parse(chains)` returns an
@@ -300,7 +300,7 @@ class FsmChainSpec:
           - V1: a terminal state has NO outgoing edge (it is the end of the road);
           - V2: a non-terminal state HAS an outgoing edge (a dead-end that isn't `^` is
                 almost always a forgotten exit or a missing `^` — the one legitimate
-                exception, a state left only via reclassify_to(), is handled by guidance:
+                exception, a state left only via case_reclassify_to(), is handled by guidance:
                 declare its successor's entry as an initial state, or add a trivial edge);
           - reachability: every non-initial state has an incoming edge (catches the
                 mistyped state name, whose orphan has no way in). A wildcard's declared
@@ -338,7 +338,7 @@ class FsmChainSpec:
                 raise FsmChainParseError(
                     f"state {s!r} has no outgoing transition and is not marked terminal; add "
                     "a trailing '^' if it is an end state, or give it a transition (a state "
-                    "left only via reclassify_to() should declare its successor's entry as "
+                    "left only via case_reclassify_to() should declare its successor's entry as "
                     "initial, or use a trivial edge — see the reclassify docs)"
                 )
             if (s not in self.initial_states and s not in in_dests
@@ -517,6 +517,8 @@ class FsmChainSpec:
         require_tctx: bool = True,
         hook_patterns=(_PERFORM_HOOK_PATTERN,),
         orphan_detection: str = "error",
+        sealed_names: frozenset[str] = frozenset(),
+        sealed_owner: Optional[type] = None,
     ) -> None:
         """Confirm `obj` is a suitable CARRIER for this compiled FSM, raising FsmBindingError
         (listing ALL gaps at once) if not. Designed to run ONCE per concrete carrier class —
@@ -558,7 +560,16 @@ class FsmChainSpec:
                      (pass orphan_detection="off" for that deliberate case).
         Scanned prefixes: `on_enter_`, `on_exit_`, `guard_`, `perform_`, `before_`,
         `after_`. A `guard_<token>` method whose token is not referenced by any chain guard
-        is flagged the same way a misspelled `on_enter_<state>` is."""
+        is flagged the same way a misspelled `on_enter_<state>` is.
+
+        sealed_names / sealed_owner protect the OWNER class's own namespace from accidental
+        shadowing: `sealed_names` is the set of member names `sealed_owner` reserves for its
+        core machinery (e.g. FolderBackedCase's `case_state`, `case_advance`, ...). If any
+        class BETWEEN `type(obj)` and `sealed_owner` (i.e. a subclass) redefines one of those
+        names in its body, binding fails — a subclass that wrote `def case_state(self)` has
+        silently broken the base. This catches only class-body definitions (methods,
+        properties, class attributes); a purely runtime `self.case_state = ...` reassignment
+        is out of scope. A no-op when either argument is empty/None."""
         if orphan_detection not in {"off", "warn", "error"}:
             raise ValueError("orphan_detection must be one of {'off', 'warn', 'error'}")
         missing: dict[str, tuple[str, str, str]] = {}
@@ -602,14 +613,16 @@ class FsmChainSpec:
             self._find_orphan_hook_methods(obj) if orphan_detection != "off" else []
         )
         bad_arity = self._find_bad_arity_hook_methods(obj) if require_tctx else []
+        sealed = self._find_sealed_overrides(obj, sealed_names, sealed_owner)
 
-        if missing or sync or bad_arity or (orphan_detection == "error" and orphaned):
+        if missing or sync or bad_arity or sealed or (orphan_detection == "error" and orphaned):
             raise FsmBindingError(
                 type(obj).__name__,
                 missing=list(missing.values()),
                 sync=list(sync.values()),
                 orphaned=orphaned if orphan_detection == "error" else [],
                 bad_arity=bad_arity,
+                sealed=sealed,
             )
         if orphan_detection == "warn" and orphaned:
             warnings.warn(
@@ -691,6 +704,24 @@ class FsmChainSpec:
                     bad.append((name, kind, suffix))
                 break
         return bad
+
+    @staticmethod
+    def _find_sealed_overrides(obj, sealed_names, sealed_owner) -> list[tuple[str, str]]:
+        """Return (name, defining_class_name) for every sealed member that a SUBCLASS of
+        `sealed_owner` redefines in its class body. Walks `type(obj).__mro__` and inspects
+        each class that is a strict subclass of `sealed_owner` (the leaf and any intermediate
+        bases, but NOT `sealed_owner` itself, which legitimately defines these names). Only
+        class-body definitions are visible in `__dict__`, so a runtime `self.<name> = ...`
+        reassignment is deliberately out of scope. A no-op when sealing is not requested."""
+        if not sealed_names or sealed_owner is None:
+            return []
+        found: list[tuple[str, str]] = []
+        for cls in type(obj).__mro__:
+            if cls is sealed_owner or not issubclass(cls, sealed_owner):
+                continue
+            for name in sealed_names & set(vars(cls)):
+                found.append((name, cls.__name__))
+        return found
 
     def _format_orphan_hook_warning(
         self, carrier_name: str, orphaned: list[tuple[str, str, str]]

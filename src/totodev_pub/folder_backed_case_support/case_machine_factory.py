@@ -52,6 +52,7 @@ class CaseMachineFactory:
             states=self._fsm.states,
             transitions=self._prepare_transitions(self._fsm.transitions),
             initial=initial_state,
+            model_attribute="case_state",
             after_state_change="_on_state_changed",
             on_exception="_on_fsm_exception",
             send_event=True,
@@ -102,7 +103,7 @@ class CaseMachineFactory:
             except asyncio.TimeoutError:
                 timed_out = True
                 raise TriggerTimeout(
-                    case.case_id, trigger, case.state,
+                    case.case_id, trigger, case.case_state,
                     elapsed=time.monotonic() - start, ceiling=kill,
                 ) from None
             finally:
@@ -112,7 +113,7 @@ class CaseMachineFactory:
                     elapsed = time.monotonic() - start
                     if elapsed > warn:
                         journal.log_trigger_slow(
-                            trigger, elapsed=elapsed, warn=warn, state=case.state
+                            trigger, elapsed=elapsed, warn=warn, state=case.case_state
                         )
 
         return _wrapped
@@ -124,7 +125,7 @@ class CaseMachineFactory:
         journal = self._journal
         if name == "DWELL":
             def _dwell_guard(tctx) -> bool:
-                return cmp(case.dwell_secs(), operand)
+                return cmp(case.case_dwell_secs, operand)
             return _dwell_guard
         if name == "FAIL":
             def _fail_guard(tctx) -> bool:

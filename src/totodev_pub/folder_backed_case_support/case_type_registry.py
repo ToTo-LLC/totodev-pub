@@ -18,7 +18,7 @@ directly (e.g. `case_type_registry.rehydrate(folder)`). The registry is delibera
 manager-free: type resolution works without any CaseManager owning the catalog.
 
 When you need it: ONLY for name-driven resolution — `rehydrate` and `peek_class`. If you
-already hold the concrete case class you can ignore this entirely: `MyCase.create_in_folder()`
+already hold the concrete case class you can ignore this entirely: `MyCase.create_case_in_folder()`
 and `MyCase(folder)` work registry-free (the construction type gate is a local name check,
 not a registry lookup).
 """
@@ -56,7 +56,7 @@ class CaseTypeRegistry:
     def register_case_types(self, *case_classes: type[FolderBackedCase]) -> None:
         """Explicit, opt-in registration of one or more case types (no auto-register).
         Each class is keyed by its bare __name__ — the EXACT value stamped into every
-        record's case_object_type (see create_in_folder / reclassify_to) and enforced by
+        record's case_object_type (see create_case_in_folder / case_reclassify_to) and enforced by
         _flush_record's guard — so the class name in code is guaranteed to match the name
         on disk. Single or many: register_case_types(A) or register_case_types(A, B, C)."""
         for case_cls in case_classes:

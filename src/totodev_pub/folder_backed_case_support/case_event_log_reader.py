@@ -15,6 +15,8 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_ENTER_STATE,
     EV_CLOSED,
+    EV_FAIL_TRANSITION,
+    EV_TRIGGER_TIMEOUT,
     EVENTS_DIR_NAME,
 )
 
@@ -68,3 +70,19 @@ class CaseEventLogReader:
         """Modification time of the most recent event, or None if the log is empty."""
         ev = next(self._log.events(), None)  # most recent event (recent_first=True)
         return ev.mtime if ev else None
+
+    @property
+    def transition_fail_count(self) -> int:
+        """How many transition attempts have FAILED while the case has been in its CURRENT
+        state. Counts both a transition whose work raised (CASE_FAIL_TRANSITION) and one
+        whose work was hard-aborted by a trigger timeout (CASE_TRIGGER_TIMEOUT) — a timeout
+        is a failed attempt. STATE-scoped, not a lifetime total: the walk stops at the
+        latest CASE_ENTER_STATE (the dwell boundary), so the count resets to 0 whenever the
+        case enters a new state. The fact the `@FAIL` guard compares against."""
+        n = 0
+        for ev in self._log.events(recent_first=True):
+            if ev.label == EV_ENTER_STATE:
+                break                       # reached the boundary of the current dwell
+            if ev.label in (EV_FAIL_TRANSITION, EV_TRIGGER_TIMEOUT):
+                n += 1
+        return n

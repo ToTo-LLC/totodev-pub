@@ -1,9 +1,9 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""AdvanceResult: the structured outcome of a single FolderBackedCase.advance() call.
+"""AdvanceResult: the structured outcome of a single FolderBackedCase.case_advance() call.
 
-advance() is a NON-THROWING reporter for the auto-driver: it (almost) always returns one
+case_advance() is a NON-THROWING reporter for the auto-driver: it (almost) always returns one
 of these instead of raising, so a blind driver can inspect what happened without wrapping
 every call in try/except. Exceptions are carried as DATA in `exceptions` rather than
 thrown — including the synthetic AutoAdvanceBlocked when guards provably wall off every
@@ -21,11 +21,11 @@ from totodev_pub.folder_backed_case_support.exceptions import AutoAdvanceBlocked
 
 @dataclass(frozen=True)
 class AdvanceResult:
-    """One advance() outcome.
+    """One case_advance() outcome.
 
     Attributes:
-        initial_state  the state the case was in when advance() began.
-        final_state    the state the case is in when advance() returned.
+        initial_state  the state the case was in when case_advance() began.
+        final_state    the state the case is in when case_advance() returned.
         trigger        the auto trigger that fired (or, on a failure, the one attempted);
                        None when nothing was attempted (e.g. already closed / no candidates).
         exceptions     exceptions encountered, carried as DATA (not raised): a transition
@@ -55,6 +55,6 @@ class AdvanceResult:
         return any(not isinstance(e, AutoAdvanceBlocked) for e in self.exceptions)
 
     def __bool__(self) -> bool:
-        """Truthy iff the case progressed — so legacy `if await case.advance():` loops
-        (and run_to_completion) keep their original meaning under the richer return type."""
+        """Truthy iff the case progressed — so `if await case.case_advance():` driver loops
+        keep their natural meaning under the richer return type."""
         return self.progressed
