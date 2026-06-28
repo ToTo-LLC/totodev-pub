@@ -565,7 +565,7 @@ class FolderBackedCase(ABC):
 
         Quick use:
           Your working files live here. Use case.case_assets.folder, .asset_path(...),
-          .relative_path(...), .write(...), .keep_asset(...), .list_assets(), etc.
+          .relative_path(...), .write(...), .add_keep_rules(...), .list_assets(), etc.
           Anything not kept via the manifest is purged when the case closes.
 
         Maintainer notes:
