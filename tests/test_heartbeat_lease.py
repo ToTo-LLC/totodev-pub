@@ -157,7 +157,7 @@ def test_ttl_provider_is_consulted_per_beat(tmp_path):
 def test_handoff_keeps_lease_on_disk_and_parks(tmp_path):
     lease = _lease(tmp_path)
     lease.acquire()
-    before = lease.path.stat().st_mtime
+    before = lease.path.stat().st_mtime_ns
     time.sleep(0.01)
 
     token = lease.handoff()
@@ -166,7 +166,7 @@ def test_handoff_keeps_lease_on_disk_and_parks(tmp_path):
     assert lease.path.exists()
     assert isinstance(token, LeaseHandoff)
     assert token.path == str(lease.path)
-    assert token.token == lease.path.stat().st_mtime
+    assert token.token == lease.path.stat().st_mtime_ns
     assert token.token > before
     # The parked holder is no longer the active beater.
     assert not lease.is_active()
@@ -187,10 +187,10 @@ def test_handoff_ignore_policy_makes_heartbeat_a_noop(tmp_path):
     lease = _lease(tmp_path)
     lease.acquire()
     lease.handoff(on_stray_heartbeat="ignore")
-    frozen = lease.path.stat().st_mtime
+    frozen = lease.path.stat().st_mtime_ns
 
     lease.heartbeat(min_update_secs=0)   # no raise, and the token is untouched
-    assert lease.path.stat().st_mtime == frozen
+    assert lease.path.stat().st_mtime_ns == frozen
 
 
 def test_handoff_rejects_unknown_stray_policy(tmp_path):
@@ -248,7 +248,36 @@ def test_delegate_beats_immediately_despite_default_throttle(tmp_path):
     delegate = HeartbeatLease.from_handoff(token, ttl_provider=lambda: 5_000.0)
     time.sleep(0.01)
     delegate.heartbeat()   # default min_update_secs=15, must still beat
-    assert delegate.path.stat().st_mtime > token.token
+    assert delegate.path.stat().st_mtime_ns > token.token
+
+
+def test_heartbeat_retries_when_filesystem_rounds_token(tmp_path, monkeypatch):
+    lease = _lease(tmp_path)
+    lease.acquire()
+    existing = lease._my_token
+    assert existing is not None
+
+    sequence = [existing, existing, existing, existing + 1]
+
+    def fake_on_disk_token():
+        if sequence:
+            return sequence.pop(0)
+        return existing + 1
+
+    utime_calls = 0
+    real_utime = os.utime
+
+    def counting_utime(*args, **kwargs):
+        nonlocal utime_calls
+        utime_calls += 1
+        return real_utime(*args, **kwargs)
+
+    monkeypatch.setattr(lease, "_on_disk_token", fake_on_disk_token)
+    monkeypatch.setattr(os, "utime", counting_utime)
+
+    lease.heartbeat(min_update_secs=0)
+    assert utime_calls >= 2
+    assert lease._my_token == existing + 1
 
 
 def test_round_trip_handoff_and_resume(tmp_path):
@@ -290,7 +319,7 @@ def test_resume_detects_expiry_during_handoff(tmp_path):
     # past, so the lease is reclaimable and must not be silently resumed.
     past = time.time() - 60
     os.utime(owner.path, (past, past))
-    expired = LeaseHandoff(path=str(owner.path), token=past)
+    expired = LeaseHandoff(path=str(owner.path), token=owner.path.stat().st_mtime_ns)
 
     with pytest.raises(LeaseOwnershipLostError):
         owner.resume(expired)
@@ -312,7 +341,10 @@ def test_resume_rejects_token_for_a_different_path(tmp_path):
     owner = _lease(tmp_path)
     owner.acquire()
     owner.handoff()
-    foreign = LeaseHandoff(path=str(tmp_path / "somewhere-else.lease"), token=time.time() + 100)
+    foreign = LeaseHandoff(
+        path=str(tmp_path / "somewhere-else.lease"),
+        token=int((time.time() + 100) * 1_000_000_000),
+    )
 
     with pytest.raises(ValueError):
         owner.resume(foreign)

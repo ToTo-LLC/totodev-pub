@@ -33,7 +33,7 @@ class LeaseHandoff(NamedTuple):
     supplies its own when reconstructing.
     """
     path: str
-    token: float
+    token: int
 
 
 class LeaseAlreadyHeldError(Exception):
@@ -82,6 +82,8 @@ class LeaseHandedOffError(Exception):
 class HeartbeatLease:
     """Single-owner, file-mtime lease with throttled heartbeat refresh."""
 
+    _TOKEN_ADVANCE_RETRY_OFFSETS_SECS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0)
+
     def __init__(self, lease_path: Path, *, ttl_provider: Callable[[], float]) -> None:
         self._path = Path(lease_path)
         self._ttl_provider = ttl_provider
@@ -89,7 +91,7 @@ class HeartbeatLease:
         self._released = False
         self._parked = False
         self._stray_policy: Literal["raise", "ignore"] = "raise"
-        self._my_mtime: float | None = None
+        self._my_token: int | None = None
         self._last_beat_local: float = 0.0
 
     @property
@@ -103,11 +105,29 @@ class HeartbeatLease:
         except FileNotFoundError:
             return None
 
+    def _on_disk_token(self) -> int | None:
+        try:
+            return self._path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return None
+
     def _beat(self) -> None:
-        expiry = time.time() + self._ttl_provider()
         self._path.touch(exist_ok=True)
-        os.utime(self._path, (expiry, expiry))
-        self._my_mtime = self._on_disk_mtime()
+        prior_token = self._on_disk_token()
+        ttl = self._ttl_provider()
+        for offset in self._TOKEN_ADVANCE_RETRY_OFFSETS_SECS:
+            expiry = time.time() + ttl + offset
+            expiry_ns = int(expiry * 1_000_000_000)
+            os.utime(self._path, ns=(expiry_ns, expiry_ns))
+            token = self._on_disk_token()
+            if token is not None and token != prior_token:
+                self._my_token = token
+                break
+        else:
+            # Filesystem mtime granularity can collapse adjacent writes. If a
+            # bounded retry still cannot advance the token, keep the best token
+            # we can observe so callers do not proceed with stale local state.
+            self._my_token = self._on_disk_token()
         self._last_beat_local = time.monotonic()
         self._held = True
         self._released = False
@@ -134,7 +154,7 @@ class HeartbeatLease:
             raise LeaseReleasedError(self._path)
         if time.monotonic() - self._last_beat_local < min_update_secs:
             return
-        if validate_ownership and self._on_disk_mtime() != self._my_mtime:
+        if validate_ownership and self._on_disk_token() != self._my_token:
             raise LeaseOwnershipLostError(self._path)
         self._beat()
 
@@ -172,13 +192,13 @@ class HeartbeatLease:
             raise LeaseHandedOffError(self._path)
         if not self.is_active():
             raise LeaseReleasedError(self._path)
-        if self._on_disk_mtime() != self._my_mtime:
+        if self._on_disk_token() != self._my_token:
             raise LeaseOwnershipLostError(self._path)
         self._beat()
         self._parked = True
         self._stray_policy = on_stray_heartbeat
-        assert self._my_mtime is not None
-        return LeaseHandoff(path=str(self._path), token=self._my_mtime)
+        assert self._my_token is not None
+        return LeaseHandoff(path=str(self._path), token=self._my_token)
 
     def resume(self, handoff: LeaseHandoff) -> None:
         """Re-adopt a handed-off lease from its token, becoming the active beater.
@@ -194,10 +214,12 @@ class HeartbeatLease:
                 f"Handoff token is for {handoff.path!r}, not this lease's "
                 f"{str(self._path)!r}."
             )
-        on_disk = self._on_disk_mtime()
-        if on_disk is None or on_disk != handoff.token or on_disk <= time.time():
+        on_disk = self._on_disk_token()
+        if on_disk is None or on_disk != handoff.token:
             raise LeaseOwnershipLostError(self._path)
-        self._my_mtime = handoff.token
+        if (on_disk / 1_000_000_000) <= time.time():
+            raise LeaseOwnershipLostError(self._path)
+        self._my_token = handoff.token
         self._last_beat_local = 0.0
         self._held = True
         self._released = False
