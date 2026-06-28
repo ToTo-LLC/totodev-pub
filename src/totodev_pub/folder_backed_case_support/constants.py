@@ -13,6 +13,8 @@ LEASE_NAME      = ".case.lease"      # single-owner lease: content-free; mtime =
 EVENTS_DIR_NAME = "events"           # case event-log folder (PrimitiveEventLog storage)
 ASSETS_DIR_NAME = "assets"           # the downstream-owned asset "playground"
 KEEP_LIST_NAME  = "_keep_assets.txt" # retention manifest at the CASE ROOT (NOT under assets/)
+LOGS_DIR_NAME   = "logs"             # per-case folder-logging tee (NOT under assets/)
+LOG_FILE_NAME   = "case.log"         # the single appended per-case log file inside logs/
 
 # Reserved case-owned artifacts at the case root; create_case_in_folder() rejects targets
 # that already contain any of these names to avoid colliding with a prior case.
@@ -22,7 +24,12 @@ CASE_RESERVED_ARTIFACT_NAMES = (
     ASSETS_DIR_NAME,
     KEEP_LIST_NAME,
     LEASE_NAME,
+    LOGS_DIR_NAME,
 )
+
+# Single line written in place of the log contents when the closure retention policy
+# is PURGE (the file is rewritten, never unlinked, so the folder layout stays stable).
+LOG_PURGE_SENTINEL = "Log auto-truncated by FolderBackedCase closure policy."
 
 # Event-log labels written by the FolderBackedCase base class. Every label is
 # CASE_-prefixed so an observer can isolate the family's lifecycle events with a

@@ -10,7 +10,13 @@ from .constants import (
     LEASE_NAME,
     ASSETS_DIR_NAME,
     KEEP_LIST_NAME,
+    LOGS_DIR_NAME,
     CASE_BASE_EVENT_PREFIX,
+)
+from .case_logging import (
+    LogRetention,
+    set_case_log_retention,
+    get_case_log_retention,
 )
 from .exceptions import (
     CaseAlreadyOpenError,
@@ -45,7 +51,11 @@ __all__ = [
     "LEASE_NAME",
     "ASSETS_DIR_NAME",
     "KEEP_LIST_NAME",
+    "LOGS_DIR_NAME",
     "CASE_BASE_EVENT_PREFIX",
+    "LogRetention",
+    "set_case_log_retention",
+    "get_case_log_retention",
     "CaseAlreadyOpenError",
     "OwnershipLostError",
     "DetachedCaseError",

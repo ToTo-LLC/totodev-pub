@@ -71,11 +71,13 @@ import datetime
 import functools
 import logging
 import time
+import weakref
 from abc import ABC
 from pathlib import Path
 
 from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME, LEASE_NAME, EVENTS_DIR_NAME, ASSETS_DIR_NAME, KEEP_LIST_NAME,
+    LOGS_DIR_NAME, LOG_FILE_NAME,
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
     DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
@@ -97,6 +99,10 @@ from totodev_pub.folder_backed_case_support.heartbeat_lease import (
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser, FsmChainSpec,)
 from totodev_pub.folder_backed_case_support.case_machine_factory import _CaseMachineFactory
+from totodev_pub.folder_backed_case_support.case_logging import (
+    LogRetention, set_case_log_retention, get_case_log_retention,
+    build_case_logger, write_attach_banner, purge_case_log,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -109,7 +115,8 @@ __all__ = [
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
     "RECORD_NAME", "LEASE_NAME", "EVENTS_DIR_NAME", "ASSETS_DIR_NAME", "KEEP_LIST_NAME",
-    "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
+    "LOGS_DIR_NAME", "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
+    "LogRetention", "set_case_log_retention",
 ]
 
 
@@ -623,7 +630,7 @@ class FolderBackedCase(ABC):
         *,
         record_cls: type[CaseRecord] | None = None,
         case_cls: type[FolderBackedCase] | None = None,
-    ) -> CaseRecord:
+    ) -> type[CaseRecord]:
         """Read the identity record from disk — lock-free, no live case, no registry.
 
         Quick use:
@@ -678,7 +685,9 @@ class FolderBackedCase(ABC):
     # The record-type seam: defaults to CaseRecord, so the ~80% case never sets it. It is
     # NOT something you must declare — only override it when you need extra fields: subclass
     # CaseRecord and set `_record_cls = MyRecord`, and every case then carries that schema.
-    # Read the live record back via case_fetch_record().
+    # Read the live record back via case_fetch_record().  Note that many
+    # case types will have no need to override this.  the Case record is
+    # deliberately lightweight, seldom written, often read.
     _record_cls: type[CaseRecord] = CaseRecord
 
     @classmethod
@@ -797,8 +806,6 @@ class FolderBackedCase(ABC):
         or dynamic budget — keep it cheap, it is consulted on every step that has work."""
         return self._fsm.trigger_timeouts.get(trigger, DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS)
 
-    # The case's other factory-read override seam, case_dwell_secs, is an everyday status read
-    # (the `@DWELL` value), so it lives up in SECTION 2's at-a-glance reads. Override it there.
 
     def archive_grouping_label(self) -> str:
         """Destination archive grouping when this case closes. Default: close month.
@@ -1023,6 +1030,19 @@ class FolderBackedCase(ABC):
             self._lease.acquire()
         except LeaseAlreadyHeldError as e:
             raise CaseAlreadyOpenError(self._folder, expires_in=e.expires_in) from e
+        # Per-case folder-logging tee (always on). Set up only AFTER the lease is held, so we
+        # never write into a folder owned by another process. The state provider is
+        # weakref-based so the per-instance logger never pins its owning case, and the
+        # close-after-write handler holds no persistent fd (thousands of live cases cost ~0
+        # open descriptors at rest).
+        _case_ref = weakref.ref(self)
+        self.log = build_case_logger(
+            self._record.case_id,
+            self._folder / LOGS_DIR_NAME / LOG_FILE_NAME,
+            case_object_type=type(self).__name__,
+            state_provider=lambda: (c := _case_ref()) and c.case_state,
+        )
+        write_attach_banner(self.log)
         # Instance-time machine binding is delegated to _CaseMachineFactory.
         self._machine = _CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
 
@@ -1081,6 +1101,10 @@ class FolderBackedCase(ABC):
             self._notify(SIG_CLOSING, src=src, dest=dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
             self._assets.purge_ephemeral()
+            # The case logically ends here; apply the closure log-retention policy alongside
+            # the asset purge. PURGE rewrites logs/case.log with a single sentinel line.
+            if get_case_log_retention() is LogRetention.PURGE:
+                purge_case_log(self._folder / LOGS_DIR_NAME / LOG_FILE_NAME)
             self._record.closed = self._last_activity
             self._flush_record(force=True)
             # Closure keeps the lock; it does NOT detach. Force a fresh beat so the now-idle
@@ -1166,7 +1190,7 @@ class FolderBackedCase(ABC):
         try:
             self.on_transition_exception(src, trigger, final_state, err)
         except Exception:                     # a misbehaving hook must not mask the real error
-            logger.exception("on_transition_exception hook raised for case %s", self.case_id)
+            self.log.exception("on_transition_exception hook raised for case %s", self.case_id)
 
         # 5. Re-raise so case_advance() can fold it in (and direct callers stay fail-fast).
         raise err
