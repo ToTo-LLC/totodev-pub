@@ -223,10 +223,14 @@ class FolderBackedCase(ABC):
         arguments that are bundled up into this tctx object. These
         arguments are then available in the hook methods as
         `tctx.kwargs`.
-      * Note that when triggers are fired by invocation of the
-        case_advance() method, the tctx.kwargs is empty. This means that if
-        your code uses AUTO edges ('--') then you won't be seeing any
-        tctx.kwargs passed to your hook methods.
+      * When a trigger is fired by the NO-ARGUMENT case_advance() sweep
+        (the usual way AUTO '--' edges run), `tctx.kwargs` is empty — so
+        purely auto-driven flows won't see any kwargs in their hooks.
+      * You CAN, however, pass a bag through case_advance() by pinning a
+        trigger: `case_advance(trigger, trigger_kwargs={...})`. Those
+        kwargs reach the hooks as `tctx.kwargs` exactly as a direct call
+        would. This is REQUIRED to fire a MANUAL ('==') edge through
+        case_advance(), and OPTIONAL for an auto edge.
 
     Very very advanced users of this library may need the full power of
     `transitions` library.  That's deliberately been made possible but
@@ -428,33 +432,60 @@ class FolderBackedCase(ABC):
         if self._lease is not None:
             self._lease.release()
 
-    async def case_advance(self) -> AdvanceResult:
-        """Fire ONE auto (`--`) forward step from the current state and report the
-        outcome as an AdvanceResult (a NON-throwing reporter — see that class).
+    async def case_advance(
+        self, trigger: str | None = None, trigger_kwargs: dict | None = None,
+    ) -> AdvanceResult:
+        """Fire ONE forward step from the current state and report the outcome as an
+        AdvanceResult (a NON-throwing reporter — see that class).
 
         Quick use:
-          Call repeatedly (a driver loops it across cases) to drive AUTO (`--`) edges. It
-          tries each auto-advance candidate in declared order, firing the first whose
-          guard permits. Transition failures are REPORTED, not raised: inspect
-          `result.progressed` and `result.exceptions` rather than wrapping in try/except.
-          (Manual `==` edges are fired directly via `await case.<trigger>()`, which DOES
-          raise on failure — that is the other error channel.)
+          Call with NO arguments (the common case) and a driver loops it across cases to
+          drive AUTO (`--`) edges: it tries each auto candidate in declared order, firing
+          the first whose guard permits. Transition failures are REPORTED, not raised:
+          inspect `result.progressed` and `result.exceptions` rather than wrapping in
+          try/except.
+
+          Pass `trigger=...` to pin ONE specific edge — and uniquely, this is how you fire
+          a MANUAL (`==`) edge through the reporter instead of via `await case.<trigger>()`
+          (which DOES raise). A pinned manual edge needs `trigger_kwargs` (see Args); the
+          same AdvanceResult / non-throwing contract then covers both auto and manual.
+
+        Args:
+            trigger: optional name of a single edge (auto OR manual) leaving the current
+              state. When given, ONLY that trigger is attempted — every other edge is
+              skipped, and the BLOCKED detection below is suppressed (pinning one edge can
+              never prove the whole state is walled off). If the name is not a trigger on
+              this FSM at all, that is misuse and RAISES ValueError. If it IS a real
+              trigger but simply has no edge out of the current state, it is a plain
+              non-advance (nothing fires; no exception).
+            trigger_kwargs: the keyword arguments bundled into `tctx.kwargs` for the fired
+              trigger's hooks. REQUIRED (even as `{}`) when `trigger` names a MANUAL (`==`)
+              edge — firing one without it is misuse and RAISES ValueError; the explicit
+              bag is the deliberate "yes, fire this manual edge" acknowledgement. OPTIONAL
+              for AUTO edges and for the no-argument sweep (an auto edge may still accept a
+              bag if you choose to pass one; omitted means an empty `tctx.kwargs`). Passing
+              it with `trigger=None` is meaningless and RAISES ValueError.
 
         Maintainer notes:
           Outcomes (all returned, never raised — except the misuse guards below):
             * progressed — a transition fired; result.trigger names it, final_state advanced.
-            * a failed attempt — a candidate's work raised; the exception is CAUGHT and
-              carried in result.exceptions (decorated + logged + hooked by _on_fsm_exception),
-              the case stayed in its source state to be retried next pass.
-            * nothing to do — terminal, or every guard declined, with no progress.
-            * BLOCKED — when nothing fired/raised AND the state has no timed escape, a
-              synthetic AutoAdvanceBlocked is carried in result.exceptions (one CASE_ALERT is
-              logged on first detection per dwell). Deterministic: same state, same block.
-          Still RAISES the misuse guard DetachedCaseError (acting on a detached husk is a
-          programming error, not a flow condition). Also RAISES OwnershipLostError (NOT folded
-          into the result) if a beat — the pre-step one below or the in-flight keepalive —
-          finds the folder reclaimed by another owner: a fatal invariant breach, not a step
-          outcome.
+            * a failed attempt — the work raised; the exception is CAUGHT and carried in
+              result.exceptions (decorated + logged + hooked by _on_fsm_exception), the case
+              stayed in its source state to be retried next pass. This now ALSO covers a
+              pinned MANUAL edge: routed through here, its failure is folded as data rather
+              than raised (a direct `await case.<trigger>()` still raises — the other channel).
+            * nothing to do — terminal, a guard declined, or the pinned trigger has no edge
+              from here, all with no progress.
+            * BLOCKED — only on the NO-ARGUMENT sweep: when nothing fired/raised AND the
+              state has no timed escape, a synthetic AutoAdvanceBlocked is carried in
+              result.exceptions (one CASE_ALERT logged on first detection per dwell).
+              Deterministic. NOT synthesized for a pinned `trigger=...` call.
+          Misuse guards that RAISE (programming errors, not flow conditions): DetachedCaseError
+          (acting on a detached husk); ValueError (unknown trigger name, a manual edge fired
+          without trigger_kwargs, or trigger_kwargs given with no trigger). Also RAISES
+          OwnershipLostError (NOT folded into the result) if a beat — the pre-step one below
+          or the in-flight keepalive — finds the folder reclaimed by another owner: a fatal
+          invariant breach, not a step outcome.
 
         Contract (well-behaved async hooks):
           The lease keepalive — and cooperative scheduling generally — depends on a trigger's
@@ -464,6 +495,11 @@ class FolderBackedCase(ABC):
           case sharing it AND its own heartbeat, so the lease can lapse despite the keepalive.
           The keepalive protects only the trigger's WORK slot (perform_/before); guards and
           on_enter/on_exit/after are expected to be light (see the hook conventions)."""
+        if trigger is None and trigger_kwargs is not None:
+            raise ValueError(
+                "case_advance(): trigger_kwargs was supplied without a trigger; kwargs have "
+                "no edge to flow into. Name the trigger to fire, or drop trigger_kwargs."
+            )
         initial = self.case_state
         if self.case_is_closed:         # terminal short-circuits first (a closed case stays
             return AdvanceResult(initial, self.case_state)   # bound; lease cleared only by case_detach())
@@ -475,26 +511,77 @@ class FolderBackedCase(ABC):
         # lease is fresh going in; the in-flight keepalive (the _LeaseKeepalive pulse in the
         # perform wrapper) then keeps beating for the duration of a slow, awaited step.
         self.case_heartbeat()
+        # Two driving modes, each its own focused helper: pin ONE edge (auto OR manual), or
+        # sweep the auto edges in declared order. Both shape outcomes via _attempt_one_trigger.
+        if trigger is not None:
+            return await self._advance_pinned(initial, trigger, trigger_kwargs)
+        return await self._advance_auto_sweep(initial)
+
+    async def _advance_pinned(
+        self, initial: str, trigger: str, trigger_kwargs: dict | None,
+    ) -> AdvanceResult:
+        """The `trigger=...` path of case_advance(): attempt exactly ONE named edge (auto OR
+        manual), with NO BLOCKED synthesis (pinning one edge can never prove the whole state
+        is walled off). See case_advance()'s docstring for the full contract; the validation
+        order here is deliberate — `is_auto` is only meaningful once an edge is confirmed."""
+        if trigger not in self._fsm.triggers:   # not a trigger at all -> misuse, raise
+            known = ", ".join(self._fsm.triggers) or "(none)"
+            raise ValueError(
+                f"case_advance(trigger={trigger!r}): {type(self).__name__!r} has no such "
+                f"trigger on its FSM. Known triggers: {known}."
+            )
+        if not self._has_edge_from(self.case_state, trigger):
+            # A real trigger, but no edge leaves the CURRENT state by it: a plain non-advance
+            # (NOT 'blocked' — only the unrestricted sweep can prove that).
+            return AdvanceResult(initial, self.case_state)
+        if trigger_kwargs is None and not self._fsm.is_auto(self.case_state, trigger):
+            raise ValueError(
+                f"case_advance(trigger={trigger!r}): {trigger!r} is a MANUAL ('==') edge "
+                f"from state {self.case_state!r}; pass trigger_kwargs (even {{}}) to fire it "
+                "through the reporter. (Auto '--' edges may omit it.)"
+            )
+        result = await self._attempt_one_trigger(initial, trigger, trigger_kwargs or {})
+        # progressed/failed -> report it; guard declined (None) -> a plain non-advance.
+        return result if result is not None else AdvanceResult(initial, self.case_state)
+
+    async def _advance_auto_sweep(self, initial: str) -> AdvanceResult:
+        """The no-argument path of case_advance(): try each AUTO (`--`) candidate leaving the
+        current state in declared order, firing the first whose guard permits. When none fire
+        or raise, the pass made no progress — and if the state has no self-relaxing timed
+        escape it is provably auto-advance blocked, so a synthetic AutoAdvanceBlocked is
+        carried as data (see _make_blocked). See case_advance()'s docstring for the contract."""
         candidates = self._forward_candidates(self.case_state)
-        exceptions: list[Exception] = []
-        for trigger, _dest in candidates:
-            try:
-                # A guard-blocked transition returns falsy WITHOUT changing state (and
-                # without firing the after-hook), so we fall through to the next.
-                if await getattr(self, trigger)():
-                    return AdvanceResult(initial, self.case_state, trigger=trigger)
-            except OwnershipLostError:  # FATAL: the keepalive (or pre-step beat) found the
-                raise                   # folder reclaimed mid-step — not a flow condition to
-                                        # fold; surface it exactly like the line-446 beat does.
-            except Exception as err:    # absorbed: reported as data, not raised at driver
-                exceptions.append(err)
-                return AdvanceResult(initial, self.case_state, trigger=trigger,
-                                     exceptions=tuple(exceptions))
-        # Nothing fired and nothing raised: no forward progress this pass. If the state has
-        # no guaranteed timed escape, it is provably auto-advance blocked.
+        for trig, _dest in candidates:
+            result = await self._attempt_one_trigger(initial, trig, {})
+            if result is not None:      # progressed or failed-and-folded -> done this pass
+                return result
+        exceptions: tuple = ()
         if self.case_state not in self._fsm.timed_escape_states:
-            exceptions.append(self._make_blocked(candidates))
-        return AdvanceResult(initial, self.case_state, exceptions=tuple(exceptions))
+            exceptions = (self._make_blocked(candidates),)
+        return AdvanceResult(initial, self.case_state, exceptions=exceptions)
+
+    async def _attempt_one_trigger(
+        self, initial: str, trigger: str, kwargs: dict,
+    ) -> AdvanceResult | None:
+        """Fire ONE already-selected trigger with `kwargs` and shape the outcome — the
+        shared core under both the auto sweep and the pinned/manual path of case_advance().
+
+        Returns an AdvanceResult when the attempt PROGRESSED (a transition fired) or FAILED
+        (the work raised — the exception decorated/logged/hooked by _on_fsm_exception and then
+        folded in as data). Returns None when the guard DECLINED (the trigger returned falsy
+        WITHOUT changing state and WITHOUT firing the after-hook), so the auto sweep can fall
+        through to the next candidate. Re-raises OwnershipLostError UNFOLDED — the keepalive
+        (or pre-step beat) found the folder reclaimed mid-step, a fatal invariant breach, not
+        a step outcome to carry."""
+        try:
+            if await getattr(self, trigger)(**kwargs):
+                return AdvanceResult(initial, self.case_state, trigger=trigger)
+            return None
+        except OwnershipLostError:      # FATAL: surfaced exactly like the pre-step beat does.
+            raise
+        except Exception as err:        # absorbed: reported as data, not raised at the driver
+            return AdvanceResult(initial, self.case_state, trigger=trigger,
+                                 exceptions=(err,))
 
     # Note: there is deliberately NO run_to_completion()/drive loop on the case itself.
     # A case knows how to take ONE step (case_advance()); deciding WHICH case to drive, in what
@@ -1267,6 +1354,18 @@ class FolderBackedCase(ABC):
             if state in srcs and self._fsm.is_auto(state, t["trigger"]):
                 out.append((t["trigger"], t["dest"]))
         return out
+
+    def _has_edge_from(self, state: str, trigger: str) -> bool:
+        """Is `trigger` an edge (auto OR manual) leaving `state`? Unlike _forward_candidates
+        (auto only), this also sees MANUAL (`==`) edges. case_advance()'s pinned-trigger path
+        uses it to tell 'real trigger but not available from here' (a plain non-advance) apart
+        from 'not a trigger at all' (misuse that raises) — the latter checked against
+        self._fsm.triggers before this."""
+        for t in self._fsm.transitions:
+            srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
+            if state in srcs and t["trigger"] == trigger:
+                return True
+        return False
 
     def _make_blocked(self, candidates) -> AutoAdvanceBlocked:
         """Build the AutoAdvanceBlocked marker for the current (provably stuck) state,

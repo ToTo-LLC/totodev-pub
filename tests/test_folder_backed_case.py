@@ -624,3 +624,219 @@ def test_manual_trigger_keeps_lease_alive_during_slow_work(tmp_path, monkeypatch
             assert case.case_state == "done"
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Overloaded case_advance(trigger=..., trigger_kwargs=...): pinning a single
+# edge (auto OR manual) and firing it through the non-throwing reporter.
+# ---------------------------------------------------------------------------
+
+class _PinAutoCase(FolderBackedCase):
+    """Two AUTO ('--') edges leave `fork`, declared alpha-then-beta. Lets a test prove that
+    pinning fires the chosen edge (even the later one) rather than the sweep's first pick."""
+
+    fsm_state_chains = [
+        "^fork--alpha-->done_a^",
+        "fork--beta-->done_b^",
+    ]
+
+    async def perform_alpha(self, tctx):
+        pass
+
+    async def perform_beta(self, tctx):
+        pass
+
+
+class _OverloadCase(FolderBackedCase):
+    """An AUTO edge (`go`), a MANUAL edge (`submit`), and a guarded AUTO edge
+    (`gated#approve`) — the full surface the overloaded case_advance() must drive. Hooks
+    record the kwargs they receive (to prove `trigger_kwargs` flows into `tctx.kwargs`), and
+    `fail_submit` lets a test force a manual-edge failure to check it is FOLDED, not raised."""
+
+    fsm_state_chains = ["^new--go-->ready==submit-->review--gated#approve-->done^"]
+    open_gate: bool = False
+    fail_submit: bool = False
+    go_kwargs: dict | None = None
+    submit_kwargs: dict | None = None
+
+    async def perform_go(self, tctx):
+        self.go_kwargs = dict(tctx.kwargs)
+
+    async def perform_submit(self, tctx):
+        self.submit_kwargs = dict(tctx.kwargs)
+        if self.fail_submit:
+            raise RuntimeError("submit boom")
+
+    async def perform_approve(self, tctx):
+        pass
+
+    async def guard_gated(self, tctx):
+        return self.open_gate
+
+
+def test_pinned_auto_trigger_fires_only_that_edge(tmp_path):
+    """trigger='beta' fires the LATER-declared auto edge; the unrestricted sweep would have
+    taken 'alpha' (first). A fresh case left to sweep confirms the default still picks alpha."""
+    async def scenario():
+        with _PinAutoCase.create_case_in_folder(tmp_path / "pin", case_id="pin-1") as case:
+            result = await case.case_advance(trigger="beta")
+            assert result.progressed
+            assert result.trigger == "beta"
+            assert case.case_state == "done_b"
+
+        with _PinAutoCase.create_case_in_folder(tmp_path / "sweep", case_id="pin-2") as case:
+            result = await case.case_advance()      # no pin -> first declared candidate
+            assert result.progressed
+            assert case.case_state == "done_a"
+
+    asyncio.run(scenario())
+
+
+def test_pinned_auto_trigger_accepts_optional_kwargs(tmp_path):
+    """The softened contract: an AUTO edge MAY be pinned WITH trigger_kwargs, and those
+    kwargs reach the hook via tctx.kwargs (the no-argument sweep still gets an empty bag)."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "autokw", case_id="ak-1") as case:
+            result = await case.case_advance(trigger="go", trigger_kwargs={"x": 1})
+            assert result.progressed
+            assert case.case_state == "ready"
+            assert case.go_kwargs == {"x": 1}
+
+    asyncio.run(scenario())
+
+
+def test_pinned_manual_trigger_fires_and_passes_kwargs(tmp_path):
+    """A MANUAL ('==') edge can be driven through the reporter with trigger_kwargs, which
+    flow into the hook's tctx.kwargs — and the outcome is a normal progressed AdvanceResult."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "man", case_id="m-1") as case:
+            await case.case_advance()               # go: new -> ready
+            assert case.case_state == "ready"
+            result = await case.case_advance(trigger="submit", trigger_kwargs={"note": "hi"})
+            assert result.progressed
+            assert result.trigger == "submit"
+            assert case.case_state == "review"
+            assert case.submit_kwargs == {"note": "hi"}
+
+    asyncio.run(scenario())
+
+
+def test_pinned_manual_without_kwargs_raises(tmp_path):
+    """Firing a MANUAL edge through case_advance() WITHOUT trigger_kwargs is misuse: it
+    raises ValueError with a message that names the trigger and how to fix it."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "manbad", case_id="m-2") as case:
+            await case.case_advance()               # go: new -> ready
+            with pytest.raises(ValueError) as excinfo:
+                await case.case_advance(trigger="submit")
+            msg = str(excinfo.value)
+            assert "submit" in msg
+            assert "trigger_kwargs" in msg
+            assert case.case_state == "ready"        # nothing fired
+
+    asyncio.run(scenario())
+
+
+def test_pinned_manual_failure_is_folded_not_raised(tmp_path):
+    """A pinned MANUAL edge whose work raises has its exception FOLDED into the
+    AdvanceResult (the reporter contract), not propagated; the case stays in its source state."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "manfail", case_id="m-3") as case:
+            await case.case_advance()               # go: new -> ready
+            case.fail_submit = True
+            result = await case.case_advance(trigger="submit", trigger_kwargs={})
+            assert not result.progressed
+            assert result.failed
+            assert result.trigger == "submit"
+            assert any(isinstance(e, RuntimeError) for e in result.exceptions)
+            assert case.case_state == "ready"
+
+    asyncio.run(scenario())
+
+
+def test_unknown_trigger_raises_valueerror(tmp_path):
+    """A trigger name that is not on the FSM at all is a programming error -> ValueError,
+    with a message that lists the known triggers to aid debugging."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "unk", case_id="u-1") as case:
+            with pytest.raises(ValueError) as excinfo:
+                await case.case_advance(trigger="nonesuch")
+            msg = str(excinfo.value)
+            assert "nonesuch" in msg
+            assert "go" in msg and "submit" in msg   # known triggers are listed
+            assert case.case_state == "new"
+
+    asyncio.run(scenario())
+
+
+def test_pinned_trigger_not_available_from_state_is_non_advance(tmp_path):
+    """A REAL trigger that simply has no edge out of the current state is a plain
+    non-advance — nothing fires, nothing raises, and it is NOT reported as blocked."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "na", case_id="na-1") as case:
+            # 'submit' leaves `ready`, not `new`; from `new` it is unavailable.
+            result = await case.case_advance(trigger="submit", trigger_kwargs={})
+            assert not result.progressed
+            assert not result.blocked
+            assert result.exceptions == ()
+            assert case.case_state == "new"
+
+    asyncio.run(scenario())
+
+
+def test_pinned_auto_guard_decline_does_not_synthesize_blocked(tmp_path):
+    """The #2 fix: when a pinned AUTO edge's guard declines, the call is a plain non-advance
+    and does NOT synthesize AutoAdvanceBlocked — even though the unrestricted sweep on the
+    same (timed-escape-less) state WOULD, because pinning one edge cannot prove the state is
+    walled off. Opening the gate then lets the very same pinned trigger progress."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "gate", case_id="g-1") as case:
+            await case.case_advance()                # go: new -> ready
+            await case.submit()                      # manual direct: ready -> review
+            assert case.case_state == "review"
+
+            # Pinned + guard declined: non-advance, NOT blocked.
+            pinned = await case.case_advance(trigger="approve")
+            assert not pinned.progressed
+            assert not pinned.blocked
+            assert case.case_state == "review"
+
+            # Unrestricted sweep on the same state IS provably blocked (only an auto edge,
+            # guard-declined, and no timed escape).
+            swept = await case.case_advance()
+            assert not swept.progressed
+            assert swept.blocked
+
+            # Open the gate and the same pinned trigger now fires.
+            case.open_gate = True
+            opened = await case.case_advance(trigger="approve")
+            assert opened.progressed
+            assert case.case_state == "done"
+
+    asyncio.run(scenario())
+
+
+def test_trigger_kwargs_without_trigger_raises(tmp_path):
+    """Passing trigger_kwargs with no trigger has no edge to flow into -> ValueError."""
+    async def scenario():
+        with _OverloadCase.create_case_in_folder(tmp_path / "kwonly", case_id="k-1") as case:
+            with pytest.raises(ValueError) as excinfo:
+                await case.case_advance(trigger_kwargs={})
+            assert "trigger_kwargs" in str(excinfo.value)
+            assert case.case_state == "new"
+
+    asyncio.run(scenario())
+
+
+def test_pinned_unknown_trigger_on_closed_case_is_noop(tmp_path):
+    """Closed-case precedence: the terminal short-circuit runs BEFORE trigger validation, so
+    even an unknown trigger on a closed case is a silent no-op rather than a ValueError."""
+    async def scenario():
+        with _PinAutoCase.create_case_in_folder(tmp_path / "closed", case_id="c-1") as case:
+            await case.case_advance(trigger="alpha")
+            assert case.case_is_closed
+            result = await case.case_advance(trigger="bogus")   # would raise if open
+            assert not result.progressed
+            assert result.exceptions == ()
+
+    asyncio.run(scenario())
