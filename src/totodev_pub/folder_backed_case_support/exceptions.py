@@ -44,6 +44,18 @@ class DetachedCaseError(Exception):
         self.folder = folder
 
 
+class CaseInFlightError(Exception):
+    """Raised by a CasePoolDriver.remove() when an advance is currently in progress for
+    the case. A live, in-flight step must finish before the case can be handed back: call
+    request_halt() and wait for the HALTED event, then remove()."""
+    def __init__(self, folder: Path):
+        super().__init__(
+            f"Cannot remove {folder}: an advance is currently in flight. "
+            "Call request_halt() and wait for the HALTED event before removing."
+        )
+        self.folder = folder
+
+
 class UnregisteredCaseTypeError(Exception):
     """Raised by CaseTypeRegistry.rehydrate() and peek_class(return_class_object=True)
     when the stored case_object_type has no matching entry in the registry — i.e. the

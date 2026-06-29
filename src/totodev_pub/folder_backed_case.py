@@ -73,6 +73,7 @@ import logging
 import time
 import weakref
 from abc import ABC
+from dataclasses import replace
 from pathlib import Path
 
 from totodev_pub.folder_backed_case_support.constants import (
@@ -513,9 +514,39 @@ class FolderBackedCase(ABC):
         self.case_heartbeat()
         # Two driving modes, each its own focused helper: pin ONE edge (auto OR manual), or
         # sweep the auto edges in declared order. Both shape outcomes via _attempt_one_trigger.
-        if trigger is not None:
-            return await self._advance_pinned(initial, trigger, trigger_kwargs)
-        return await self._advance_auto_sweep(initial)
+        # Wrap the single dedicated alert-logging method for the duration of the step so any
+        # CASE_ALERT logged (from a hook, or the auto-block detector) is harvested into the
+        # AdvanceResult — otherwise an alert that neither changed state nor raised would be
+        # invisible to a blind driver. Restore in finally and fold the messages in.
+        return await self._advance_collecting_alerts(initial, trigger, trigger_kwargs)
+
+    async def _advance_collecting_alerts(
+        self, initial: str, trigger: str | None, trigger_kwargs: dict | None,
+    ) -> AdvanceResult:
+        """Run the chosen advance helper while harvesting CASE_ALERTs into the result.
+
+        Temporarily overrides the instance's case_log_alert so each call both records the
+        message locally AND performs its normal on-disk logging, then restores the class
+        method (by deleting the instance attribute) and folds the collected messages into
+        the returned AdvanceResult's `alerts`. See case_advance() / AdvanceResult.alerts."""
+        collected: list[str] = []
+        underlying = self.case_log_alert
+
+        def _collecting_log_alert(short_msg: str = "", *, where: str | None = None) -> None:
+            collected.append(short_msg)
+            underlying(short_msg, where=where)
+
+        self.case_log_alert = _collecting_log_alert  # type: ignore[method-assign]
+        try:
+            if trigger is not None:
+                result = await self._advance_pinned(initial, trigger, trigger_kwargs)
+            else:
+                result = await self._advance_auto_sweep(initial)
+        finally:
+            del self.case_log_alert  # drop the instance override; class method shines through
+        if collected:
+            result = replace(result, alerts=tuple(collected))
+        return result
 
     async def _advance_pinned(
         self, initial: str, trigger: str, trigger_kwargs: dict | None,
@@ -631,6 +662,37 @@ class FolderBackedCase(ABC):
     @property
     def case_is_closed(self) -> bool:
         return self.case_state in self._fsm.closed_states
+
+    @property
+    def case_is_detached(self) -> bool:
+        """True when this object is no longer bound to its folder: the lease was
+        released (`case_detach()` / context-manager exit) or has expired.
+
+        A detached object is a husk — any mutating use (`case_advance()`,
+        `case_heartbeat()`, manual triggers) raises `DetachedCaseError`. This is
+        the non-raising check to ask FIRST; to get a usable case back, rehydrate
+        a fresh instance with `case_type_registry.rehydrate(case_folder)`.
+        Detachment can happen at any time (here or in other code), so callers
+        that intend to drive a case may want to consult this beforehand."""
+        return self._lease is None or not self._lease.is_active()
+
+    @property
+    def case_advanceable(self) -> bool:
+        """True when the CURRENT state has at least one auto-advanceable (`--`) exit, i.e.
+        an unattended `case_advance()` could fire here (subject to guards). False for a
+        terminal/closed state or a state left only by MANUAL (`==`) edges.
+
+        STRUCTURAL, not runtime: this reports whether an auto exit EXISTS, not whether a
+        guard would currently permit it. A scheduler uses it to tell a genuinely manual-only
+        state (no auto exits — accelerate demotion) apart from a state whose guards merely
+        declined this pass (auto exits exist — normal cadence). See AutoAdvanceBlocked for
+        the runtime "declined now and can't ripen" signal."""
+        return bool(self._forward_candidates(self.case_state))
+
+    @property
+    def advanceable(self) -> bool:
+        """Alias of `case_advanceable` matching the CasePoolDriver design vocabulary."""
+        return self.case_advanceable
 
     @property
     def case_transition_fail_count(self) -> int:
@@ -1333,7 +1395,7 @@ class FolderBackedCase(ABC):
     #       transfer WITHIN one TTL, not for long idle — it does not extend the window.
 
     def _check_active(self) -> None:
-        if self._lease is None or not self._lease.is_active():
+        if self.case_is_detached:
             raise DetachedCaseError(self._folder)
 
     def __del__(self):

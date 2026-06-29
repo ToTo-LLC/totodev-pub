@@ -32,11 +32,16 @@ class AdvanceResult:
                        failure (the original exception, decorated with `.case_context`),
                        and/or an AutoAdvanceBlocked when the case is provably stuck. Usually
                        empty or a single entry.
+        alerts         CASE_ALERT messages logged during this step (e.g. from inside a hook
+                       or the auto-block detector), harvested by case_advance() so a blind
+                       driver sees an alert that neither changed state nor raised. Empty when
+                       none.
     """
     initial_state: str
     final_state: str
     trigger: Optional[str] = None
     exceptions: tuple = field(default_factory=tuple)
+    alerts: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def progressed(self) -> bool:
@@ -53,6 +58,11 @@ class AdvanceResult:
         """Did a transition attempt raise (any carried exception that is NOT the blocked
         marker)? A failed attempt typically left the case in its source state to retry."""
         return any(not isinstance(e, AutoAdvanceBlocked) for e in self.exceptions)
+
+    @property
+    def alerted(self) -> bool:
+        """Did the step log at least one CASE_ALERT (harvested into `alerts`)?"""
+        return bool(self.alerts)
 
     def __bool__(self) -> bool:
         """Truthy iff the case progressed — so `if await case.case_advance():` driver loops
