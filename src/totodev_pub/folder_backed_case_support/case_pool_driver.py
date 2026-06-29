@@ -58,11 +58,21 @@ policy; the class is named for that policy (e.g. ``TieredCasePoolDriver``).
 
 INVOCATION MODEL
 ----------------
-Subclasses implement ``advance()``, which performs one full beat of the
-driver: sweep eligible cases, fire any due advances, run the heartbeat walk,
-then sleep internally (via ``asyncio.sleep``) for the remainder of the beat
-period. Sleeping inside ``advance()`` is intentional — the driver's job is to
-pace load smoothly, and the beat period is an implementation-internal concern.
+Subclasses implement ``advance()``, which performs one beat of the driver. A
+beat carries exactly three obligations, with NO promised ordering among them
+and no requirement that any particular mechanism be used:
+
+1. Heartbeat the cases that are due for a heartbeat, keeping their leases live.
+2. Fire ``case_advance()`` on the cases that are due to advance.
+3. Use an async-friendly strategy to smooth trigger execution across the pool
+   so load is paced rather than surged.
+
+The pacing in (3) is a contract about *behavior*, not *implementation*: a
+beat must not hammer the whole fleet at once, but it is free to achieve that
+however it likes. An ``asyncio.sleep`` is one perfectly good choice, but it is
+not guaranteed — and the relative order of heartbeating, advancing, and any
+smoothing delay is deliberately left to the subclass. Callers must not depend
+on a beat sleeping, nor on any fixed sequence of these steps.
 
 The base class provides a concrete ``start()`` / ``stop()`` that loop over
 ``advance()``. Derived classes may override these if they need additional
@@ -70,8 +80,8 @@ concurrent tasks, but the default is sufficient for most implementations and
 serves as a readable reference for how the loop works.
 
 ``advance()`` accepts an optional ``suggested_interval_secs`` parameter that
-is advisory — pass ``0.0`` in tests to suppress sleeping and force immediate
-processing.
+is advisory — pass ``0.0`` in tests to request immediate processing with no
+smoothing delay.
 
 EVENT EXTENSIBILITY
 -------------------
@@ -152,6 +162,19 @@ class CasePoolDriver(ABC):
     folder path of a case MUST NOT be changed while the case is in the pool —
     doing so invalidates the driver's ability to locate it and produces
     undefined behavior. Remove the case first if its folder must move.
+
+    Rehydration tolerance (NOT a blanket guarantee). A case may be detached
+    (its live object disconnected from disk) at any time, by this driver or by
+    other code. MANY of the driver's methods tolerate this by auto-rehydrating
+    a fresh case object from disk (keyed by the folder path) before using it,
+    so a detached case does not interrupt them. This is deliberately NOT a
+    promise that EVERY method on the surface rehydrates: some methods only read
+    cached state, and others (e.g. ``remove``) hand the object back as-is. In
+    particular, subclasses MUST implement auto-rehydration for ``advance()`` and
+    ``fire()`` — the two methods that drive a case forward — so that driving
+    never fails merely because a case was detached out from under it. Where
+    rehydration is impossible (folder gone, or the case is owned elsewhere), the
+    affected case is evicted and an ``EVICTED`` event fires.
     """
 
     def __init__(self) -> None:
@@ -212,17 +235,32 @@ class CasePoolDriver(ABC):
 
     @abstractmethod
     async def advance(self, suggested_interval_secs: float | None = None) -> None:
-        """Perform one full beat of the driver.
+        """Perform one beat of the driver.
 
-        Sweeps eligible cases, fires due advances, runs the heartbeat walk,
-        then sleeps internally for the remainder of the beat period.
+        A beat has three obligations and makes no promise about the order in
+        which they happen or the mechanism used (see INVOCATION MODEL):
+
+        1. Heartbeat the cases that are due, keeping their leases live.
+        2. Fire ``case_advance()`` on the cases that are due to advance.
+        3. Smooth trigger execution across the pool with an async-friendly
+           strategy so load is paced rather than surged.
+
         ``suggested_interval_secs`` is advisory — pass ``0.0`` in tests to
-        suppress sleeping and force immediate processing.
+        request immediate processing with no smoothing delay. Note that an
+        ``asyncio.sleep`` is only one valid way to satisfy (3); callers must
+        not rely on a beat sleeping, nor on any fixed sequence of these steps.
 
-        If ``advance()`` discovers that one of its cases has been detached
-        (i.e. deliberately disconnected from disk), it may rehydrate a fresh
-        case object from disk — keyed by the case's folder path — in order to
-        satisfy the request and continue driving it.
+        Graceful recovery from detachment (REQUIRED of this method): a case may
+        be detached (its live object disconnected from disk) at any time, by this
+        driver or by other code. Before ``advance()`` exercises a case, the
+        subclass MUST auto-rehydrate any that appear detached — transparently
+        opening a fresh case object from disk, keyed by the folder path — so a
+        detached case does not interrupt the beat. This is the caller's
+        expectation of ``advance()`` specifically (see the class docstring: such
+        tolerance is required of ``advance()`` and ``fire()``, but is not a
+        blanket guarantee across every method). Where rehydration is impossible
+        (the folder is gone, or the case is now owned elsewhere), the driver
+        gives up on that case and fires ``EVICTED``.
 
         This is the autonomous beat. To prompt a specific transition out of band
         (e.g. a user-interface action), see fire(), which routes a single advance
@@ -266,6 +304,12 @@ class CasePoolDriver(ABC):
         Routing through the driver ensures the result informs scheduling state.
         If the case is already mid-transition (in-flight), the caller receives
         the result of that in-progress advance rather than a new invocation.
+
+        Like ``advance()``, ``fire()`` drives a case forward, so the subclass
+        MUST auto-rehydrate a detached case before firing (see the class
+        docstring) — a case detached out from under the driver must not cause
+        ``fire()`` to fail; it rehydrates and proceeds, or evicts and fires
+        ``EVICTED`` when rehydration is impossible.
 
         Under the hood, fire() eventually results in a call to
         FolderBackedCase.case_advance() for the given trigger name — or, if you
