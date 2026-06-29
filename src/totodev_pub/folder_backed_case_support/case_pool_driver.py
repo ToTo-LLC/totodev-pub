@@ -4,10 +4,20 @@ PURPOSE
 -------
 A ``FolderBackedCase`` knows how to take a single forward step
 (``case_advance()``) but has no opinion about when that step should be called
-or how many cases should be driven concurrently. ``CasePoolDriver`` fills that
-gap: it accepts a collection of cases and takes responsibility for advancing
-them automatically, spreading the resulting system load over time rather than
-triggering work in surges.
+or how many cases should be driven concurrently. That is fine for one case, but
+anyone working with *many* cases quickly runs into the same set of needs:
+something has to keep every case moving forward, watch their progress so a human
+or system can intervene when a case stalls or alerts, and do all of this in a
+way that is sensitive to server performance — pacing the work rather than
+hammering the machine in surges. ``CasePoolDriver`` is the home for that
+responsibility.
+
+It also makes a fleet of cases pleasant to work with in aggregate: callers deal
+with one pool object instead of bookkeeping a loose bag of individual cases.
+The intended mental model is that most programs that work with cases will keep a
+case pool driver at their core — one that effectively *owns* all the open cases.
+Cases generally live inside a driver from the moment they open until they close;
+holding a live case outside of a driver is the exception, not the norm.
 
 Beyond scheduling, the driver handles two concerns that callers should not
 have to manage themselves:
@@ -23,6 +33,13 @@ The driver is primarily an in-memory scheduling layer. It stays agnostic about
 disk layout and does not manage case folders, archival, or discovery — those
 belong to a higher-level manager. Cases arrive already bound (live, lease-held)
 and leave the same way.
+
+(Side note, not central to this class: a complete real-world deployment will
+usually need additional classes and structures layered around the driver to
+handle resource management — e.g. where case folders are stored, archiving old
+cases, and detaching case objects once they are closed or have gone inactive.
+The driver deliberately leaves that out of scope so it can stay a focused
+scheduling layer.)
 
 TYPICAL LIFECYCLE
 -----------------
