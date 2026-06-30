@@ -138,6 +138,36 @@ def test_is_expired_reports_held_expired_and_absent(tmp_path):
     assert HeartbeatLease.is_expired(lease.path) is True
 
 
+def test_secs_left_reports_remaining_held_expired_and_absent(tmp_path):
+    lease = _lease(tmp_path, ttl=300.0)
+
+    # Absent file => None.
+    assert HeartbeatLease.secs_left(lease.path) is None
+
+    # Held (future token) => positive seconds, bounded by the TTL just written.
+    lease.acquire()
+    remaining = HeartbeatLease.secs_left(lease.path)
+    assert remaining is not None
+    assert 0 < remaining <= 300.0 + 1.0
+
+    # Past token => None (expired collapses to "no live lease", same as absent).
+    past = time.time() - 60
+    os.utime(lease.path, (past, past))
+    assert HeartbeatLease.secs_left(lease.path) is None
+
+
+def test_secs_left_tracks_the_written_expiry(tmp_path):
+    lease = _lease(tmp_path)
+    lease.acquire()
+    # Pin the on-disk expiry to a known future instant and confirm the reported
+    # remaining seconds line up with it (independent of the ttl_provider).
+    future = time.time() + 120
+    os.utime(lease.path, (future, future))
+    remaining = HeartbeatLease.secs_left(lease.path)
+    assert remaining is not None
+    assert remaining == pytest.approx(future - time.time(), abs=1.0)
+
+
 def test_ttl_provider_is_consulted_per_beat(tmp_path):
     ttls = iter([100.0, 5_000.0])
     lease = HeartbeatLease(tmp_path / "res.lease", ttl_provider=lambda: next(ttls))

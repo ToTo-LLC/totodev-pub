@@ -157,8 +157,7 @@ class CaseJournal:
         """Mtime of the latest CASE_ENTER_STATE event (the dwell anchor), or None when
         the case has not entered a state yet (brand-new). Naive/local, like all
         event-log mtimes; the caller converts to aware UTC."""
-        ev = next(self._reader.primitive.events(label_glob=EV_ENTER_STATE), None)
-        return ev.mtime if ev is not None else None
+        return self._reader.last_enter_state_mtime
 
     def count_fails_this_dwell(self) -> int:
         """Count of failed pre-commit attempts since the current state was entered — the

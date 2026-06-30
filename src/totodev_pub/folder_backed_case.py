@@ -104,12 +104,14 @@ from totodev_pub.folder_backed_case_support.case_logging import (
     LogRetention, set_case_log_retention, get_case_log_retention,
     build_case_logger, write_attach_banner, purge_case_log,
 )
+from totodev_pub.folder_backed_case_support.case_read_view import CaseReadView
+from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "FolderBackedCase", "HeartbeatLease",
+    "FolderBackedCase", "FolderBackedCaseReader", "CaseReadView", "HeartbeatLease",
     "CaseRecord", "CaseEventLogReader", "CaseJournal", "CaseAssets", "AdvanceResult",
     "StateChainParser", "FsmChainSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
@@ -652,6 +654,18 @@ class FolderBackedCase(ABC):
         return self._record.nickname
 
     @property
+    def case_object_type(self) -> str:
+        return self._record.case_object_type
+
+    @property
+    def case_created(self) -> datetime.datetime:
+        return self._record.created
+
+    @property
+    def case_closed_at(self) -> datetime.datetime | None:
+        return self._record.closed
+
+    @property
     def case_folder(self) -> Path:
         return self._folder
 
@@ -712,6 +726,14 @@ class FolderBackedCase(ABC):
         It is ALSO an override SEAM: a subclass may override this property (e.g. to fake the
         clock in tests), and the _CaseMachineFactory reads it back for the `@DWELL` guard."""
         return (_utcnow() - self._state_entered_at).total_seconds()
+
+    @property
+    def case_last_activity(self) -> datetime.datetime | None:
+        return self._as_utc(self._journal.last_activity) or self._record.created
+
+    @property
+    def case_events(self) -> CaseEventLogReader:
+        return self._journal.reader
 
     # ---- assets (playground + retention), grouped on CaseAssets ----
 
@@ -820,6 +842,20 @@ class FolderBackedCase(ABC):
         has expired (reclaimable), False if still held, None if unheld. Policy-free —
         the expiry is baked into the mtime, so no state/TTL lookup is needed here."""
         return HeartbeatLease.is_expired(Path(folder) / LEASE_NAME)
+
+    @staticmethod
+    def peek_lease_secs_left(folder: Path) -> float | None:
+        """Lock-free read of how long the case's lease is still held: positive seconds
+        remaining when a live lease is held, None when the lease is free (file absent
+        OR expired — both mean reclaimable to an observer; the owner is unknowable by
+        inspection). For the absent-vs-expired distinction use `is_heartbeat_expired`."""
+        return HeartbeatLease.secs_left(Path(folder) / LEASE_NAME)
+
+    @staticmethod
+    def get_case_reader(folder: Path) -> "FolderBackedCaseReader":
+        """Return a lock-free read-only view of a case folder — no lease, no registry."""
+        from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+        return FolderBackedCaseReader(Path(folder))
 
     # =======================================================================
     # SECTION 3 — Customization seams (highly-custom developers)

@@ -72,6 +72,14 @@ class CaseEventLogReader:
         return ev.mtime if ev else None
 
     @property
+    def last_enter_state_mtime(self) -> Optional[datetime.datetime]:
+        """Mtime of the latest CASE_ENTER_STATE event (the dwell anchor), or None when
+        the case has not entered a state yet (brand-new). Naive/local, like all
+        event-log mtimes; the caller converts to aware UTC."""
+        ev = next(self._log.events(label_glob=EV_ENTER_STATE), None)
+        return ev.mtime if ev is not None else None
+
+    @property
     def transition_fail_count(self) -> int:
         """How many transition attempts have FAILED while the case has been in its CURRENT
         state. Counts both a transition whose work raised (CASE_FAIL_TRANSITION) and one

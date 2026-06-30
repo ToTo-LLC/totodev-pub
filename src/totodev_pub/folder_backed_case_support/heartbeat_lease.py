@@ -255,3 +255,19 @@ class HeartbeatLease:
             return Path(lease_path).stat().st_mtime <= time.time()
         except FileNotFoundError:
             return None
+
+    @staticmethod
+    def secs_left(lease_path: Path) -> float | None:
+        """Seconds until the live lease at `lease_path` expires, or None.
+
+        Returns the positive seconds remaining when a live lease is held, and None
+        when there is no live lease — collapsing "file absent" and "already expired"
+        into the same answer on purpose: to a read-only observer both mean the lease
+        is free/reclaimable, and the actual owner is never knowable by inspection.
+        Callers that genuinely need the absent-vs-expired distinction should use
+        `is_expired` (None/True/False). Lock-free; the expiry is baked into the mtime."""
+        try:
+            remaining = Path(lease_path).stat().st_mtime - time.time()
+        except FileNotFoundError:
+            return None
+        return remaining if remaining > 0 else None

@@ -34,6 +34,7 @@ from .exceptions import (
     TriggerTimeout,
 )
 from .case_record import CaseRecord
+from .case_read_view import CaseReadView
 from .case_event_log_reader import CaseEventLogReader
 from .case_journal import CaseJournal
 from .case_assets import CaseAssets
@@ -71,6 +72,7 @@ __all__ = [
     "AutoAdvanceBlocked",
     "TriggerTimeout",
     "CaseRecord",
+    "CaseReadView",
     "CaseEventLogReader",
     "CaseJournal",
     "CaseAssets",
