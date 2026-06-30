@@ -25,6 +25,16 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     Subclasses may add typed fields (see FolderBackedCase._record_cls). Any added
     field MUST have a default / be Optional so that older on-disk records (which lack
     the field) can still be loaded after a class upgrade.
+
+    DELIBERATE EXCEPTION to the "added fields must be defaulted" rule above:
+    `asset_aliases` is REQUIRED (no default). A case must declare the data objects it
+    serializes (FolderBackedCase enforces the class-level declaration); records predating
+    this field will not load, by design.
+
+    `asset_aliases` mirrors the in-code AssetSpec on disk: each alias maps to a dict of
+    {"path": <relative path under assets/, may be a glob>, "deserializer": <bare class
+    __name__ for a FileMappedPydanticMixin subclass, or "Callable" for a plain callable
+    that a reader cannot resolve by name>}.
     """
 
     case_object_type: str              # bare class __name__; resolved via the registry at hydration
@@ -33,6 +43,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     nickname: Optional[str] = None     # optional human-friendly label for listings
     created: datetime.datetime         # immutable
     closed: Optional[datetime.datetime] = None  # stamped once on terminal entry
+    asset_aliases: dict[str, dict[str, str]]  # alias -> {"path": ..., "deserializer": ...}
 
     @field_validator("created", "closed")
     @classmethod

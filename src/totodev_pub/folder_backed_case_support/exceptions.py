@@ -194,6 +194,29 @@ class MissingFsmError(Exception):
         )
 
 
+class AssetSchemaError(Exception):
+    """Raised at class-definition time when a FolderBackedCase subclass's `asset_schema`
+    is malformed: a glob in the simple-dict form (which cannot infer an alias), an empty
+    or invalid alias, a duplicate alias, or a missing deserializer while flexible loading
+    is off. The message names the specific offence and how to fix it."""
+
+
+class MissingAssetSchemaError(Exception):
+    """Raised at first construction/creation of a concrete FolderBackedCase subclass that
+    never declared `asset_schema`. Declaring nothing is still declaring: set an empty
+    mapping if the case has no data objects. Legal-and-uncaught on abstract intermediates
+    (never instantiated), exactly like MissingFsmError."""
+
+    def __init__(self, carrier_name: str):
+        self.carrier_name = carrier_name
+        super().__init__(
+            f"{carrier_name!r} does not declare its asset schema. Set `asset_schema` on "
+            "the class to the data objects this case serializes into assets/, e.g. "
+            '`asset_schema = {"receipts/rlist.json": ReceiptListRecord}`; declare an empty '
+            "mapping (`asset_schema = {}`) if this case has none."
+        )
+
+
 class FsmChainParseError(Exception):
     """Raised by StateChainParser when an `fsm_state_chains` entry cannot be parsed
     into a well-formed FSM. Carries the offending chain (and its index in the list,

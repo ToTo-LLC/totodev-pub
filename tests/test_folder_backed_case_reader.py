@@ -1,16 +1,27 @@
 """Tests for FolderBackedCaseReader and CaseReadView preparatory properties."""
 
 import asyncio
+import json
 import time
 
 import pytest
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from totodev_pub.folder_backed_case import FolderBackedCase, FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
+from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (
+    asset_dataclass_registry,
+)
+from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
+from totodev_pub.lazy_loaded_file_data import LazyLoadedFileData
 
 
 class SimpleCase(FolderBackedCase):
+
+
+    asset_schema = {}
     fsm_state_chains = ["^new==begin-->open==finish-->done^"]
 
 
@@ -143,3 +154,85 @@ def test_live_case_prep_properties(tmp_path):
         assert case.case_last_activity is not None
         asyncio.run(case.begin())
         assert case.case_state == "open"
+
+
+class ReceiptCase(FolderBackedCase):
+    asset_schema = {"receipts/rlist.json": (lambda p: p.read_text())}
+    fsm_state_chains = ["^new--begin-->done^"]
+
+    async def perform_begin(self, tctx):
+        pass
+
+
+def test_reader_loads_declared_object_flexibly(tmp_path):
+    (tmp_path / "case").mkdir()
+    folder = tmp_path / "case" / "r1"
+    case = ReceiptCase.create_case_in_folder(folder)
+    try:
+        case.case_assets.write("receipts/rlist.json", json.dumps({"total": 9}).encode())
+    finally:
+        case.case_detach()
+
+    reader = FolderBackedCaseReader(folder)
+    assets = reader.case_assets
+    assert assets.registered_aliases() == ["rlist"]
+    obj = assets.load_dataclass("rlist")
+    assert isinstance(obj, LazyLoadedFileData)
+    assert obj.as_dict()["total"] == 9
+
+
+class ReceiptListRecord(BaseModel, FileMappedPydanticMixin):
+    total: int = 0
+
+
+class TypedReceiptCase(FolderBackedCase):
+    asset_schema = {"receipts/rlist.json": ReceiptListRecord}
+    fsm_state_chains = ["^new--begin-->done^"]
+
+    async def perform_begin(self, tctx):
+        pass
+
+
+def test_reader_typed_resolution_opt_in(tmp_path):
+    (tmp_path / "case").mkdir()
+    folder = tmp_path / "case" / "typed"
+    case = TypedReceiptCase.create_case_in_folder(folder)
+    try:
+        # Persisted deserializer name mirrors the in-code class.
+        assert case._record.asset_aliases["rlist"]["deserializer"] == "ReceiptListRecord"
+        case.case_assets.write("receipts/rlist.json", json.dumps({"total": 42}).encode())
+    finally:
+        case.case_detach()
+
+    # Default: generic lazy load (zero dependency).
+    assert isinstance(
+        FolderBackedCaseReader(folder).case_assets.load_dataclass("rlist"),
+        LazyLoadedFileData,
+    )
+
+    # Opt-in without registration: still falls back to lazy.
+    opted = FolderBackedCaseReader(folder, resolve_asset_types=True)
+    assert isinstance(opted.case_assets.load_dataclass("rlist"), LazyLoadedFileData)
+
+    # Opt-in with registration: typed load.
+    asset_dataclass_registry.register(ReceiptListRecord)
+    try:
+        obj = FolderBackedCaseReader(folder, resolve_asset_types=True).case_assets.load_dataclass("rlist")
+        assert isinstance(obj, ReceiptListRecord)
+        assert obj.total == 42
+    finally:
+        asset_dataclass_registry._registry.pop("ReceiptListRecord", None)
+
+
+def test_reader_typed_resolution_callable_sentinel_falls_back(tmp_path):
+    (tmp_path / "case").mkdir()
+    folder = tmp_path / "case" / "sentinel"
+    case = ReceiptCase.create_case_in_folder(folder)  # lambda deserializer -> "Callable"
+    try:
+        assert case._record.asset_aliases["rlist"]["deserializer"] == "Callable"
+        case.case_assets.write("receipts/rlist.json", json.dumps({"total": 1}).encode())
+    finally:
+        case.case_detach()
+
+    reader = FolderBackedCaseReader(folder, resolve_asset_types=True)
+    assert isinstance(reader.case_assets.load_dataclass("rlist"), LazyLoadedFileData)

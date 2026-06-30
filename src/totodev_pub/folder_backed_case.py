@@ -89,7 +89,13 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
     CaseTypeMismatchError, RecordTypeMismatchError,
     IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
-    AutoAdvanceBlocked, TriggerTimeout,)
+    AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError,)
+from totodev_pub.folder_backed_case_support.asset_schema import (
+    AssetSpec, normalize_asset_schema, deserializer_name,
+)
+from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (
+    asset_specs_from_record,
+)
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
 from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
 from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
@@ -282,6 +288,13 @@ class FolderBackedCase(ABC):
     # See StateChainParser for the authoritative, complete grammar.
     fsm_state_chains: list[str] = []
 
+    # Required declaration of the case's on-disk data objects (see asset_schema module).
+    # A concrete subclass MUST set this (even to {}). The sentinel lets abstract
+    # intermediates stay undeclared until something tries to instantiate them.
+    _ASSET_SCHEMA_NOT_DECLARED = object()
+    asset_schema = _ASSET_SCHEMA_NOT_DECLARED
+    _asset_specs: dict[str, AssetSpec] | None = None
+
     # ---- Hook & guard naming conventions (the rest of "defining a case type") ----
     #
     # After `fsm_state_chains`, behavior is attached purely by METHOD NAME. Suffixes are
@@ -358,6 +371,7 @@ class FolderBackedCase(ABC):
           lifecycle bookend CASE_NEW plus the initial CASE_ENTER_STATE.
         """
         case_folder = Path(case_folder)
+        asset_aliases = cls._resolve_asset_aliases()
         parent = case_folder.parent
         if not parent.exists():
             raise FileNotFoundError(
@@ -391,6 +405,7 @@ class FolderBackedCase(ABC):
             external_key=external_key,
             nickname=nickname,
             created=_utcnow(),
+            asset_aliases=asset_aliases,
             **fields,
         )
         # Direct save (no instance yet) — SAFE BY CONSTRUCTION: case_object_type is set to
@@ -830,11 +845,21 @@ class FolderBackedCase(ABC):
         return CaseEventLogReader.for_folder(Path(folder))
 
     @staticmethod
-    def peek_case_assets(folder: Path) -> CaseAssets:
+    def peek_case_assets(folder: Path, *, resolve_asset_types: bool = False) -> CaseAssets:
         """A CaseAssets over the folder — lock-free, no live case, no registry. Uniform
         across every case type. Exposes list_assets(), keep_list(), asset_path(), etc.
-        The peek analog of a live case's .case_assets property."""
-        return CaseAssets(Path(folder))
+        The peek analog of a live case's .case_assets property.
+
+        Loads via LazyLoadedFileData by default (no case class needed). Pass
+        resolve_asset_types=True to type each alias whose persisted deserializer name
+        resolves through the asset-dataclass registry (others fall back to lazy)."""
+        record = CaseRecord.open(str(Path(folder) / RECORD_NAME), without_lock=True)
+        specs = asset_specs_from_record(
+            record.asset_aliases, resolve_types=resolve_asset_types
+        )
+        return CaseAssets(
+            Path(folder), asset_specs=specs, flexible_dataclass_loading=True,
+        )
 
     @staticmethod
     def is_heartbeat_expired(folder: Path) -> bool | None:
@@ -874,6 +899,29 @@ class FolderBackedCase(ABC):
     # case types will have no need to override this.  the Case record is
     # deliberately lightweight, seldom written, often read.
     _record_cls: type[CaseRecord] = CaseRecord
+
+    @classmethod
+    def _resolve_asset_specs(cls) -> dict[str, AssetSpec]:
+        """The class's declared specs (with deserializers). Raises MissingAssetSchemaError
+        if the concrete subclass never declared `asset_schema`."""
+        if cls.asset_schema is FolderBackedCase._ASSET_SCHEMA_NOT_DECLARED:
+            raise MissingAssetSchemaError(cls.__name__)
+        if cls._asset_specs is None:
+            cls._asset_specs = normalize_asset_schema(cls.asset_schema, flexible=False)
+        return cls._asset_specs
+
+    @classmethod
+    def _resolve_asset_aliases(cls) -> dict[str, dict[str, str]]:
+        """The serializable projection stamped onto CaseRecord: each alias maps to
+        {"path": relative_path, "deserializer": <class __name__> or "Callable"},
+        mirroring the in-code AssetSpec on disk."""
+        return {
+            alias: {
+                "path": spec.relative_path,
+                "deserializer": deserializer_name(spec.deserializer),
+            }
+            for alias, spec in cls._resolve_asset_specs().items()
+        }
 
     @classmethod
     def compile_fsm(cls) -> FsmChainSpec:
@@ -1048,6 +1096,7 @@ class FolderBackedCase(ABC):
             new_cls.__name__, from_type=from_name, at_state=fresh.case_state
         )
         fresh._record.case_object_type = new_cls.__name__   # CONSCIOUS stamp
+        fresh._record.asset_aliases = type(fresh)._resolve_asset_aliases()
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
         for fn in self._listeners:
             fresh.case_add_transition_listener(fn)
@@ -1097,6 +1146,8 @@ class FolderBackedCase(ABC):
         # instance). The result is the shared per-class FSM singleton.
         super().__init_subclass__(**kwargs)
         cls._fsm = cls.compile_fsm()
+        if cls.asset_schema is not FolderBackedCase._ASSET_SCHEMA_NOT_DECLARED:
+            cls._asset_specs = normalize_asset_schema(cls.asset_schema, flexible=False)
         if cls._fsm.primary_chain is not None:
             logger.debug(
                 "FSM for %s: chains compiled (primary=%r, initial=%r, initial_states=%s, "
@@ -1190,7 +1241,11 @@ class FolderBackedCase(ABC):
                 on_disk=self._record.case_object_type, loading_class=cls.__name__
             )
         self._journal = CaseJournal.for_folder(self._folder)
-        self._assets = CaseAssets(self._folder)   # asset playground + retention manifest
+        self._assets = CaseAssets(
+            self._folder,
+            asset_specs=type(self)._resolve_asset_specs(),
+            flexible_dataclass_loading=False,
+        )
         self._listeners: list = []        # fn(case, event_name, info)
         # State is derived from the event log on load; transitions then cache on
         # self.case_state (the machine's model_attribute).

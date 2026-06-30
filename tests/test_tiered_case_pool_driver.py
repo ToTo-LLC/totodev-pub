@@ -44,6 +44,8 @@ def _isolate_case_registry():
 # ---------------------------------------------------------------------------
 
 class AutoCase(FolderBackedCase):
+
+    asset_schema = {}
     """Two auto edges to a terminal: progresses on every step, then closes."""
     fsm_state_chains = ["^s0--step-->s1--step2-->s2^"]
 
@@ -55,11 +57,17 @@ class AutoCase(FolderBackedCase):
 
 
 class ManualCase(FolderBackedCase):
+
+
+    asset_schema = {}
     """Manual-only (no auto exit): not advanceable -> accelerated demotion."""
     fsm_state_chains = ["^waiting==push-->done^"]
 
 
 class GuardedCase(FolderBackedCase):
+
+
+    asset_schema = {}
     """Has an auto exit (advanceable) whose guard always declines: blocked, normal ladder."""
     fsm_state_chains = ["^hold--blockit#go-->done^"]
 
@@ -71,6 +79,9 @@ class GuardedCase(FolderBackedCase):
 
 
 class FailCase(FolderBackedCase):
+
+
+    asset_schema = {}
     """Auto edge whose work raises, with retry room (@FAIL<5): repeated failures."""
     fsm_state_chains = ["^start--@FAIL<5#tryit-->done^"]
 
@@ -79,6 +90,9 @@ class FailCase(FolderBackedCase):
 
 
 class AlertProgressCase(FolderBackedCase):
+
+
+    asset_schema = {}
     """One step that logs an alert AND progresses to a terminal (exercises event order)."""
     fsm_state_chains = ["^s0--step-->s1^"]
 
@@ -87,6 +101,9 @@ class AlertProgressCase(FolderBackedCase):
 
 
 class BlockingCase(FolderBackedCase):
+
+
+    asset_schema = {}
     """Auto step that blocks on an injected gate, to hold a case in-flight."""
     fsm_state_chains = ["^s0--step-->s1^"]
 
