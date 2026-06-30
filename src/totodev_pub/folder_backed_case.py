@@ -32,8 +32,8 @@ seam lives in CasePoolDriver (folder_backed_case_support.case_pool_driver).
 Quick start
 -----------
     class TicketCase(FolderBackedCase):
-        fsm_state_chains = ["^new--open_ticket-->open==close_ticket-->closed^"
-                            "*--@DWELL>14d#non_responsive-->auto_closed^"]  # timed-escape edge
+        fsm_state_chains = ["^new --open_ticket-->open ==close_ticket-->closed^"
+                            "*--@DWELL>14d#non_responsive-->auto_closed^"]  # all state timed-escape edge
 
         async def perform_open_ticket(self, tctx) -> None:
             # do something like log the ticket, contact external systems, etc.
