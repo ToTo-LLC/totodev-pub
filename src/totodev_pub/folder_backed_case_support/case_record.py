@@ -26,15 +26,23 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     field MUST have a default / be Optional so that older on-disk records (which lack
     the field) can still be loaded after a class upgrade.
 
-    DELIBERATE EXCEPTION to the "added fields must be defaulted" rule above:
-    `asset_aliases` is REQUIRED (no default). A case must declare the data objects it
-    serializes (FolderBackedCase enforces the class-level declaration); records predating
-    this field will not load, by design.
+    DELIBERATE EXCEPTIONS to the "added fields must be defaulted" rule above:
+    `asset_aliases` and `fsm_state_chains` are both REQUIRED (no default). A case must
+    declare the data objects it serializes AND its state machine (FolderBackedCase
+    enforces the class-level declarations); records predating these fields will not load,
+    by design.
 
     `asset_aliases` mirrors the in-code AssetSpec on disk: each alias maps to a dict of
     {"path": <relative path under assets/, may be a glob>, "deserializer": <bare class
     __name__ for a FileMappedPydanticMixin subclass, or "Callable" for a plain callable
     that a reader cannot resolve by name>}.
+
+    `fsm_state_chains` mirrors the concrete class's `fsm_state_chains` DSL declaration on
+    disk (the raw chain strings, verbatim). It is stamped ONCE at create (and re-stamped
+    on reclassify, alongside `asset_aliases`); no attempt is made to detect or reconcile
+    later edits to the class. It lets a reader inspect a case's declared lifecycle — and
+    per-alias state validity, once that rides `asset_aliases` — WITHOUT importing the
+    concrete case class or compiling its FSM.
     """
 
     case_object_type: str              # bare class __name__; resolved via the registry at hydration
@@ -44,6 +52,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     created: datetime.datetime         # immutable
     closed: Optional[datetime.datetime] = None  # stamped once on terminal entry
     asset_aliases: dict[str, dict[str, str]]  # alias -> {"path": ..., "deserializer": ...}
+    fsm_state_chains: list[str]        # the concrete class's raw state-chain DSL, verbatim
 
     @field_validator("created", "closed")
     @classmethod

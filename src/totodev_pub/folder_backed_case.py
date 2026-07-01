@@ -35,6 +35,11 @@ Quick start
         fsm_state_chains = ["^new --open_ticket-->open ==close_ticket-->closed^"
                             "*--@DWELL>14d#non_responsive-->auto_closed^"]  # all state timed-escape edge
 
+        asset_schema = {
+            "ticket.yaml": TicketForm,              # alias 'ticket' (inferred from the stem)
+            "customer--conversation.md": ChatLog,   # alias 'conversation' (token after the last '--')
+        }
+
         async def perform_open_ticket(self, tctx) -> None:
             # do something like log the ticket, contact external systems, etc.
             # is called by the open_ticket() trigger
@@ -406,6 +411,7 @@ class FolderBackedCase(ABC):
             nickname=nickname,
             created=_utcnow(),
             asset_aliases=asset_aliases,
+            fsm_state_chains=list(cls.fsm_state_chains),
             **fields,
         )
         # Direct save (no instance yet) — SAFE BY CONSTRUCTION: case_object_type is set to
@@ -1096,6 +1102,7 @@ class FolderBackedCase(ABC):
         )
         fresh._record.case_object_type = new_cls.__name__   # CONSCIOUS stamp
         fresh._record.asset_aliases = type(fresh)._resolve_asset_aliases()
+        fresh._record.fsm_state_chains = list(type(fresh).fsm_state_chains)
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
         for fn in self._listeners:
             fresh.case_add_transition_listener(fn)
