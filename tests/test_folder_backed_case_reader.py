@@ -22,7 +22,7 @@ from totodev_pub.lazy_loaded_file_data import LazyLoadedFileData
 class SimpleCase(FolderBackedCase):
 
 
-    asset_schema = {}
+    asset_aliases = {}
     fsm_state_chains = ["^new==begin-->open==finish-->done^"]
 
 
@@ -166,7 +166,8 @@ def test_live_case_prep_properties(tmp_path):
 
 
 class ReceiptCase(FolderBackedCase):
-    asset_schema = {"receipts/rlist.json": (lambda p: p.read_text())}
+    flexible_dataclass_loading = True
+    asset_aliases = {"receipts/rlist.json": (lambda p: p.read_text())}
     fsm_state_chains = ["^new--begin-->done^"]
 
     async def perform_begin(self, tctx):
@@ -195,7 +196,8 @@ class ReceiptListRecord(BaseModel, FileMappedPydanticMixin):
 
 
 class TypedReceiptCase(FolderBackedCase):
-    asset_schema = {"receipts/rlist.json": ReceiptListRecord}
+    flexible_dataclass_loading = True
+    asset_aliases = {"receipts/rlist.json": ReceiptListRecord}
     fsm_state_chains = ["^new--begin-->done^"]
 
     async def perform_begin(self, tctx):
@@ -207,8 +209,8 @@ def test_reader_typed_resolution_opt_in(tmp_path):
     folder = tmp_path / "case" / "typed"
     case = TypedReceiptCase.create_case_in_folder(folder)
     try:
-        # Persisted deserializer name mirrors the in-code class.
-        assert case._record.asset_aliases["rlist"]["deserializer"] == "ReceiptListRecord"
+        # Persisted loader name mirrors the in-code class.
+        assert case._record.asset_aliases["rlist"]["loader"] == "ReceiptListRecord"
         case.case_assets.write("receipts/rlist.json", json.dumps({"total": 42}).encode())
     finally:
         case.case_detach()
@@ -236,9 +238,9 @@ def test_reader_typed_resolution_opt_in(tmp_path):
 def test_reader_typed_resolution_callable_sentinel_falls_back(tmp_path):
     (tmp_path / "case").mkdir()
     folder = tmp_path / "case" / "sentinel"
-    case = ReceiptCase.create_case_in_folder(folder)  # lambda deserializer -> "Callable"
+    case = ReceiptCase.create_case_in_folder(folder)  # lambda loader -> "Callable"
     try:
-        assert case._record.asset_aliases["rlist"]["deserializer"] == "Callable"
+        assert case._record.asset_aliases["rlist"]["loader"] == "Callable"
         case.case_assets.write("receipts/rlist.json", json.dumps({"total": 1}).encode())
     finally:
         case.case_detach()

@@ -211,10 +211,10 @@ class CaseAssets:
     def load_dataclass(self, alias: str):
         """Resolve an alias to exactly one file and deserialize it."""
         spec = self._require_spec(alias)
-        return self._deserialize(spec, self.dataclass_path(alias))
+        return self._load(spec, self.dataclass_path(alias))
 
     def load_dataclass_file(self, relative_path: str | Path):
-        """Deserialize ONE explicit file, using the deserializer of the spec whose pattern
+        """Deserialize ONE explicit file, using the loader of the spec whose pattern
         matches it. ValueError if no/ambiguous spec; FileNotFoundError if absent."""
         rel = self.relative_path(relative_path)
         matches = [
@@ -232,23 +232,23 @@ class CaseAssets:
         path = self.asset_path(rel)
         if not path.exists():
             raise FileNotFoundError(f"Asset file {path} does not exist.")
-        return self._deserialize(matches[0], path)
+        return self._load(matches[0], path)
 
-    def _deserialize(self, spec: AssetSpec, path: Path):
+    def _load(self, spec: AssetSpec, path: Path):
         if not path.exists():
             raise FileNotFoundError(
                 f"Asset file {path} (alias {spec.alias!r}) does not exist."
             )
-        des = spec.deserializer
-        if des is None:
+        loader = spec.loader
+        if loader is None:
             if not self._flexible:
                 raise AssetSchemaError(
-                    f"alias {spec.alias!r} has no deserializer and flexible loading is off."
+                    f"alias {spec.alias!r} has no loader and flexible loading is off."
                 )
             return LazyLoadedFileData(str(path))
-        if isinstance(des, type) and issubclass(des, FileMappedPydanticMixin):
-            return des.load(str(path), acquire_lock=False)
-        return des(path)
+        if isinstance(loader, type) and issubclass(loader, FileMappedPydanticMixin):
+            return loader.load(str(path), acquire_lock=False)
+        return loader(path)
 
     # ---- purge ----
 

@@ -8,9 +8,7 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 
-from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (
-    asset_specs_from_record,
-)
+from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
@@ -24,10 +22,11 @@ class FolderBackedCaseReader:
 
     Works in any process without importing a concrete case class. Each property
     reads from disk when accessed (no caching, no refresh API) — with ONE
-    deliberate exception: ``case_assets`` memoizes the parsed asset-alias mapping
-    (see its docstring). Multiple reads on the same instance may see slightly
-    different values if the case is advancing underneath; hold property values or
-    sub-objects if you need a snapshot-consistent view.
+    deliberate exception: ``case_assets`` and the alias trust book memoize the
+    parsed asset-alias mapping (see ``case_assets`` docstring). Multiple reads on
+    the same instance may see slightly different values if the case is advancing
+    underneath; hold property values or sub-objects if you need a snapshot-consistent
+    view.
 
     ``case_dwell_secs`` and ``case_lease_secs_left`` are ``now()``-relative and
     decay between accesses. Any caching policy belongs outside this class.
@@ -35,7 +34,7 @@ class FolderBackedCaseReader:
     By default ``case_assets`` loads declared data objects generically via
     LazyLoadedFileData — the zero-dependency story (no case class, no model classes).
     Pass ``resolve_asset_types=True`` to opt in to TYPED loading: each alias whose
-    persisted deserializer name resolves through the asset-dataclass registry
+    persisted loader name resolves through the asset-dataclass registry
     (``asset_dataclass_registry.register(...)`` at startup) loads as that
     FileMappedPydanticMixin subclass; any unresolved name (or the "Callable" sentinel)
     falls back to LazyLoadedFileData for that alias.
@@ -45,6 +44,7 @@ class FolderBackedCaseReader:
         self._folder = Path(case_folder)
         self._resolve_asset_types = resolve_asset_types
         self._assets: CaseAssets | None = None
+        self._asset_book: AliasedAssetSpecs | None = None
 
     @staticmethod
     def _as_utc(dt: datetime.datetime | None) -> datetime.datetime | None:
@@ -56,6 +56,14 @@ class FolderBackedCaseReader:
 
     def _peek_events(self) -> CaseEventLogReader:
         return CaseEventLogReader.for_folder(self._folder)
+
+    def _resolve_asset_book(self) -> AliasedAssetSpecs:
+        if self._asset_book is None:
+            record = self._peek_record()
+            self._asset_book = AliasedAssetSpecs.from_record(
+                record.asset_aliases, resolve_types=self._resolve_asset_types,
+            )
+        return self._asset_book
 
     @property
     def case_id(self) -> str:
@@ -121,7 +129,7 @@ class FolderBackedCaseReader:
         FIRST access, and the resulting CaseAssets is reused on every later
         access — so nothing is loaded unless ``case_assets`` is actually used, and
         repeated access does not re-read or re-parse the record. The alias mapping
-        is safe to cache because it mirrors the class-level asset_schema and never
+        is safe to cache because it mirrors the class-level asset_aliases and never
         changes over a case's life. Asset FILES are still read live by CaseAssets
         methods, so asset CONTENT remains a fresh, point-in-time view.
 
@@ -129,14 +137,18 @@ class FolderBackedCaseReader:
         mapping is first cached; register asset dataclasses before first access.
         """
         if self._assets is None:
-            record = self._peek_record()
-            specs = asset_specs_from_record(
-                record.asset_aliases, resolve_types=self._resolve_asset_types
-            )
             self._assets = CaseAssets(
-                self._folder, asset_specs=specs, flexible_dataclass_loading=True,
+                self._folder,
+                asset_specs=self._resolve_asset_book().spec_map(),
+                flexible_dataclass_loading=True,
             )
         return self._assets
+
+    def case_load_dataclass(self, alias: str) -> object:
+        """Load a declared asset alias after checking persisted state validity.
+        Raises AssetNotTrustedInStateError before disk I/O when not trusted."""
+        self._resolve_asset_book().assert_trusted(alias, self.case_state)
+        return self.case_assets.load_dataclass(alias)
 
     @property
     def case_events(self) -> CaseEventLogReader:

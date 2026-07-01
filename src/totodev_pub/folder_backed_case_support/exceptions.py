@@ -195,25 +195,53 @@ class MissingFsmError(Exception):
 
 
 class AssetSchemaError(Exception):
-    """Raised at class-definition time when a FolderBackedCase subclass's `asset_schema`
-    is malformed: a glob in the simple-dict form (which cannot infer an alias), an empty
-    or invalid alias, a duplicate alias, or a missing deserializer while flexible loading
-    is off. The message names the specific offence and how to fix it."""
+    """Raised when a FolderBackedCase subclass's `asset_aliases` declaration is malformed,
+    or when a declared alias fails FSM-state validation at first instantiation: a glob in
+    the simple-dict form (which cannot infer an alias), an empty or invalid alias, a
+    duplicate alias, unknown state names, missing loader/states in strict mode, or
+    valid-in-terminal without keep=True. The message names the specific offence and how
+    to fix it."""
 
 
 class MissingAssetSchemaError(Exception):
     """Raised at first construction/creation of a concrete FolderBackedCase subclass that
-    never declared `asset_schema`. Declaring nothing is still declaring: set an empty
-    mapping if the case has no data objects. Legal-and-uncaught on abstract intermediates
-    (never instantiated), exactly like MissingFsmError."""
+    never declared `asset_aliases`. Declaring nothing is still declaring: set an empty
+    list or mapping if the case has no protocol-elevated data objects. Legal-and-uncaught
+    on abstract intermediates (never instantiated), exactly like MissingFsmError."""
 
     def __init__(self, carrier_name: str):
         self.carrier_name = carrier_name
         super().__init__(
-            f"{carrier_name!r} does not declare its asset schema. Set `asset_schema` on "
-            "the class to the data objects this case serializes into assets/, e.g. "
-            '`asset_schema = {"receipts/rlist.json": ReceiptListRecord}`; declare an empty '
-            "mapping (`asset_schema = {}`) if this case has none."
+            f"{carrier_name!r} does not declare its asset aliases. Set `asset_aliases` on "
+            "the class to the data objects this case elevates to the cross-process trust "
+            "protocol, e.g. "
+            '`asset_aliases = [{"path": "ticket.yaml", "loader": TicketForm, '
+            '"states": {"new", "open"}}]`; declare an empty list (`asset_aliases = []`) '
+            "if this case has none."
+        )
+
+
+class AssetNotTrustedInStateError(Exception):
+    """Raised by case_load_dataclass (and assert_trusted) when the case's current FSM
+    state is not among the alias's declared valid states. Checked before any disk I/O."""
+
+    def __init__(
+        self,
+        alias: str,
+        *,
+        current_state: str | None,
+        valid_states: frozenset[str] | None,
+    ):
+        self.alias = alias
+        self.current_state = current_state
+        self.valid_states = valid_states
+        if valid_states is None:
+            states_msg = "(unconstrained)"
+        else:
+            states_msg = ", ".join(sorted(valid_states)) or "(empty)"
+        super().__init__(
+            f"Asset alias {alias!r} is not trusted in state {current_state!r}. "
+            f"Valid states: {states_msg}."
         )
 
 
