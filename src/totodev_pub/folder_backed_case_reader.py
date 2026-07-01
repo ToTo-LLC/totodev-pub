@@ -144,4 +144,7 @@ class FolderBackedCaseReader:
 
     @property
     def case_lease_secs_left(self) -> float | None:
+        """Lock-free lease-time read for this case folder.
+
+        Return-value semantics: see `HeartbeatLease.secs_left`."""
         return HeartbeatLease.secs_left(self._folder / LEASE_NAME)

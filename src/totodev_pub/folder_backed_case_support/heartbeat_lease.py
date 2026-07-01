@@ -22,6 +22,10 @@ import time
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple
 
+# When the lease file exists but mtime ties the clock (remaining == 0), return this
+# instead of 0 so truthiness checks distinguish "file present" from "absent".
+_LEASE_SECS_LEFT_MIN = 1e-9
+
 
 class LeaseHandoff(NamedTuple):
     """Portable, serializable proof of lease ownership for a hot handoff.
@@ -258,16 +262,23 @@ class HeartbeatLease:
 
     @staticmethod
     def secs_left(lease_path: Path) -> float | None:
-        """Seconds until the live lease at `lease_path` expires, or None.
+        """Signed seconds until the lease at `lease_path` expires, or None if absent.
 
-        Returns the positive seconds remaining when a live lease is held, and None
-        when there is no live lease — collapsing "file absent" and "already expired"
-        into the same answer on purpose: to a read-only observer both mean the lease
-        is free/reclaimable, and the actual owner is never knowable by inspection.
-        Callers that genuinely need the absent-vs-expired distinction should use
-        `is_expired` (None/True/False). Lock-free; the expiry is baked into the mtime."""
+        When the lease file exists, returns ``mtime - now()``:
+          * ``> 0`` — held (seconds until expiry)
+          * tiny positive at exactly zero — mtime ties the clock (never 0 while the
+            file is present)
+          * ``< 0`` — lapsed (seconds since expiry; file still on disk)
+
+        ``None`` means the lease file is absent (released / never claimed). Use
+        ``is_expired`` for a tri-state absent/held/lapsed boolean view.
+        Lock-free; the expiry is baked into the mtime."""
         try:
             remaining = Path(lease_path).stat().st_mtime - time.time()
         except FileNotFoundError:
             return None
-        return remaining if remaining > 0 else None
+        if remaining > 0:
+            return remaining
+        if remaining == 0:
+            return _LEASE_SECS_LEFT_MIN
+        return remaining

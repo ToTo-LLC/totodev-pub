@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 
 import pytest
@@ -116,6 +117,14 @@ def test_reader_lease_observability(tmp_path):
     reader = FolderBackedCaseReader(folder)
     assert reader.case_lease_secs_left is None
     assert not (folder / LEASE_NAME).exists()
+
+    # Lapsed lease (file present, past expiry) is negative — distinct from absent.
+    past = time.time() - 30
+    (folder / LEASE_NAME).touch()
+    os.utime(folder / LEASE_NAME, (past, past))
+    reader = FolderBackedCaseReader(folder)
+    assert reader.case_lease_secs_left is not None
+    assert reader.case_lease_secs_left < 0
 
 
 def test_reader_does_not_acquire_lease(tmp_path):

@@ -150,10 +150,25 @@ def test_secs_left_reports_remaining_held_expired_and_absent(tmp_path):
     assert remaining is not None
     assert 0 < remaining <= 300.0 + 1.0
 
-    # Past token => None (expired collapses to "no live lease", same as absent).
+    # Past token => negative seconds (lapsed; file still present).
     past = time.time() - 60
     os.utime(lease.path, (past, past))
-    assert HeartbeatLease.secs_left(lease.path) is None
+    lapsed = HeartbeatLease.secs_left(lease.path)
+    assert lapsed is not None
+    assert lapsed < 0
+    assert lapsed == pytest.approx(-60.0, abs=1.0)
+
+
+def test_secs_left_never_zero_when_lease_file_exists_at_clock_edge(tmp_path, monkeypatch):
+    lease = _lease(tmp_path)
+    lease.acquire()
+    frozen = 1_700_000_000.0
+    os.utime(lease.path, (frozen, frozen))
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    remaining = HeartbeatLease.secs_left(lease.path)
+    assert remaining is not None
+    assert remaining > 0
+    assert bool(remaining)
 
 
 def test_secs_left_tracks_the_written_expiry(tmp_path):

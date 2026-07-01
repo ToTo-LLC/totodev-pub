@@ -863,17 +863,16 @@ class FolderBackedCase(ABC):
 
     @staticmethod
     def is_heartbeat_expired(folder: Path) -> bool | None:
-        """Lock-free staleness read for a manager's recovery sweep: True if the lease
-        has expired (reclaimable), False if still held, None if unheld. Policy-free —
-        the expiry is baked into the mtime, so no state/TTL lookup is needed here."""
+        """Lock-free lease staleness read for a case folder (recovery sweeps).
+
+        Return-value semantics: see `HeartbeatLease.is_expired` (on ``folder / LEASE_NAME``)."""
         return HeartbeatLease.is_expired(Path(folder) / LEASE_NAME)
 
     @staticmethod
     def peek_lease_secs_left(folder: Path) -> float | None:
-        """Lock-free read of how long the case's lease is still held: positive seconds
-        remaining when a live lease is held, None when the lease is free (file absent
-        OR expired — both mean reclaimable to an observer; the owner is unknowable by
-        inspection). For the absent-vs-expired distinction use `is_heartbeat_expired`."""
+        """Lock-free lease-time read for a case folder (no acquire).
+
+        Return-value semantics: see `HeartbeatLease.secs_left` (on ``folder / LEASE_NAME``)."""
         return HeartbeatLease.secs_left(Path(folder) / LEASE_NAME)
 
     @staticmethod
