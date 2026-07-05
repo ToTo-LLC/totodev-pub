@@ -49,6 +49,12 @@ from .heartbeat_lease import (
     LeaseOwnershipLostError,
     LeaseReleasedError,
 )
+from .choke_permit_governor import (
+    ChokeGrant,
+    ChokeGrantError,
+    ChokePermitGovernor,
+    InvalidChokeLimitsError,
+)
 
 __all__ = [
     "RECORD_NAME",
@@ -90,4 +96,8 @@ __all__ = [
     "LeaseAlreadyHeldError",
     "LeaseOwnershipLostError",
     "LeaseReleasedError",
+    "ChokeGrant",
+    "ChokeGrantError",
+    "ChokePermitGovernor",
+    "InvalidChokeLimitsError",
 ]
