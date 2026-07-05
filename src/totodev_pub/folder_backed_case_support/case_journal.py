@@ -42,6 +42,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     EV_ENTRY_EXCEPTION,
     EV_TRIGGER_SLOW,
     EV_TRIGGER_TIMEOUT,
+    EV_TRIGGER_START,
 )
 
 
@@ -96,9 +97,18 @@ class CaseJournal:
             EV_NEW, case_type, {"case_id": case_id, "external_key": external_key}
         )
 
-    def log_enter_state(self, state: str) -> PrimitiveEventProxy:
-        """Current fine-grained state entry (CASE_ENTER_STATE; value = state name)."""
-        return self._append_base(EV_ENTER_STATE, state)
+    def log_enter_state(
+        self, state: str, *, trigger: str | None = None, from_state: str | None = None,
+    ) -> PrimitiveEventProxy:
+        """Current fine-grained state entry (CASE_ENTER_STATE; value = state name).
+
+        When the entry was produced by a transition, `trigger` (and `from_state`)
+        ride in the data payload so history can answer "which trigger produced this
+        state" without the compiled FSM. The inception entry has no trigger and
+        stays a payload-free marker; readers treat a missing payload as
+        trigger-unknown (also true of folders written before this payload existed)."""
+        data = {"trigger": trigger, "from": from_state} if trigger is not None else None
+        return self._append_base(EV_ENTER_STATE, state, data)
 
     def log_closed(self, closing_state: str, *, from_state: str) -> PrimitiveEventProxy:
         """Terminal bookend (CASE_CLOSED; value = closing state)."""
@@ -128,6 +138,22 @@ class CaseJournal:
         """A trigger's work was hard-aborted at the kill ceiling (CASE_TRIGGER_TIMEOUT;
         @FAIL-counted, but visually distinct from an ordinary failed transition)."""
         return self._append_base(EV_TRIGGER_TIMEOUT, value, detail)
+
+    def log_trigger_start(
+        self, trigger: str, *, state: str, warn: float, kill: float,
+    ) -> PrimitiveEventProxy:
+        """A trigger's work slot began (CASE_TRIGGER_START; value = trigger name, so an
+        in-flight trigger is glob-scannable in the events folder). Written just before
+        the timed `perform_` work runs — only for edges that HAVE work; instantaneous
+        pure-routing transitions log nothing. Resolved by whichever completion fact
+        follows (CASE_ENTER_STATE on success; CASE_FAIL_TRANSITION / CASE_TRIGGER_TIMEOUT /
+        CASE_ENTRY_EXCEPTION on failure): a dangling START with a live lease means the
+        work is in flight NOW; with a dead lease, the owner crashed mid-work. See
+        CaseEventLogReader.unresolved_trigger_start for the read side."""
+        return self._append_base(
+            EV_TRIGGER_START, trigger,
+            {"state": state, "warn_secs": warn, "kill_secs": kill},
+        )
 
     def log_trigger_slow(
         self, trigger: str, *, elapsed: float, warn: float, state: str

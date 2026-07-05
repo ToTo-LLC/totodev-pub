@@ -22,6 +22,14 @@ class CaseReadView(Protocol):
     Type-checking only — no runtime isinstance checks required. Both implementers
     may differ on edge-case semantics (e.g. closed detection) while exposing the
     same property names and types.
+
+    DELIBERATE EXCLUSIONS (reader-only, not case content): the operational-liveness
+    reads `case_lease_secs_left` and `case_active_trigger` live ONLY on
+    FolderBackedCaseReader. Their meaning does not translate cleanly to a live case
+    (its own self-beaten lease; a trigger it is itself executing — which a live
+    driver already learns synchronously via AdvanceResult.trigger), so putting them
+    here would be an LSP smell. Rationale and promotion criteria: the
+    "FolderBackedCaseReader Spec" §9 open-questions table.
     """
 
     @property

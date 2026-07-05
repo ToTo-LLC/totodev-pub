@@ -209,6 +209,25 @@ def test_perform_wrapper_logs_slow_when_over_soft_but_under_kill(tmp_path):
         case.case_detach()
 
 
+def test_perform_wrapper_logs_trigger_start_before_work(tmp_path):
+    """CASE_TRIGGER_START is written before the work runs, so it survives (and dates)
+    a failed attempt — the durable 'this trigger is in flight' marker."""
+    case = _case(tmp_path)
+    try:
+        case.raise_in_perform = True
+        wrapped = _factory(case)._make_perform_wrapper("go", "perform_go")
+        with pytest.raises(ValueError, match="boom"):
+            asyncio.run(wrapped(None))
+        starts = list(case._journal.primitive.events(label_glob="CASE_TRIGGER_START"))
+        assert len(starts) == 1
+        assert starts[0].value == "go"
+        data = _data_of(starts[0])
+        assert data["state"] == "new"
+        assert data["warn_secs"] == case.trigger_warn_secs("go")
+    finally:
+        case.case_detach()
+
+
 def test_perform_wrapper_reraises_non_timeout_error_unchanged(tmp_path):
     case = _case(tmp_path)
     try:

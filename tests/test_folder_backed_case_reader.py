@@ -153,6 +153,52 @@ def test_reader_has_no_write_surface(tmp_path):
         assert not hasattr(reader, name)
 
 
+class SlowWorkCase(FolderBackedCase):
+    """One auto edge whose perform sleeps — enough to observe a trigger in flight."""
+
+    asset_aliases = {}
+    fsm_state_chains = ["^new--work-->done^"]
+
+    sleep_secs: float = 0.3
+
+    async def perform_work(self, tctx):
+        await asyncio.sleep(self.sleep_secs)
+
+
+def test_reader_active_trigger_visible_while_work_runs(tmp_path):
+    folder = tmp_path / "reader-011"
+
+    async def scenario():
+        with SlowWorkCase.create_case_in_folder(folder) as case:
+            reader = FolderBackedCaseReader(folder)
+            assert reader.case_active_trigger is None       # nothing in flight yet
+
+            task = asyncio.create_task(case.case_advance())
+            await asyncio.sleep(0.1)                        # work is mid-sleep
+            active = reader.case_active_trigger
+            assert active is not None
+            assert active.trigger == "work"
+            assert active.elapsed_secs >= 0
+
+            result = await task
+            assert result.progressed
+            assert reader.case_active_trigger is None       # resolved by the state entry
+
+    asyncio.run(scenario())
+
+
+def test_reader_active_trigger_requires_live_lease(tmp_path):
+    """A dangling CASE_TRIGGER_START whose owner is gone (lease absent/expired) reads
+    as NOT active — that folder crashed mid-work; it is not in flight."""
+    folder = tmp_path / "reader-012"
+    with SlowWorkCase.create_case_in_folder(folder) as case:
+        case._journal.log_trigger_start("work", state="new", warn=5.0, kill=10.0)
+        # While the owner is live (lease held), the dangling START reads as active.
+        assert FolderBackedCaseReader(folder).case_active_trigger is not None
+    # Owner detached: same log contents, no live lease -> not active.
+    assert FolderBackedCaseReader(folder).case_active_trigger is None
+
+
 def test_live_case_prep_properties(tmp_path):
     folder = tmp_path / "reader-010"
     with SimpleCase.create_case_in_folder(folder, case_id="r-010", nickname="live") as case:

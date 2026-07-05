@@ -113,6 +113,35 @@ def test_log_trigger_slow_value_is_rounded_seconds(tmp_path):
     assert data["state"] == "open"
 
 
+def test_log_trigger_start_value_is_trigger_name(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_trigger_start("go", state="open", warn=5.0, kill=10.0)
+    ev = next(journal.primitive.events(label_glob="CASE_TRIGGER_START"))
+    assert ev.value == "go"
+    data = _data_of(ev)
+    assert data["state"] == "open"
+    assert data["warn_secs"] == 5.0
+    assert data["kill_secs"] == 10.0
+
+
+def test_log_enter_state_carries_trigger_payload(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_enter_state("open", trigger="go", from_state="new")
+    ev = next(journal.primitive.events(label_glob="CASE_ENTER_STATE"))
+    assert ev.value == "open"
+    data = _data_of(ev)
+    assert data["trigger"] == "go"
+    assert data["from"] == "new"
+
+
+def test_log_enter_state_without_trigger_has_no_payload(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_enter_state("new")
+    ev = next(journal.primitive.events(label_glob="CASE_ENTER_STATE"))
+    assert ev.value == "new"
+    assert _data_of(ev) == {}
+
+
 # ---------------------------------------------------------------------------
 # Dwell-scoped domain reads
 # ---------------------------------------------------------------------------
@@ -154,6 +183,46 @@ def test_last_enter_state_mtime_none_when_empty(tmp_path):
     assert journal.last_enter_state_mtime() is None
     journal.log_enter_state("open")
     assert journal.last_enter_state_mtime() is not None
+
+
+# ---------------------------------------------------------------------------
+# In-flight trigger detection (unresolved CASE_TRIGGER_START)
+# ---------------------------------------------------------------------------
+
+def test_unresolved_trigger_start_detection(tmp_path):
+    journal = _journal(tmp_path)
+    reader = journal.reader
+    assert reader.unresolved_trigger_start is None
+    journal.log_enter_state("new")
+    assert reader.unresolved_trigger_start is None
+    journal.log_trigger_start("go", state="new", warn=5.0, kill=10.0)
+    ev = reader.unresolved_trigger_start
+    assert ev is not None
+    assert ev.value == "go"
+    # A non-completion event logged mid-work (e.g. an alert) does not resolve it.
+    journal.log_alert("new", msg="still working")
+    assert reader.unresolved_trigger_start is not None
+    # Nor does the slow warning (written after the work, before the commit record).
+    journal.log_trigger_slow("go", elapsed=6.0, warn=5.0, state="new")
+    assert reader.unresolved_trigger_start is not None
+    # The committed state entry resolves it.
+    journal.log_enter_state("open", trigger="go", from_state="new")
+    assert reader.unresolved_trigger_start is None
+
+
+def test_unresolved_trigger_start_resolved_by_failure_events(tmp_path):
+    journal = _journal(tmp_path)
+    reader = journal.reader
+    journal.log_enter_state("open")
+    journal.log_trigger_start("go", state="open", warn=5.0, kill=10.0)
+    journal.log_fail_transition("go", {"trigger": "go"})
+    assert reader.unresolved_trigger_start is None
+    journal.log_trigger_start("go", state="open", warn=5.0, kill=10.0)
+    journal.log_trigger_timeout("go", {"trigger": "go"})
+    assert reader.unresolved_trigger_start is None
+    journal.log_trigger_start("go", state="open", warn=5.0, kill=10.0)
+    journal.log_entry_exception("done", {"trigger": "go"})
+    assert reader.unresolved_trigger_start is None
 
 
 # ---------------------------------------------------------------------------

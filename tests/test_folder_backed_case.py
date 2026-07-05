@@ -121,6 +121,23 @@ def test_fsm_transitions(tmp_path):
         assert case.case_is_closed
 
 
+def test_enter_state_event_carries_trigger_payload(tmp_path):
+    """A committed transition's CASE_ENTER_STATE records WHICH trigger produced it
+    (and from where); the inception entry, which no trigger produced, carries none."""
+    folder = tmp_path / "case-004b"
+    with SimpleCase.create_case_in_folder(folder) as case:
+        asyncio.run(case.begin())
+        entries = list(case._journal.primitive.events(
+            label_glob="CASE_ENTER_STATE", recent_first=True))
+    assert [e.value for e in entries] == ["open", "new"]
+    newest_payload = entries[0].contents()
+    assert newest_payload is not None
+    data = newest_payload.as_dict()
+    assert data["trigger"] == "begin"
+    assert data["from"] == "new"
+    assert entries[1].contents() is None      # inception entry: no trigger, marker only
+
+
 def test_peek_record_and_events(tmp_path):
     folder = tmp_path / "case-005"
     with SimpleCase.create_case_in_folder(folder, case_id="c-005") as case:

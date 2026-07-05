@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
@@ -15,6 +16,13 @@ from totodev_pub.folder_backed_case_support.case_record import CaseRecord
 from totodev_pub.folder_backed_case_support.constants import LEASE_NAME, RECORD_NAME
 from totodev_pub.folder_backed_case_support.heartbeat_lease import HeartbeatLease
 from totodev_pub.folder_backed_case_support.helpers import _utcnow
+
+
+class ActiveTrigger(NamedTuple):
+    """A trigger currently executing its work slot, as observed lock-free from the
+    folder (see FolderBackedCaseReader.case_active_trigger)."""
+    trigger: str
+    elapsed_secs: float
 
 
 class FolderBackedCaseReader:
@@ -160,3 +168,25 @@ class FolderBackedCaseReader:
 
         Return-value semantics: see `HeartbeatLease.secs_left`."""
         return HeartbeatLease.secs_left(self._folder / LEASE_NAME)
+
+    @property
+    def case_active_trigger(self) -> ActiveTrigger | None:
+        """The trigger whose work is executing RIGHT NOW, or None — the live view of a
+        long-running step (e.g. an external-system interaction) that a UI can poll.
+
+        Composes two lock-free facts: the log's latest CASE_TRIGGER_START is unresolved
+        (no completion event after it — see CaseEventLogReader.unresolved_trigger_start)
+        AND the lease is live (the in-flight keepalive keeps a working owner's lease warm
+        for the whole step, so a live lease is what separates "in flight" from "owner
+        crashed mid-work"). `elapsed_secs` is measured from the START event's mtime and,
+        like the other now()-relative properties, decays between reads. None means no
+        work is observably in flight: idle, workless transitions only, a crashed owner,
+        or a pre-payload folder."""
+        lease_left = self.case_lease_secs_left
+        if lease_left is None or lease_left <= 0:
+            return None
+        ev = self._peek_events().unresolved_trigger_start
+        if ev is None:
+            return None
+        started = self._as_utc(ev.mtime)
+        return ActiveTrigger(ev.value, (_utcnow() - started).total_seconds())

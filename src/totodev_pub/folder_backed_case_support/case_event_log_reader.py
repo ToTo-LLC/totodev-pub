@@ -11,14 +11,24 @@ from pathlib import Path
 from typing import Optional
 
 from totodev_pub.primitive_event_log import PrimitiveEventLog
+from totodev_pub.primitive_event_log_support.event_proxy import PrimitiveEventProxy
 from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_ENTER_STATE,
     EV_CLOSED,
+    EV_ENTRY_EXCEPTION,
     EV_FAIL_TRANSITION,
+    EV_TRIGGER_START,
     EV_TRIGGER_TIMEOUT,
     EVENTS_DIR_NAME,
 )
+
+# The events that RESOLVE a CASE_TRIGGER_START: the attempt committed (ENTER_STATE) or
+# failed in one of its recorded ways. Anything else logged mid-work (an alert, a slow
+# warning, a subclass's custom event) leaves the START unresolved — still in flight.
+_TRIGGER_START_RESOLUTION_LABELS = frozenset({
+    EV_ENTER_STATE, EV_FAIL_TRANSITION, EV_TRIGGER_TIMEOUT, EV_ENTRY_EXCEPTION,
+})
 
 
 class CaseEventLogReader:
@@ -78,6 +88,23 @@ class CaseEventLogReader:
         event-log mtimes; the caller converts to aware UTC."""
         ev = next(self._log.events(label_glob=EV_ENTER_STATE), None)
         return ev.mtime if ev is not None else None
+
+    @property
+    def unresolved_trigger_start(self) -> Optional[PrimitiveEventProxy]:
+        """The latest CASE_TRIGGER_START not yet resolved by a completion event, or None.
+
+        Walks recent-first: the first resolution label hit (CASE_ENTER_STATE /
+        CASE_FAIL_TRANSITION / CASE_TRIGGER_TIMEOUT / CASE_ENTRY_EXCEPTION) means the
+        latest attempt concluded — None. Hitting a CASE_TRIGGER_START first means that
+        attempt has no recorded outcome. This is a pure LOG fact: it cannot tell
+        "in flight right now" from "owner crashed mid-work" — cross-check lease
+        liveness for that (see FolderBackedCaseReader.case_active_trigger)."""
+        for ev in self._log.events(recent_first=True):
+            if ev.label == EV_TRIGGER_START:
+                return ev
+            if ev.label in _TRIGGER_START_RESOLUTION_LABELS:
+                return None
+        return None
 
     @property
     def transition_fail_count(self) -> int:

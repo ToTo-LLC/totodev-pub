@@ -199,6 +199,13 @@ class _CaseMachineFactory:
                     "still let the lease lapse; consider a shorter trigger_warn_secs.",
                     case.case_id, trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
                 )
+            # Durable in-flight marker, written BEFORE the work so an observer (e.g. a
+            # FolderBackedCaseReader in another process) can see WHICH trigger this case
+            # is currently executing — and so a crash mid-work leaves a dated record of
+            # what was running. Resolved by the completion event that follows (see
+            # CaseJournal.log_trigger_start). Only worked edges reach here, so pure
+            # routing transitions add no log volume.
+            journal.log_trigger_start(trigger, state=state, warn=warn, kill=kill)
             start = time.monotonic()
             completed = False
             try:

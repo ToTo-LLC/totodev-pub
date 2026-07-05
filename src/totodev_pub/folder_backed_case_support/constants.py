@@ -50,6 +50,10 @@ EV_FAIL_TRANSITION = "CASE_FAIL_TRANSITION" # pre-commit attempt failed (counted
 EV_ENTRY_EXCEPTION = "CASE_ENTRY_EXCEPTION" # post-commit on_enter/after raised (NOT counted)
 EV_TRIGGER_SLOW    = "CASE_TRIGGER_SLOW"    # a trigger's work outran its soft timeout (warning)
 EV_TRIGGER_TIMEOUT = "CASE_TRIGGER_TIMEOUT" # a trigger's work was hard-aborted at the kill ceiling
+EV_TRIGGER_START   = "CASE_TRIGGER_START"   # a trigger's work slot began (value = trigger name);
+                                            # resolved by the next ENTER_STATE / FAIL_TRANSITION /
+                                            # TRIGGER_TIMEOUT / ENTRY_EXCEPTION — a dangling one
+                                            # means in-flight (lease live) or crashed (lease gone)
 
 # In-memory listener signal (passed to add_transition_listener callbacks, not logged).
 # The closed signal reuses EV_CLOSED; only the phase-1 closing signal is distinct.

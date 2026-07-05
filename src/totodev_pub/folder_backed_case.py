@@ -37,7 +37,7 @@ Quick start
                            ]
 
         asset_aliases = [
-            {"path": "ticket.yaml", "loader": TicketForm, "states": {"new", "open", "closed"}}, # alias "ticket"
+            {"path": "ticket.yaml", "loader": Callable, "states": {"new", "open", "closed"}}, # alias "ticket"
             {"path": "resolution-log/customer--convo.md", "loader": ChatLog, "states": {"open"}}, # alias "convo"
         ]
 
@@ -1361,7 +1361,8 @@ class FolderBackedCase(ABC):
                signal is case_detach(), not this. Standalone: no-op.
         """
         src, dest = event.transition.source, event.transition.dest
-        self._journal.log_enter_state(dest)
+        trigger = event.event.name if event.event is not None else None
+        self._journal.log_enter_state(dest, trigger=trigger, from_state=src)
         self._last_activity = _utcnow()
         self._state_entered_at = self._last_activity   # reset the time-guard dwell anchor
         closing = src not in self._fsm.closed_states and dest in self._fsm.closed_states
@@ -1431,7 +1432,7 @@ class FolderBackedCase(ABC):
         # but do NOT attempt the close from inside the exception handler. Terminal-entry
         # failures still need the close path made idempotent/re-runnable.
         if post_commit and self._journal.current_state != dest:
-            self._journal.log_enter_state(dest)
+            self._journal.log_enter_state(dest, trigger=trigger, from_state=src)
             self._last_activity = _utcnow()
             self._state_entered_at = self._last_activity
 
