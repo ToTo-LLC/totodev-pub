@@ -28,8 +28,8 @@ class CaseReadView(Protocol):
     FolderBackedCaseReader. Their meaning does not translate cleanly to a live case
     (its own self-beaten lease; a trigger it is itself executing — which a live
     driver already learns synchronously via AdvanceResult.trigger), so putting them
-    here would be an LSP smell. Rationale and promotion criteria: the
-    "FolderBackedCaseReader Spec" §9 open-questions table.
+    here would be an LSP smell. Promote only if a real consumer needs them
+    polymorphically across both types.
     """
 
     @property
