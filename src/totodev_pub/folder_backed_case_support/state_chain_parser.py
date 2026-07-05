@@ -263,6 +263,10 @@ class FsmChainSpec:
                        trigger annotated with conflicting durations. Triggers absent here take
                        the case's default; the hard-abort ceiling is derived (a multiple of
                        the soft value) by the case, not stored here.
+        trigger_chokes    {trigger: frozenset[str]} resource names whose concurrent use a
+                       pool driver may throttle when this case runs inside that pool. Folded
+                       from the class's `fsm_trigger_chokes` at compile time; triggers absent
+                       here draw on no named constrained resources.
     """
     states: list[str] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)
@@ -277,6 +281,7 @@ class FsmChainSpec:
     wildcard_dests: set[str] = field(default_factory=set)
     timed_escape_states: set[str] = field(default_factory=set)
     trigger_timeouts: dict[str, float] = field(default_factory=dict)
+    trigger_chokes: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> "FsmChainSpec":

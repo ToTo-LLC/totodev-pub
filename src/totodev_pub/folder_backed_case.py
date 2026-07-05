@@ -40,6 +40,7 @@ Quick start
             {"path": "ticket.yaml", "loader": Callable, "states": {"new", "open", "closed"}}, # alias "ticket"
             {"path": "resolution-log/customer--convo.md", "loader": ChatLog, "states": {"open"}}, # alias "convo"
         ]
+        fsm_trigger_chokes = {}  # no capacity-constrained resources for this case type
 
         async def perform_open_ticket(self, tctx) -> None:
             # do something like log the ticket, contact external systems, etc.
@@ -95,7 +96,7 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
     CaseTypeMismatchError, RecordTypeMismatchError,
     IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
-    AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError,)
+    AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError, MissingTriggerChokesError,)
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
@@ -125,6 +126,7 @@ __all__ = [
     "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
+    "MissingAssetSchemaError", "MissingTriggerChokesError",
     "RECORD_NAME", "LEASE_NAME", "EVENTS_DIR_NAME", "ASSETS_DIR_NAME", "KEEP_LIST_NAME",
     "LOGS_DIR_NAME", "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
@@ -289,6 +291,13 @@ class FolderBackedCase(ABC):
     #   *--...-->X       wildcard source: an edge leaving every state
     # See StateChainParser for the authoritative, complete grammar.
     fsm_state_chains: list[str] = []
+
+    # Required declaration of which capacity-constrained resources each trigger's work
+    # may draw on when this case runs inside a pool that throttles such resources.
+    # Map trigger name -> set of resource name strings. An empty dict means none.
+    # Pool drivers (not the case itself) supply the integer permit counts.
+    _TRIGGER_CHOKES_NOT_DECLARED = object()
+    fsm_trigger_chokes = _TRIGGER_CHOKES_NOT_DECLARED
 
     # Required declaration of the case's on-disk data objects (see aliased_asset_specs).
     # A concrete subclass MUST set this (even to []). The sentinel lets abstract
@@ -947,6 +956,44 @@ class FolderBackedCase(ABC):
             assets.add_keep_rules(*paths)
 
     @classmethod
+    def _require_fsm_trigger_chokes_declared(cls) -> None:
+        """Every subclass must set `fsm_trigger_chokes` explicitly ({} is valid)."""
+        if cls.fsm_trigger_chokes is FolderBackedCase._TRIGGER_CHOKES_NOT_DECLARED:
+            raise MissingTriggerChokesError(cls.__name__)
+
+    @classmethod
+    def _fold_trigger_chokes(cls, spec: FsmChainSpec) -> FsmChainSpec:
+        """Merge this class's `fsm_trigger_chokes` into a compiled spec. Unknown trigger
+        keys are a build-time error. Override authors should call this after building
+        their hand-crafted spec unless they populate `trigger_chokes` themselves."""
+        raw = cls.fsm_trigger_chokes
+        if not raw:
+            return spec
+        known = set(spec.triggers)
+        folded: dict[str, frozenset[str]] = {}
+        for trigger, resources in raw.items():
+            if trigger not in known:
+                raise FsmChainParseError(
+                    f"fsm_trigger_chokes names trigger {trigger!r}, which is not among "
+                    f"this class's FSM triggers ({sorted(known)!r})"
+                )
+            if not isinstance(resources, (set, frozenset, list, tuple)):
+                raise FsmChainParseError(
+                    f"fsm_trigger_chokes[{trigger!r}] must be a set of resource name "
+                    f"strings, not {type(resources).__name__}"
+                )
+            names = frozenset(str(name) for name in resources)
+            if not names:
+                continue
+            if trigger in folded:
+                raise FsmChainParseError(
+                    f"fsm_trigger_chokes declares trigger {trigger!r} more than once"
+                )
+            folded[trigger] = names
+        spec.trigger_chokes = folded
+        return spec
+
+    @classmethod
     def compile_fsm(cls) -> FsmChainSpec:
         """Render this class's declared FSM into an FsmChainSpec.
 
@@ -968,7 +1015,7 @@ class FolderBackedCase(ABC):
           FsmChainSpec.validate(), then injects any `*--...-->` wildcard edges via
           expand_wildcards() (in that order, so the typo checks see only the explicit
           graph)."""
-        return (
+        return cls._fold_trigger_chokes(
             StateChainParser.parse(cls.fsm_state_chains)
             .validate()
             .expand_wildcards()
@@ -1170,6 +1217,7 @@ class FolderBackedCase(ABC):
         # up at import, not first instantiation) and performant (compiled once, not per
         # instance). The result is the shared per-class FSM singleton.
         super().__init_subclass__(**kwargs)
+        cls._require_fsm_trigger_chokes_declared()
         cls._fsm = cls.compile_fsm()
         if cls.asset_aliases is not FolderBackedCase._ASSET_ALIASES_NOT_DECLARED:
             cls._asset_book = AliasedAssetSpecs.from_declaration(

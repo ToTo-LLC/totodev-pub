@@ -38,6 +38,7 @@ class TicketCase(FolderBackedCase):
             "states": {"open"},
         },
     ]
+    fsm_trigger_chokes = {}
 
     async def perform_open_ticket(self, tctx):
         pass
@@ -53,6 +54,7 @@ class FlexibleCase(FolderBackedCase):
         {"path": "unguarded.json"},
         {"path": "guarded.json", "loader": TicketForm, "states": {"new"}},
     ]
+    fsm_trigger_chokes = {}
 
     async def perform_go(self, tctx):
         pass
@@ -63,6 +65,7 @@ class ReclassSource(FolderBackedCase):
     asset_aliases = [
         {"path": "old.yaml", "loader": TicketForm, "states": {"new", "shared"}, "keep": True},
     ]
+    fsm_trigger_chokes = {}
 
     async def perform_go(self, tctx):
         pass
@@ -73,6 +76,7 @@ class ReclassTarget(FolderBackedCase):
     asset_aliases = [
         {"path": "new.yaml", "loader": ChatLog, "states": {"shared"}, "keep": True},
     ]
+    fsm_trigger_chokes = {}
 
     async def perform_go(self, tctx):
         pass
@@ -81,6 +85,7 @@ class ReclassTarget(FolderBackedCase):
 def test_empty_declaration_warns(caplog):
     class EmptyAliasesCase(FolderBackedCase):
         asset_aliases = []
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->done^"]
 
         async def perform_begin(self, tctx):
@@ -96,6 +101,7 @@ def test_build_time_validation_at_first_instantiation_not_subclass(tmp_path):
         asset_aliases = [
             {"path": "a.json", "loader": TicketForm, "states": {"opne"}},
         ]
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->done^"]
 
         async def perform_begin(self, tctx):

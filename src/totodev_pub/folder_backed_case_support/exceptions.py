@@ -221,6 +221,23 @@ class MissingAssetSchemaError(Exception):
         )
 
 
+class MissingTriggerChokesError(Exception):
+    """Raised at class-definition time when a FolderBackedCase subclass never declared
+    `fsm_trigger_chokes`. Legal on the base class and on abstract intermediates only if
+    they are never subclassed without the declaration — every concrete case type must set
+    it explicitly, even to an empty dict."""
+
+    def __init__(self, carrier_name: str):
+        self.carrier_name = carrier_name
+        super().__init__(
+            f"{carrier_name!r} does not declare `fsm_trigger_chokes`. This mapping names "
+            "which capacity-constrained resources each trigger's work may draw on (for "
+            "example CPU or an external API concurrency slot). Some pool drivers use it "
+            "to avoid running too many such triggers at once; set "
+            "`fsm_trigger_chokes = {{}}` if this case type has no constrained resources."
+        )
+
+
 class AssetNotTrustedInStateError(Exception):
     """Raised by case_load_dataclass (and assert_trusted) when the case's current FSM
     state is not among the alias's declared valid states. Checked before any disk I/O."""

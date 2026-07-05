@@ -36,6 +36,7 @@ from totodev_pub.folder_backed_case_support.case_type_registry import case_type_
 class LogCase(FolderBackedCase):
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new==begin-->open==finish-->done^"]
 
 
@@ -43,6 +44,7 @@ class LogReclassTarget(FolderBackedCase):
 
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     """Shares the 'new' state with LogCase so reclassify from a fresh case is legal."""
     fsm_state_chains = ["^new==go-->finished^"]
 

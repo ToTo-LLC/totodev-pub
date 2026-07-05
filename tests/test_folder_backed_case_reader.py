@@ -23,6 +23,7 @@ class SimpleCase(FolderBackedCase):
 
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new==begin-->open==finish-->done^"]
 
 
@@ -157,6 +158,7 @@ class SlowWorkCase(FolderBackedCase):
     """One auto edge whose perform sleeps — enough to observe a trigger in flight."""
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--work-->done^"]
 
     sleep_secs: float = 0.3
@@ -214,6 +216,7 @@ def test_live_case_prep_properties(tmp_path):
 class ReceiptCase(FolderBackedCase):
     flexible_dataclass_loading = True
     asset_aliases = {"receipts/rlist.json": (lambda p: p.read_text())}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--begin-->done^"]
 
     async def perform_begin(self, tctx):
@@ -244,6 +247,7 @@ class ReceiptListRecord(BaseModel, FileMappedPydanticMixin):
 class TypedReceiptCase(FolderBackedCase):
     flexible_dataclass_loading = True
     asset_aliases = {"receipts/rlist.json": ReceiptListRecord}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--begin-->done^"]
 
     async def perform_begin(self, tctx):

@@ -25,6 +25,8 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     OwnershipLostError,
     UnregisteredCaseTypeError,
     MissingAssetSchemaError,
+    MissingTriggerChokesError,
+    FsmChainParseError,
 )
 from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
 from totodev_pub.folder_backed_case_support.heartbeat_lease import HeartbeatLease
@@ -53,6 +55,7 @@ def _isolate_case_registry():
 class SimpleCase(FolderBackedCase):
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new==begin-->open==finish-->done^"]
 
 
@@ -65,6 +68,7 @@ class TypedCase(FolderBackedCase):
 
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new==begin-->done^"]
     _record_cls = TypedRecord
 
@@ -73,6 +77,7 @@ class ReclassTarget(FolderBackedCase):
 
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     """Shares the 'new' state with SimpleCase, so reclassify from a fresh case is legal."""
     fsm_state_chains = ["^new==go-->finished^"]
 
@@ -180,6 +185,7 @@ def test_register_decorator_returns_class_and_registers():
     @reg.register
     class Decorated(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new==begin-->done^"]
 
     # Decorator returns the class unchanged...
@@ -372,11 +378,54 @@ def test_reclassify_to_succeeds_through_type_gate(tmp_path):
         fresh.case_detach()
 
 
+def test_missing_fsm_trigger_chokes_raises_at_class_definition():
+    with pytest.raises(MissingTriggerChokesError) as excinfo:
+        class NoChokesCase(FolderBackedCase):
+            asset_aliases = {}
+            fsm_state_chains = ["^new--begin-->done^"]
+
+            async def perform_begin(self, tctx):
+                pass
+    msg = str(excinfo.value)
+    assert "NoChokesCase" in msg
+    assert "fsm_trigger_chokes" in msg
+    assert "capacity-constrained" in msg
+
+
+def test_fsm_trigger_chokes_folded_into_spec():
+    class ChokedCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_state_chains = ["^new--analyze-->done^"]
+        fsm_trigger_chokes = {
+            "analyze": {"cpu", "ms-graph-api"},
+        }
+
+        async def perform_analyze(self, tctx):
+            pass
+
+    assert ChokedCase._fsm.trigger_chokes == {
+        "analyze": frozenset({"cpu", "ms-graph-api"}),
+    }
+
+
+def test_unknown_trigger_in_fsm_trigger_chokes_raises():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        class BadChokeCase(FolderBackedCase):
+            asset_aliases = {}
+            fsm_state_chains = ["^new--analyze-->done^"]
+            fsm_trigger_chokes = {"typo_trigger": {"cpu"}}
+
+            async def perform_analyze(self, tctx):
+                pass
+    assert "typo_trigger" in str(excinfo.value)
+
+
 def test_missing_fsm_raises_actionable_error(tmp_path):
     """A concrete subclass that forgets fsm_state_chains (and doesn't override
     compile_fsm) must fail loudly at construction, naming the corrective action."""
     class NoFsmCase(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         pass
 
     folder = tmp_path / "case-008"
@@ -447,6 +496,7 @@ def test_guard_method_convention_constructs(tmp_path):
     lets the case construct cleanly."""
     class GuardedCase(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new==funded#finish-->done^"]
 
         async def guard_funded(self, tctx):
@@ -465,6 +515,7 @@ def test_orphan_guard_method_fails_construction(tmp_path):
     and fails the build (orphan_detection defaults to error)."""
     class TypoGuardCase(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new==funded#finish-->done^"]
 
         async def guard_funded(self, tctx):
@@ -487,6 +538,7 @@ def test_hook_missing_tctx_param_fails_construction(tmp_path):
     without it is rejected at first construction rather than exploding at first transition."""
     class NoTctxCase(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->open^"]
 
         async def perform_begin(self):  # missing tctx
@@ -507,6 +559,7 @@ def test_perform_hook_convention_wires_and_runs(tmp_path):
     transition's `before` and runs when the trigger fires."""
     class PerformCase(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->open==finish-->done^"]
         performed = False
 
@@ -527,6 +580,7 @@ def test_legacy_underscore_perform_hook_is_rejected(tmp_path):
     `perform_<trigger>`, so the build fails — a deliberate pre-release breaking change."""
     class LegacyCase(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->done^"]
 
         async def _perform_begin(self, tctx):  # old name, no longer recognized
@@ -547,6 +601,7 @@ def test_sealed_member_override_fails_construction(tmp_path):
     the defensive guard that protects the base namespace from accidental shadowing."""
     class ClobberCase(FolderBackedCase):
         asset_aliases = {}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new==begin-->done^"]
 
         def case_state(self):  # clobbers the sealed base member
@@ -589,6 +644,7 @@ class _SlowKeepaliveCase(FolderBackedCase):
 
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     """Slow work behind both an AUTO (`go`) and a MANUAL (`step`) edge. The tests pair this with
     _use_short_ttl so the keepalive pulse is what keeps the lease from lapsing during the step."""
 
@@ -671,6 +727,7 @@ def test_manual_trigger_keeps_lease_alive_during_slow_work(tmp_path, monkeypatch
 class _PinAutoCase(FolderBackedCase):
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     """Two AUTO ('--') edges leave `fork`, declared alpha-then-beta. Lets a test prove that
     pinning fires the chosen edge (even the later one) rather than the sweep's first pick."""
 
@@ -690,6 +747,7 @@ class _OverloadCase(FolderBackedCase):
 
 
     asset_aliases = {}
+    fsm_trigger_chokes = {}
     """An AUTO edge (`go`), a MANUAL edge (`submit`), and a guarded AUTO edge
     (`gated#approve`) — the full surface the overloaded case_advance() must drive. Hooks
     record the kwargs they receive (to prove `trigger_kwargs` flows into `tctx.kwargs`), and
@@ -887,6 +945,7 @@ def test_pinned_unknown_trigger_on_closed_case_is_noop(tmp_path):
 class _StampCase(FolderBackedCase):
     flexible_dataclass_loading = True
     asset_aliases = {"receipts/rlist.json": (lambda p: p.read_text())}
+    fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--begin-->done^"]
 
     async def perform_begin(self, tctx):
@@ -895,6 +954,7 @@ class _StampCase(FolderBackedCase):
 
 def test_missing_asset_schema_raises_on_create(tmp_path):
     class UndeclaredCase(FolderBackedCase):
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->done^"]
 
         async def perform_begin(self, tctx):
@@ -909,6 +969,7 @@ def test_resolve_asset_book_projects_strings():
     class DeclCase(FolderBackedCase):
         flexible_dataclass_loading = True
         asset_aliases = {"receipts/Overall--rlist.json": (lambda p: p)}
+        fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->done^"]
 
         async def perform_begin(self, tctx):
