@@ -11,6 +11,16 @@ notebooks/DEVDAVE/case_manager_classes/CaseManager Model.md).
 Typical lifecycle: ``start()`` → ``add(case)`` → autonomous ``advance()`` beats →
 ``CLOSED`` event → ``remove()`` → ``stop()``.
 
+Concrete implementations
+------------------------
+``TieredCasePoolDriver`` — default MLFQ load-balancer. Use when many cases should
+each make steady, incremental progress; contested capacity (in-flight ceiling,
+choke permits) is throttled but not seniority-ranked.
+
+``QueuedCasePoolDriver`` — same tier cadence with a queue contract. Use when
+cases should burst through automatic work one-at-a-time (or front-of-line first)
+and the head of the queue should win scarce capacity over cases behind it.
+
 Invocation model
 ----------------
 Each beat (``advance()``) has three obligations with **no promised ordering**:

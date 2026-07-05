@@ -221,6 +221,32 @@ class MissingAssetSchemaError(Exception):
         )
 
 
+class UnconfiguredChokeError(Exception):
+    """Raised at pool ``add()`` when a case type declares choke resources absent from the
+    driver's ``choke_limits``."""
+
+    def __init__(
+        self,
+        case_class_name: str,
+        missing: frozenset[str],
+        *,
+        example_trigger: str | None = None,
+    ):
+        self.case_class_name = case_class_name
+        self.missing = missing
+        self.example_trigger = example_trigger
+        names = ", ".join(repr(n) for n in sorted(missing))
+        trigger_hint = (
+            f" (trigger {example_trigger!r})" if example_trigger is not None else ""
+        )
+        limits_example = ", ".join(f"{n!r}: <n>" for n in sorted(missing))
+        super().__init__(
+            f"{case_class_name} declares choke resource(s) {names}{trigger_hint} but "
+            f"this pool's choke_limits does not configure them. Pass "
+            f"choke_limits={{{limits_example}, ...}} to the driver constructor."
+        )
+
+
 class MissingTriggerChokesError(Exception):
     """Raised at class-definition time when a FolderBackedCase subclass never declared
     `fsm_trigger_chokes`. Legal on the base class and on abstract intermediates only if

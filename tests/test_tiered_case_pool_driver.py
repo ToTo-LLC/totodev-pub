@@ -16,6 +16,7 @@ from totodev_pub.folder_backed_case_support.case_type_registry import case_type_
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseInFlightError,
     DetachedCaseError,
+    UnconfiguredChokeError,
 )
 from totodev_pub.folder_backed_case_support.tiered_case_pool_driver import (
     TieredCasePoolDriver,
@@ -115,6 +116,26 @@ class BlockingCase(FolderBackedCase):
 
     async def perform_step(self, tctx):
         await self._gate.wait()
+
+
+class ChokedBlockingCase(FolderBackedCase):
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {"step": {"cpu"}}
+    fsm_state_chains = ["^s0--step-->s1^"]
+
+    async def perform_step(self, tctx):
+        await self._gate.wait()
+
+
+class CpuChokedCase(FolderBackedCase):
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {"step": {"cpu"}}
+    fsm_state_chains = ["^s0--step-->s1^"]
+
+    async def perform_step(self, tctx):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -509,5 +530,97 @@ def test_concurrency_ceiling_defers_launches(tmp_path):
         a._gate.set()
         b._gate.set()
         await driver.settle()
+
+    _run(body())
+
+
+# ---------------------------------------------------------------------------
+# Choke resources (§9.2)
+# ---------------------------------------------------------------------------
+
+def test_add_rejects_unconfigured_choke_resource(tmp_path):
+    driver = TieredCasePoolDriver(choke_limits={})
+    case = _make(CpuChokedCase, tmp_path, "choked")
+    try:
+        with pytest.raises(UnconfiguredChokeError) as excinfo:
+            driver.add(case)
+        assert "CpuChokedCase" in str(excinfo.value)
+        assert "cpu" in str(excinfo.value)
+        assert "choke_limits" in str(excinfo.value)
+    finally:
+        case.case_detach()
+
+
+def test_choke_throttle_limits_concurrent_cpu_steps(tmp_path):
+    async def body():
+        driver = TieredCasePoolDriver(choke_limits={"cpu": 1})
+        cases = []
+        for i in range(3):
+            c = _make(ChokedBlockingCase, tmp_path, f"thr_{i}")
+            c._gate = asyncio.Event()
+            cases.append(c)
+            driver.add(c)
+            driver.boost(c.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+        assert driver._in_flight_count == 1
+        assert driver.snapshot()["chokes"]["cpu"]["in_use"] == 1
+        for c in cases:
+            c._gate.set()
+        await driver.settle()
+        assert driver.snapshot()["chokes"]["cpu"]["in_use"] == 0
+
+    _run(body())
+
+
+def test_choke_beat_quantization_retries_next_beat(tmp_path):
+    async def body():
+        driver = TieredCasePoolDriver(choke_limits={"cpu": 1})
+        holder = _make(ChokedBlockingCase, tmp_path, "holder")
+        waiter = _make(CpuChokedCase, tmp_path, "waiter")
+        holder._gate = asyncio.Event()
+        driver.add(holder)
+        driver.add(waiter)
+        driver.boost(holder.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+        assert holder.case_state == "s0"
+        assert driver._by_folder[holder.case_folder].in_flight
+
+        driver.boost(waiter.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+        waiter_slot = driver._by_folder[waiter.case_folder]
+        assert not waiter_slot.in_flight
+        assert waiter_slot.skip_countdown == 1
+        assert waiter_slot.choked == frozenset({"cpu"})
+
+        holder._gate.set()
+        await driver.settle()
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+        assert waiter.case_state == "s1"
+
+    _run(body())
+
+
+def test_fire_awaits_choke_permit(tmp_path):
+    async def body():
+        driver = TieredCasePoolDriver(choke_limits={"cpu": 1})
+        holder = _make(ChokedBlockingCase, tmp_path, "hold")
+        waiter = _make(CpuChokedCase, tmp_path, "wait")
+        holder._gate = asyncio.Event()
+        driver.add(holder)
+        driver.add(waiter)
+        driver.boost(holder.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+
+        fire_task = asyncio.create_task(driver.fire(waiter.case_folder, None))
+        await asyncio.sleep(0.01)
+        assert not fire_task.done()
+        assert driver.snapshot()["fire_waiters"] == 1
+
+        holder._gate.set()
+        await driver.settle()
+        result = await fire_task
+        assert result.progressed
+        assert driver.snapshot()["fire_waiters"] == 0
 
     _run(body())

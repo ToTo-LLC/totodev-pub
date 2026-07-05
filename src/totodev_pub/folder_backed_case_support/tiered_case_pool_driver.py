@@ -1,17 +1,24 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""TieredCasePoolDriver — MLFQ-style scheduling driver atop CasePoolDriver.
+"""TieredCasePoolDriver — MLFQ load-balancing driver for a case fleet.
 
-Implements ``CasePoolDriver`` with HOT/WARM/COLD tiers driven by ``AdvanceResult``
-observations. Extensions: ``peek``, ``by_tier``, ``snapshot``, ``find_by_external_key``,
-``settle``.
+**When to use:** Default choice when many cases should each make steady,
+incremental progress. Suited to large pools where no single case should monopolize
+in-flight slots or scarce choke permits — the driver spreads attention by cadence
+(HOT/WARM/COLD) rather than finishing cases strictly one-by-one. For
+queue-ordered, seniority-first bursting, see ``QueuedCasePoolDriver``.
 
-Each case has a ``_Slot`` (tier + ``skip_countdown``). ``_DORMANT`` (-1) marks closed or
-in-flight slots. This implementation runs sweep → heartbeat slice → ``asyncio.sleep(I0)``
-per beat (subclass choice; ABC does not promise ordering).
+**Strategy:** Multi-level feedback queue (MLFQ) tiers driven by ``AdvanceResult``
+observations. Every live case is polled on its tier schedule; promotion/demotion
+adjusts cadence. Contested capacity (concurrency ceiling, choke permits) is a
+launch gate only — no seniority among due cases beyond incidental sweep order.
 
-No disk management. ``PoolMembershipJournal`` handles crash recovery separately.
+Implements ``CasePoolDriver`` with extensions: ``peek``, ``by_tier``, ``snapshot``,
+``find_by_external_key``, ``settle``. Each case has a ``_Slot`` (tier +
+``skip_countdown``); ``_DORMANT`` (-1) marks closed or in-flight slots. Beat loop:
+sweep → heartbeat slice → ``asyncio.sleep(I0)``. No disk management —
+``PoolMembershipJournal`` handles crash recovery separately.
 """
 
 from __future__ import annotations
@@ -35,9 +42,12 @@ from totodev_pub.folder_backed_case_support.case_type_registry import case_type_
 from totodev_pub.folder_backed_case_support.constants import (
     DEFAULT_LEASE_TTL_SECS,
 )
+from totodev_pub.folder_backed_case_support.choke_permit_governor import (
+    ChokeGrant, ChokePermitGovernor,
+)
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, CaseInFlightError, CaseTypeMismatchError,
-    DetachedCaseError, OwnershipLostError,
+    DetachedCaseError, OwnershipLostError, UnconfiguredChokeError,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,6 +165,8 @@ class _Slot:
     last_advanced_at: Optional[float] = None
     last_heartbeat_at: Optional[float] = None
     task: Optional[asyncio.Task] = None  # the in-flight case-step task, if any
+    choked: Optional[frozenset[str]] = None
+    pending_grant: Optional[ChokeGrant] = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +183,7 @@ class CasePeek:
     fail_streak: int
     skip_countdown: int
     last_result: Optional[AdvanceResult]
+    choked: Optional[frozenset[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +202,14 @@ class TieredCasePoolDriver(CasePoolDriver):
         *,
         policy: Optional[_TierPolicy] = None,
         concurrency_ceiling: int = 50,
+        choke_limits: dict[str, int] | None = None,
     ) -> None:
         super().__init__()
         self._policy = policy or _TierPolicy()
         self._ceiling = concurrency_ceiling
+        self._choke_limits = dict(choke_limits or {})
+        self._governor = ChokePermitGovernor(self._choke_limits)
+        self._choke_validated_types: set[type] = set()
 
         self._by_folder: dict[Path, _Slot] = {}
         self._by_case_id: dict[str, _Slot] = {}
@@ -229,24 +246,41 @@ class TieredCasePoolDriver(CasePoolDriver):
             # Admission must not silently swap the caller's object — reject, don't rehydrate.
             raise DetachedCaseError(folder)
 
-        if case.case_is_closed:
-            # Closed on arrival: dormant immediately, never enters rotation; heartbeat walk
-            # keeps the lease warm until removed.
-            slot = _Slot(
-                case=case, tier=Tier.COLD, reset_multiple=self._policy.M_COLD,
-                skip_countdown=_DORMANT, closed=True,
-            )
-        else:
-            tier = self._policy.admission_tier(case)
-            reset_multiple = self._policy.base_multiple(tier)
-            slot = _Slot(
-                case=case, tier=tier, reset_multiple=reset_multiple,
-                skip_countdown=self._staggered_countdown(reset_multiple),
-            )
-
+        self._validate_case_chokes(type(case))
+        slot = self._make_slot(case)
         self._by_folder[folder] = slot
         self._index_add(slot)
         self._emit(CasePoolEventNames.ADMITTED, case)
+
+    def _make_slot(self, case: FolderBackedCase) -> _Slot:
+        if case.case_is_closed:
+            return _Slot(
+                case=case, tier=Tier.COLD, reset_multiple=self._policy.M_COLD,
+                skip_countdown=_DORMANT, closed=True,
+            )
+        tier = self._policy.admission_tier(case)
+        reset_multiple = self._policy.base_multiple(tier)
+        return _Slot(
+            case=case, tier=tier, reset_multiple=reset_multiple,
+            skip_countdown=self._staggered_countdown(reset_multiple),
+        )
+
+    def _validate_case_chokes(self, case_type: type[FolderBackedCase]) -> None:
+        if case_type in self._choke_validated_types:
+            return
+        declared = case_type.case_type_spec().declared_choke_resources()
+        configured = frozenset(self._choke_limits)
+        missing = declared - configured
+        if missing:
+            trigger_chokes = case_type.case_type_spec().fsm.trigger_chokes
+            example_trigger = next(
+                (t for t, names in trigger_chokes.items() if names & missing),
+                None,
+            )
+            raise UnconfiguredChokeError(
+                case_type.__name__, frozenset(missing), example_trigger=example_trigger,
+            )
+        self._choke_validated_types.add(case_type)
 
     def request_halt(self, case_folder: Path) -> None:
         slot = self._by_folder[case_folder]
@@ -276,21 +310,71 @@ class TieredCasePoolDriver(CasePoolDriver):
             await asyncio.sleep(delay)
 
     def _sweep_once(self) -> None:
-        # Snapshot values(): a launch or eviction may mutate the dict mid-sweep.
-        for slot in list(self._by_folder.values()):
-            if slot.skip_countdown <= 0:          # dormant (closed / in-flight)
-                continue
-            slot.skip_countdown -= 1
-            if slot.skip_countdown != 0:
-                continue
-            if slot.halt_requested:               # defensive: halt should already be dormant
-                slot.skip_countdown = _DORMANT
-                continue
-            if self._in_flight_count >= self._ceiling:
-                slot.skip_countdown = 1           # backpressure: retry next beat
-                continue
-            if self._live_or_evict(slot):         # rehydrate-or-evict BEFORE touching the case
-                self._launch_case_step(slot)
+        self._sweep_preamble()
+        try:
+            for slot in list(self._by_folder.values()):
+                if slot.skip_countdown <= 0:          # dormant (closed / in-flight)
+                    continue
+                slot.skip_countdown -= 1
+                if slot.skip_countdown != 0:
+                    continue
+                if slot.halt_requested:               # defensive: halt should already be dormant
+                    slot.skip_countdown = _DORMANT
+                    continue
+                if self._in_flight_count >= self._ceiling:
+                    slot.skip_countdown = 1           # backpressure: retry next beat
+                    continue
+                self._slot_prelaunch(slot)
+                grant = self._choke_try_acquire(slot)
+                if grant is None:
+                    slot.skip_countdown = 1
+                    continue
+                if self._live_or_evict(slot):
+                    self._launch_with_grant(slot, grant)
+                else:
+                    self._choke_release(grant)
+        finally:
+            self._sweep_end()
+
+    def _sweep_preamble(self) -> None:
+        self._governor.begin_sweep()
+
+    def _sweep_end(self) -> None:
+        self._governor.end_sweep()
+
+    def _slot_prelaunch(self, slot: _Slot) -> None:
+        """Hook for subclasses (e.g. queue wake / requeue). No-op on tiered."""
+
+    def _choke_try_acquire(self, slot: _Slot) -> ChokeGrant | None:
+        needed = slot.case.case_type_spec().fsm.pending_chokes_for(slot.case.case_state)
+        grant = self._governor.try_acquire(needed)
+        if grant is None:
+            slot.choked = needed
+            return None
+        slot.choked = None
+        return grant
+
+    def _launch_with_grant(self, slot: _Slot, grant: ChokeGrant) -> asyncio.Task:
+        return self._launch_case_step(slot, grant=grant)
+
+    def _choke_release(self, grant: ChokeGrant | None) -> None:
+        if grant is not None:
+            self._governor.release(grant)
+
+    def _release_slot_grant(self, slot: _Slot) -> None:
+        grant = slot.pending_grant
+        if grant is not None:
+            self._choke_release(grant)
+            slot.pending_grant = None
+            slot.choked = None
+
+    def _needed_chokes_for_fire(
+        self, slot: _Slot, trigger: str | None,
+    ) -> frozenset[str]:
+        fsm = slot.case.case_type_spec().fsm
+        if trigger is not None:
+            return fsm.trigger_chokes.get(trigger, frozenset())
+        return fsm.pending_chokes_for(slot.case.case_state)
 
     # -- Manual driving ----------------------------------------------------
 
@@ -303,11 +387,17 @@ class TieredCasePoolDriver(CasePoolDriver):
             return await slot.task
         if not self._live_or_evict(slot):
             raise KeyError(case_folder)           # evicted during rehydrate
+        needed = self._needed_chokes_for_fire(slot, trigger)
+        grant = await self._governor.acquire_priority(needed)
         # With a trigger, pass the kwargs dict as-is (a pinned MANUAL edge requires an
         # explicit bag, even {}); with no trigger, pass None so case_advance() does the
         # auto sweep (a kwargs bag without a trigger is misuse there).
         pass_kwargs = trigger_kwargs if trigger is not None else None
-        task = self._launch_case_step(slot, trigger, pass_kwargs)
+        try:
+            task = self._launch_case_step(slot, trigger, pass_kwargs, grant=grant)
+        except BaseException:
+            self._choke_release(grant)
+            raise
         return await task
 
     def boost(self, case_folder: Path) -> None:
@@ -320,8 +410,14 @@ class TieredCasePoolDriver(CasePoolDriver):
     # -- Case-step launch + completion ------------------------------------
 
     def _launch_case_step(
-        self, slot: _Slot, trigger: str | None = None, trigger_kwargs: dict | None = None,
+        self,
+        slot: _Slot,
+        trigger: str | None = None,
+        trigger_kwargs: dict | None = None,
+        *,
+        grant: ChokeGrant | None = None,
     ) -> asyncio.Task:
+        slot.pending_grant = grant
         slot.in_flight = True
         slot.skip_countdown = _DORMANT
         self._in_flight_count += 1
@@ -342,6 +438,7 @@ class TieredCasePoolDriver(CasePoolDriver):
         except OwnershipLostError as err:
             # Fatal ownership breach mid-step: give up on this case.
             result = AdvanceResult(case.case_state, case.case_state, exceptions=(err,))
+            self._release_slot_grant(slot)
             self._finish_in_flight(slot)
             self._evict(slot, reason=err)
             return result
@@ -349,6 +446,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             # Misuse (e.g. ValueError for a bad trigger via fire()) or an unexpected error:
             # never wedge the slot. Clear in-flight, give it a normal reload, and re-raise to
             # any awaiter (fire()); beat-launched tasks have their exception consumed.
+            self._release_slot_grant(slot)
             self._finish_in_flight(slot)
             if not slot.halt_requested and not slot.closed:
                 slot.skip_countdown = max(1, slot.reset_multiple)
@@ -357,6 +455,7 @@ class TieredCasePoolDriver(CasePoolDriver):
         return result
 
     def _complete_step(self, slot: _Slot, result: AdvanceResult) -> None:
+        self._release_slot_grant(slot)
         self._finish_in_flight(slot)
         slot.last_result = result
         if result.progressed:
@@ -375,6 +474,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             else:
                 slot.skip_countdown = max(1, slot.reset_multiple)
 
+        self._slot_post_step(slot, result)
         self._emit_advance_events(slot, result)
 
         if slot.halt_requested:
@@ -382,6 +482,9 @@ class TieredCasePoolDriver(CasePoolDriver):
             self._settle_halt(slot)
         elif closed_now:
             slot.skip_countdown = _DORMANT
+
+    def _slot_post_step(self, slot: _Slot, result: AdvanceResult) -> None:
+        """Hook for subclasses (e.g. requeue-on-wake). No-op on tiered."""
 
     def _finish_in_flight(self, slot: _Slot) -> None:
         if slot.in_flight:
@@ -440,6 +543,7 @@ class TieredCasePoolDriver(CasePoolDriver):
         return True
 
     def _evict(self, slot: _Slot, *, reason: BaseException) -> None:
+        self._release_slot_grant(slot)
         folder = slot.case.case_folder
         logger.warning("TieredCasePoolDriver evicting case %s: %r", folder, reason)
         self._index_remove(slot)
@@ -562,6 +666,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             fail_streak=slot.fail_streak,
             skip_countdown=slot.skip_countdown,
             last_result=slot.last_result,
+            choked=slot.choked,
         )
 
     def by_tier(self) -> dict[str, int]:
@@ -592,6 +697,8 @@ class TieredCasePoolDriver(CasePoolDriver):
             "lease_ttl_secs": DEFAULT_LEASE_TTL_SECS,
             "oldest_dwell_secs": oldest_dwell_secs,
             "oldest_dwell_case": oldest_case,
+            "chokes": self._governor.resource_usage(),
+            "fire_waiters": self._governor.priority_waiter_count(),
         }
 
     # -- Lifecycle ---------------------------------------------------------
