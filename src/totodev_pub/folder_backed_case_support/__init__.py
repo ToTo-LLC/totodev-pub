@@ -49,6 +49,7 @@ from .heartbeat_lease import (
     LeaseOwnershipLostError,
     LeaseReleasedError,
 )
+from .case_type_spec import CaseTypeSpec
 from .choke_permit_governor import (
     ChokeGrant,
     ChokeGrantError,
@@ -90,6 +91,7 @@ __all__ = [
     "AdvanceResult",
     "StateChainParser",
     "FsmChainSpec",
+    "CaseTypeSpec",
     "CaseTypeRegistry",
     "case_type_registry",
     "HeartbeatLease",

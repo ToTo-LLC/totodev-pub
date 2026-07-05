@@ -19,33 +19,23 @@ from totodev_pub.folder_backed_case_support.helpers import _utcnow
 
 
 class ActiveTrigger(NamedTuple):
-    """A trigger currently executing its work slot, as observed lock-free from the
-    folder (see FolderBackedCaseReader.case_active_trigger)."""
+    """Trigger executing its work slot (see ``case_active_trigger``)."""
     trigger: str
     elapsed_secs: float
 
 
 class FolderBackedCaseReader:
-    """Read-only view of a case folder — no lease, no FSM, no write surface.
+    """Read-only ``CaseReadView`` over a case folder — no lease, no FSM, no writes.
 
-    Works in any process without importing a concrete case class. Each property
-    reads from disk when accessed (no caching, no refresh API) — with ONE
-    deliberate exception: ``case_assets`` and the alias trust book memoize the
-    parsed asset-alias mapping (see ``case_assets`` docstring). Multiple reads on
-    the same instance may see slightly different values if the case is advancing
-    underneath; hold property values or sub-objects if you need a snapshot-consistent
-    view.
+    Properties read from disk on access (no refresh API). ``_asset_book`` and
+    ``case_assets`` memoize the persisted ``asset_aliases`` spec map on first use;
+    asset file content stays live per ``CaseAssets`` call.
 
-    ``case_dwell_secs`` and ``case_lease_secs_left`` are ``now()``-relative and
-    decay between accesses. Any caching policy belongs outside this class.
+    ``case_dwell_secs`` and ``case_lease_secs_left`` grow/shrink between reads
+    (``now()``-relative). ``case_assets`` uses ``flexible_dataclass_loading=True``.
 
-    By default ``case_assets`` loads declared data objects generically via
-    LazyLoadedFileData — the zero-dependency story (no case class, no model classes).
-    Pass ``resolve_asset_types=True`` to opt in to TYPED loading: each alias whose
-    persisted loader name resolves through the asset-dataclass registry
-    (``asset_dataclass_registry.register(...)`` at startup) loads as that
-    FileMappedPydanticMixin subclass; any unresolved name (or the "Callable" sentinel)
-    falls back to LazyLoadedFileData for that alias.
+    Pass ``resolve_asset_types=True`` to load aliases via the asset-dataclass registry;
+    otherwise ``LazyLoadedFileData`` is used.
     """
 
     def __init__(self, case_folder: Path, *, resolve_asset_types: bool = False) -> None:
@@ -130,20 +120,7 @@ class FolderBackedCaseReader:
 
     @property
     def case_assets(self) -> CaseAssets:
-        """A CaseAssets view of the case folder's declared data objects.
-
-        Unlike the other properties, this is memoized: the case record is opened
-        (and its near-immutable ``asset_aliases`` parsed into specs) only on the
-        FIRST access, and the resulting CaseAssets is reused on every later
-        access — so nothing is loaded unless ``case_assets`` is actually used, and
-        repeated access does not re-read or re-parse the record. The alias mapping
-        is safe to cache because it mirrors the class-level asset_aliases and never
-        changes over a case's life. Asset FILES are still read live by CaseAssets
-        methods, so asset CONTENT remains a fresh, point-in-time view.
-
-        Note: typed resolution (``resolve_asset_types=True``) is bound when the
-        mapping is first cached; register asset dataclasses before first access.
-        """
+        """Memoized ``CaseAssets`` built from persisted ``asset_aliases`` (first access)."""
         if self._assets is None:
             self._assets = CaseAssets(
                 self._folder,
@@ -153,8 +130,10 @@ class FolderBackedCaseReader:
         return self._assets
 
     def case_load_dataclass(self, alias: str) -> object:
-        """Load a declared asset alias after checking persisted state validity.
-        Raises AssetNotTrustedInStateError before disk I/O when not trusted."""
+        """Load alias after persisted state trust check.
+
+        Raises ``AssetNotTrustedInStateError`` before disk I/O when not trusted.
+        """
         self._resolve_asset_book().assert_trusted(alias, self.case_state)
         return self.case_assets.load_dataclass(alias)
 
@@ -164,24 +143,16 @@ class FolderBackedCaseReader:
 
     @property
     def case_lease_secs_left(self) -> float | None:
-        """Lock-free lease-time read for this case folder.
-
-        Return-value semantics: see `HeartbeatLease.secs_left`."""
+        """>0 held; <0 lapsed but file present; None absent. ``case_active_trigger`` treats <=0 as not in flight."""
         return HeartbeatLease.secs_left(self._folder / LEASE_NAME)
 
     @property
     def case_active_trigger(self) -> ActiveTrigger | None:
-        """The trigger whose work is executing RIGHT NOW, or None — the live view of a
-        long-running step (e.g. an external-system interaction) that a UI can poll.
+        """Unresolved ``CASE_TRIGGER_START`` with live lease, or None.
 
-        Composes two lock-free facts: the log's latest CASE_TRIGGER_START is unresolved
-        (no completion event after it — see CaseEventLogReader.unresolved_trigger_start)
-        AND the lease is live (the in-flight keepalive keeps a working owner's lease warm
-        for the whole step, so a live lease is what separates "in flight" from "owner
-        crashed mid-work"). `elapsed_secs` is measured from the START event's mtime and,
-        like the other now()-relative properties, decays between reads. None means no
-        work is observably in flight: idle, workless transitions only, a crashed owner,
-        or a pre-payload folder."""
+        See ``CaseEventLogReader.unresolved_trigger_start``. ``elapsed_secs`` grows
+        between reads (wall-clock from start event mtime).
+        """
         lease_left = self.case_lease_secs_left
         if lease_left is None or lease_left <= 0:
             return None

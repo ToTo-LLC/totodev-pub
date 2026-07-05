@@ -1,45 +1,17 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""TieredCasePoolDriver — the concrete MLFQ-style scheduling driver atop CasePoolDriver.
+"""TieredCasePoolDriver — MLFQ-style scheduling driver atop CasePoolDriver.
 
-A ``FolderBackedCase`` knows how to take ONE forward step (``case_advance()``); it does
-not drive a fleet. This driver owns the scheduling policy and the aggregate view:
+Implements ``CasePoolDriver`` with HOT/WARM/COLD tiers driven by ``AdvanceResult``
+observations. Extensions: ``peek``, ``by_tier``, ``snapshot``, ``find_by_external_key``,
+``settle``.
 
-1. Run cases — call ``case_advance()`` on the right cases at a controlled cadence.
-2. Aggregate view — be the one place that sees the whole fleet's flow (events + queries).
+Each case has a ``_Slot`` (tier + ``skip_countdown``). ``_DORMANT`` (-1) marks closed or
+in-flight slots. This implementation runs sweep → heartbeat slice → ``asyncio.sleep(I0)``
+per beat (subclass choice; ABC does not promise ordering).
 
-It implements every abstract method of the approved ``CasePoolDriver`` ABC and adds a few
-derived-class extensions (``peek``, ``by_tier``, ``snapshot``, ``find_by_external_key``,
-``settle``). The ABC is left untouched.
-
-SCHEDULING MODEL (Multi-Level Feedback Queue)
----------------------------------------------
-Each case occupies a ``_Slot`` carrying a tier label (HOT / WARM / COLD) and a per-slot
-``skip_countdown`` of beats until its next step. A single per-beat sweep decrements every
-live slot's countdown and launches the step when it reaches zero, reloading the countdown
-from the tier's ``reset_multiple``. Tiers are chosen purely from observed behaviour
-(``AdvanceResult``) by a replaceable ``_TierPolicy`` — the driver never introspects domain
-logic:
-
-- progress (auto step or ``fire()``)        -> HOT, streaks reset
-- failure (a transition raised)             -> held WARM with a lengthening backoff
-- no-op (guard declined / blocked)          -> normal no-op-streak demotion ladder
-- structural dead-end (not ``advanceable``) -> accelerated demotion to COLD
-
-COLD is slow-but-still-polled (a watch loop for out-of-band change), never frozen.
-Dormancy (``skip_countdown <= 0``) is reserved for closed and in-flight cases only.
-
-PACING
-------
-The beat is the ABC's ``advance()``. It sweeps once, runs a heartbeat slice (lease
-keepalive, §6), then applies an async-friendly smoothing delay (``asyncio.sleep(I0)``).
-Tests pass ``advance(suggested_interval_secs=0.0)`` to drop the delay; because the actual
-case steps run as background tasks, ``await settle()`` awaits them to a quiescent point.
-
-This driver deliberately does NO disk/folder management: cases arrive already bound (live,
-lease-held) and leave the same way. The membership journal / crash recovery (design §8b) is
-a separate observer that rides the event stream and is out of scope here.
+No disk management. ``PoolMembershipJournal`` handles crash recovery separately.
 """
 
 from __future__ import annotations
@@ -70,9 +42,8 @@ from totodev_pub.folder_backed_case_support.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-# Sentinel: a slot with skip_countdown <= 0 is DORMANT (closed or in-flight) — never
-# decremented or fired. A live item never rests at 0 (it fires and reloads), so the
-# sentinel is unambiguous.
+# _DORMANT (-1): closed or in-flight — never decremented or fired. Live slots fire at 0
+# and reload countdown; they never rest at 0 between beats.
 _DORMANT = -1
 
 
@@ -84,18 +55,15 @@ class Tier(enum.Enum):
     COLD = "cold"
 
 
-# ---------------------------------------------------------------------------
-# Tier policy (the replaceable promotion/demotion rules, design §4 / §4b)
-# ---------------------------------------------------------------------------
+# Tier policy (promotion/demotion rules and tunables)
 
 @dataclass
 class _TierPolicy:
     """The promotion/demotion rules and timing tunables as data, so thresholds and the
     kind->effect mapping can be swapped or subclassed without touching the sweep.
 
-    All intervals are integer multiples ``M`` of the base beat ``I0``; a slot fires every
-    ``reset_multiple`` beats. The PLACEHOLDER values come straight from design §4b and are
-    expected to be tuned against real workloads.
+    All intervals are integer multiples ``M`` of base beat ``I0``. Tunables below are
+    starting defaults; adjust for workload.
     """
     # Cadence
     I0: float = 0.5                       # base beat / hot period (seconds)
@@ -127,7 +95,7 @@ class _TierPolicy:
         """Mutate ``slot`` (tier / reset_multiple / streaks) from the latest result.
 
         Only ever called for a NON-closed case (closed cases are made dormant by the driver
-        and never reclassified). Implements the kind-aware effect table of design §4.
+        and never reclassified). Maps result.progressed / failed / no-op to tier changes.
         """
         if result.progressed:
             slot.tier = Tier.HOT
@@ -167,9 +135,7 @@ class _TierPolicy:
             slot.reset_multiple = self.base_multiple(slot.tier)
 
 
-# ---------------------------------------------------------------------------
-# Slot (design §8a) + read-only peek view
-# ---------------------------------------------------------------------------
+# Slot + read-only peek view
 
 @dataclass
 class _Slot:
@@ -178,7 +144,7 @@ class _Slot:
     case: FolderBackedCase
     tier: Tier
     reset_multiple: int                  # countdown reload (tier base, or warm backoff)
-    skip_countdown: int                  # beats to next step; <= 0 == dormant
+    skip_countdown: int                  # beats to next step; _DORMANT when dormant
     noop_streak: int = 0
     fail_streak: int = 0
     in_flight: bool = False
@@ -214,9 +180,8 @@ class CasePeek:
 class TieredCasePoolDriver(CasePoolDriver):
     """Concrete MLFQ scheduling driver over a pool of FolderBackedCase objects.
 
-    Identity is the case folder path. ``_by_folder`` is THE STORE (the sweep iterates its
-    values); ``_by_case_id`` / ``_by_external_key`` are optional derived indexes pointing at
-    the same slots. See the module docstring for the scheduling model.
+    Identity is the case folder path. ``_by_folder`` is the authoritative slot store;
+    ``_by_case_id`` / ``_by_external_key`` are optional indexes. See module docstring.
     """
 
     def __init__(
@@ -439,8 +404,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             self._emit(CasePoolEventNames.HALTED, slot.case)
 
     def _emit_advance_events(self, slot: _Slot, result: AdvanceResult) -> None:
-        # Order within a beat: ALERTED -> ADVANCED -> CLOSED. FAILED (mutually exclusive with
-        # ADVANCED for a single result) rides between them.
+        # Order: ALERTED → ADVANCED → FAILED → CLOSED
         case = slot.case
         if result.alerted:
             self._emit(CasePoolEventNames.ALERTED, case, result)
@@ -452,7 +416,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             # CLOSED is always preceded by ADVANCED in the same beat.
             self._emit(CasePoolEventNames.CLOSED, case, result)
 
-    # -- Detach recovery + eviction (design §8 / §8a) ---------------------
+    # -- Detach recovery + eviction ---------------------------------------
 
     def _live_or_evict(self, slot: _Slot) -> bool:
         """Ensure ``slot.case`` is live; return False (and evict) if it can't be made live.
@@ -482,7 +446,7 @@ class TieredCasePoolDriver(CasePoolDriver):
         self._by_folder.pop(folder, None)
         self._emit(CasePoolEventNames.EVICTED, slot.case)
 
-    # -- Heartbeat walk (design §6) ---------------------------------------
+    # -- Heartbeat walk ---------------------------------------------------
 
     def _heartbeat_slice(self) -> None:
         """Walk a slice of the store, beating each retained case's lease. A full lap
@@ -634,7 +598,7 @@ class TieredCasePoolDriver(CasePoolDriver):
 
     async def stop(self) -> None:
         """Stop the beat loop, then drain any in-flight steps so completions reclassify
-        out cleanly before returning (design §7)."""
+        out cleanly before returning."""
         await super().stop()
         await self.settle()
 
@@ -668,6 +632,6 @@ class TieredCasePoolDriver(CasePoolDriver):
     def _staggered_countdown(self, multiple: int) -> int:
         """First countdown when (re)scheduling into a tier of interval ``multiple``: scatter
         same-tier items across the M phases so they don't all fire on the same beat
-        (design §5 phase-staggering). For M == 1 (hot) this is always 1."""
+        For M == 1 (hot) this is always 1."""
         self._stagger_counter += 1
         return 1 + (self._stagger_counter % max(1, multiple))

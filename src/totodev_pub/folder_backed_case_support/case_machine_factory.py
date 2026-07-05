@@ -3,9 +3,9 @@
 
 """Builds the instance-bound AsyncMachine for a FolderBackedCase.
 
-This helper wires parser conventions at bind time:
-- `@FACT<op>N` tokens become `conditions` callables.
-- `perform_<trigger>` methods are wrapped as timed `before` callbacks.
+Wires parser conventions at bind time: ``@FACT<op>N#`` factual guards become
+``conditions`` callables; ``perform_<trigger>`` methods become timed ``before``
+callbacks with lease keepalive, trigger-start journal markers, and timeouts.
 """
 
 from __future__ import annotations
@@ -44,23 +44,12 @@ _FACT_OPS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operat
 
 
 class _LeaseKeepalive:
-    """Keeps a case's heartbeat lease warm while a trigger's awaited work runs.
+    """Keeps the heartbeat lease warm during awaited trigger work.
 
-    A single coroutine cannot refresh its own lease while it is parked at the `await` of a
-    slow `perform_`/`before` step, so this spawns ONE sibling `asyncio.Task` (the "pulse")
-    that beats the lease on a short interval alongside the work. That decouples the lease
-    TTL (the crash-recovery window) from how long a single, legitimately slow step may run:
-    a live, working owner keeps the folder spoken-for no matter how long the step awaits.
-
-    Cooperative only: the pulse advances solely because the work yields the event loop. A
-    step that blocks the loop synchronously starves the pulse too (offload such work via
-    `case_run_blocking`). The pulse is reaped when the work returns or raises.
-
-    Ownership-loss policy (cancel-and-surface): a beat validates ownership; if the on-disk
-    lease is no longer ours (an outside process reclaimed the folder past our TTL), the
-    pulse cancels the in-flight work task and `__aexit__` re-raises that `OwnershipLostError`
-    in place of the resulting `CancelledError`. An external cancellation (e.g. a driver
-    wrapping `case_advance()` in `asyncio.wait_for`) is left untouched and propagates.
+    Spawns a sibling pulse task that beats the lease while ``perform_``/``before``
+    work runs. Cooperative only — blocking the event loop starves the pulse.
+    On ``OwnershipLostError``, cancels work and re-raises; external cancellation
+    propagates unchanged.
     """
 
     def __init__(self, case: "FolderBackedCase") -> None:
@@ -132,7 +121,7 @@ class _CaseMachineFactory:
         self._journal = journal
 
     def build(self, initial_state: str) -> AsyncMachine:
-        """Constructs the case-bound machine with event and exception hooks enabled."""
+        """Construct the case-bound machine (keepalive, timeouts, journal markers)."""
         return AsyncMachine(
             model=self._case,
             states=self._fsm.states,
@@ -199,12 +188,7 @@ class _CaseMachineFactory:
                     "still let the lease lapse; consider a shorter trigger_warn_secs.",
                     case.case_id, trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
                 )
-            # Durable in-flight marker, written BEFORE the work so an observer (e.g. a
-            # FolderBackedCaseReader in another process) can see WHICH trigger this case
-            # is currently executing — and so a crash mid-work leaves a dated record of
-            # what was running. Resolved by the completion event that follows (see
-            # CaseJournal.log_trigger_start). Only worked edges reach here, so pure
-            # routing transitions add no log volume.
+            # CASE_TRIGGER_START before work (see CaseJournal.log_trigger_start).
             journal.log_trigger_start(trigger, state=state, warn=warn, kill=kill)
             start = time.monotonic()
             completed = False

@@ -293,6 +293,30 @@ class FsmChainSpec:
         """Is the edge (source -> via trigger) eligible for unattended advance()?"""
         return (source, trigger) in self.auto_edges
 
+    def auto_edges_from(self, state: str) -> list[tuple[str, str]]:
+        """Auto-advance edges leaving ``state`` as ``(trigger, dest)`` in declared order."""
+        out: list[tuple[str, str]] = []
+        for t in self.transitions:
+            srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
+            if state in srcs and self.is_auto(state, t["trigger"]):
+                out.append((t["trigger"], t["dest"]))
+        return out
+
+    def auto_triggers_from(self, state: str) -> tuple[str, ...]:
+        """Auto-advance trigger names leaving ``state``, in declared order."""
+        return tuple(trigger for trigger, _ in self.auto_edges_from(state))
+
+    def has_auto_exits(self, state: str) -> bool:
+        """True when ``state`` has at least one auto-advanceable (``--``) exit."""
+        return bool(self.auto_triggers_from(state))
+
+    def pending_chokes_for(self, state: str) -> frozenset[str]:
+        """Union of choke resource sets over all auto exits from ``state``."""
+        needed: set[str] = set()
+        for trigger in self.auto_triggers_from(state):
+            needed.update(self.trigger_chokes.get(trigger, frozenset()))
+        return frozenset(needed)
+
     def validate(self) -> "FsmChainSpec":
         """Whole-graph semantic checks, kept SEPARATE from parsing so it can be invoked
         deliberately (the default compile_fsm calls it; a hand-built override may skip or

@@ -1,26 +1,22 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""The case-type catalog and name-driven resolution surface for the FolderBackedCase family.
+"""Case-type catalog and name-driven resolution for the FolderBackedCase family.
 
-`CaseTypeRegistry` owns the global type catalog (name -> subclass), type sniffing and
-resolution, and the two strict resolution methods:
-  - `rehydrate`  — folder -> live, lease-holding case instance.
-  - `peek_class` — folder -> bare type name (str), or with return_class_object=True the
-                   registered class object.
+``CaseTypeRegistry`` maps ``case_object_type`` name → subclass and provides:
 
-Static, registry-free folder reads (peek_case_record / peek_case_events / peek_case_assets)
-live on `FolderBackedCase` itself — they are class-agnostic utilities that don't touch the
-catalog at all.
+  - ``rehydrate(folder)`` — open as the correct class (acquires lease via ``__init__``)
+  - ``peek_class(folder)`` — sniff type name or resolve registered class
 
-A single process-wide instance, `case_type_registry`, is exported for callers to use
-directly (e.g. `case_type_registry.rehydrate(folder)`). The registry is deliberately
-manager-free: type resolution works without any CaseManager owning the catalog.
+Static lock-free peeks (``peek_case_record``, ``peek_case_events``, etc.) live on
+``FolderBackedCase``, not here.
 
-When you need it: ONLY for name-driven resolution — `rehydrate` and `peek_class`. If you
-already hold the concrete case class you can ignore this entirely: `MyCase.create_case_in_folder()`
-and `MyCase(folder)` work registry-free (the construction type gate is a local name check,
-not a registry lookup).
+Use the module singleton ``case_type_registry`` in application code. Registry-free
+construction works when you already know the class: ``MyCase(folder)`` or
+``MyCase.create_case_in_folder(...)``.
+
+Planned ``CaseManager`` (draft: notebooks/DEVDAVE/case_manager_classes/CaseManager
+Model.md) may own registration policy; the registry itself stays manager-free.
 """
 
 from __future__ import annotations
@@ -37,41 +33,25 @@ if TYPE_CHECKING:
 
 
 class CaseTypeRegistry:
-    """The type catalog plus the folder-peek/rehydrate surface.
+    """Type catalog plus ``peek_class`` / ``rehydrate``.
 
-    Holds a name -> subclass mapping (keyed by the bare `__name__`, the EXACT value
-    stamped into every record's `case_object_type`) and the two name-driven resolution
-    methods: `rehydrate` (folder -> live case) and `peek_class` (folder -> type name or
-    class object). Static folder reads live on FolderBackedCase, not here.
-
-    A module-level singleton, `case_type_registry`, is the canonical instance; callers
-    use it directly. Construct a fresh `CaseTypeRegistry()` only for isolation (tests).
+    Keyed by bare ``__name__`` (the ``case_object_type`` stamped on each record).
+    Static folder peeks live on ``FolderBackedCase``, not here.
     """
 
     def __init__(self) -> None:
         self._registry: dict[str, type[FolderBackedCase]] = {}
 
-    # ---- registration ----
-
     def register_case_types(self, *case_classes: type[FolderBackedCase]) -> None:
-        """Explicit, opt-in registration of one or more case types (no auto-register).
-        Each class is keyed by its bare __name__ — the EXACT value stamped into every
-        record's case_object_type (see create_case_in_folder / case_reclassify_to) and enforced by
-        _flush_record's guard — so the class name in code is guaranteed to match the name
-        on disk. Single or many: register_case_types(A) or register_case_types(A, B, C)."""
+        """Register one or more case types, keyed by class ``__name__``.
+
+        That name must match ``case_object_type`` on disk (enforced at bind/flush).
+        """
         for case_cls in case_classes:
             self._registry[case_cls.__name__] = case_cls
 
     def register(self, case_cls: type[FolderBackedCase]) -> type[FolderBackedCase]:
-        """Class-decorator sugar for one-line self-registration. Returns the class
-        unchanged so it composes cleanly:
-
-            @case_type_registry.register
-            class TicketCase(FolderBackedCase):
-                ...
-
-        Equivalent to register_case_types(TicketCase) after the definition. Runs at
-        class-definition time, when the class object already exists in full."""
+        """Decorator sugar for ``register_case_types``."""
         self.register_case_types(case_cls)
         return case_cls
 
@@ -81,19 +61,14 @@ class CaseTypeRegistry:
         *,
         registry: dict[str, type[FolderBackedCase]] | None = None,
     ) -> type[FolderBackedCase] | None:
-        """Look up a class by its stored bare name. `registry` overrides the singleton
-        (tests / isolation); None means use this instance's catalog."""
+        """Look up a class by stored bare name. ``registry`` overrides for tests."""
         if type_name is None:
             return None
         return (registry if registry is not None else self._registry).get(type_name)
 
-    # ---- type resolution (shared by rehydrate + peek_class) ----
-
     @staticmethod
     def _sniff_case_type(folder: Path) -> str | None:
-        """Cheaply read the record's case_object_type WITHOUT full Pydantic validation.
-        case_object_type is the FIRST CaseRecord field and YAML is emitted in definition
-        order (sort_keys=False), so it reliably appears at the top of the file."""
+        """Read ``case_object_type`` from the record file without full validation."""
         record_path = Path(folder) / RECORD_NAME
         try:
             text = record_path.read_text()
@@ -108,10 +83,10 @@ class CaseTypeRegistry:
         *,
         registry: dict[str, type[FolderBackedCase]] | None = None,
     ) -> FolderBackedCase:
-        """Open the folder as the CORRECT FolderBackedCase subclass (registry lookup on
-        the sniffed type) and return a live, lease-holding case. The behavior-bearing
-        analog of peek_class(return_class_object=True). RAISES UnregisteredCaseTypeError
-        for an unknown type — you cannot build behavior without the class."""
+        """Resolve class from disk and construct a live, lease-holding case.
+
+        Raises ``UnregisteredCaseTypeError`` when the sniffed type is not registered.
+        """
         case_cls = self.peek_class(folder, return_class_object=True, registry=registry)
         return case_cls(folder)
 
@@ -122,16 +97,13 @@ class CaseTypeRegistry:
         return_class_object: bool = False,
         registry: dict[str, type[FolderBackedCase]] | None = None,
     ) -> type[FolderBackedCase] | str:
-        """Deduce a folder's case type from its record's case_object_type.
+        """Deduce case type from ``case_object_type`` on disk.
 
-        return_class_object=False (default): return the bare type NAME (str) sniffed from
-            disk — registry-free.
-        return_class_object=True: resolve that name to the registered subclass and return
-            the CLASS OBJECT; RAISES UnregisteredCaseTypeError when the name is not
-            registered (you cannot obtain a class you never registered).
+        ``return_class_object=False``: bare name (str), registry-free.
+        ``return_class_object=True``: registered class; raises if unknown.
 
-        RAISES FileNotFoundError when the folder holds no record, and ValueError when the
-        record carries no case_object_type — either way the type cannot be deduced."""
+        Raises ``FileNotFoundError`` when no record; ``ValueError`` when type missing.
+        """
         record_path = Path(folder) / RECORD_NAME
         if not record_path.exists():
             raise FileNotFoundError(
@@ -151,8 +123,4 @@ class CaseTypeRegistry:
         return case_cls
 
 
-
-# Process-wide singleton: the canonical catalog callers use directly. Type resolution
-# (rehydrate / peek_class) works manager-free because this lives at module scope,
-# not inside any CaseManager.
 case_type_registry = CaseTypeRegistry()

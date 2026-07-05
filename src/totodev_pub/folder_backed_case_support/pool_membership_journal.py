@@ -1,53 +1,19 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""PoolMembershipJournal — durable, append-only record of pool membership for crash recovery.
+"""PoolMembershipJournal — durable append-only pool membership for crash recovery.
 
-A ``CasePoolDriver`` is an in-memory scheduling layer: when the process dies, the knowledge
-of *which* case folders this driver was responsible for dies with it. The folders themselves
-are durable (record + lease + event log all live on disk), but nothing on disk says "this
-particular driver/shard owned these folders" — a bare disk scan cannot tell which driver held
-a case, and leases expire without recording assignment. This journal is that durable
-assignment: a small jsonl of pointers (folder paths only) so the pool can be rebuilt after a
-crash (design doc Section 8b).
+A ``CasePoolDriver`` is in-memory; this jsonl records which folder paths belonged to a
+pool so membership can be rebuilt after a crash. Pure observer: subscribes to ADMITTED /
+REMOVED / EVICTED; wired at app setup (see CaseManager Model.md §5).
 
-It is a pure OBSERVER. It owns no driver behaviour and the driver knows nothing about it; the
-two are wired together by app-setup. The journal rides the driver's existing event stream
-(``ADMITTED`` -> ``add`` record, ``REMOVED`` / ``EVICTED`` -> ``remove`` record) and never
-modifies the driver or its base class.
+On-disk: ``{"op": "add"|"remove", "path": <str>, "ts": <float>}`` per line. Replay uses
+``case_type_registry.rehydrate(path)``. A torn final line is tolerated on read.
 
-ON-DISK FORMAT
---------------
-Append-only jsonl, one record per line: ``{"op": "add"|"remove", "path": <str>, "ts": <float>}``.
-Only the path is stored; ``case_type_registry.rehydrate(path)`` reads the class from the
-folder's own record on replay, and everything else is already durable in the folder. A torn
-final line (a crash mid-append) is tolerated on read.
+``rebuild(add_fn)`` replays and rehydrates immediately (acquires leases). For fast-restart
+while old leases may still be held, use ``restore_pool_from_journal`` (lease-aware gate).
 
-RECOVERY
---------
-``rebuild(add_fn)`` replays the journal down to the current membership (paths whose most recent
-op is ``add``) and reconciles each path against reality — the lease is the real arbiter:
-
-- rehydrate succeeds (open OR closed) -> hand the live case to ``add_fn`` (the driver admits a
-  closed case as dormant on its own);
-- folder gone (``FileNotFoundError``) -> drop;
-- owned elsewhere now (``CaseAlreadyOpenError``) -> drop (see fast-restart note below);
-- type unreadable / unregistered / changed (``ValueError`` / ``UnregisteredCaseTypeError`` /
-  ``CaseTypeMismatchError``) -> drop.
-
-``rebuild`` is the simple, lease-naive entry point. For a real fast-restart (a fresh pool
-starting before the dead pool's leases have expired) use ``restore_pool_from_journal``, the
-lease-aware wiring helper below: it inspects every lease file FIRST and only instantiates cases
-once it has confirmed no live owner is renewing them (Phase 1 gate), then reclaims frozen leases
-incrementally as they lapse (Phase 2). A genuinely live competitor aborts the restart with a
-clear ``PoolRestartConflictError`` rather than risking a split-brain. All of this fast-restart
-policy lives in the wiring helper, never in the driver.
-
-COMPACTION
-----------
-The live set is tracked in memory as events arrive, so the file can be rewritten from it via a
-temp-file + atomic rename. Compaction runs automatically every ``compaction_threshold``
-removals and once at the end of a rebuild.
+Compaction rewrites from the in-memory live set after ``compaction_threshold`` removals.
 """
 
 from __future__ import annotations
@@ -88,10 +54,10 @@ _DEFAULT_COMPACTION_THRESHOLD = 500
 
 @dataclass
 class DroppedMember:
-    """Why one journaled path could not be recovered. ``reason`` is one of the ``_MISSING`` /
-    ``_OWNED`` / ``_BAD_TYPE`` category constants; ``error_type`` and ``detail`` carry the exact
-    exception that triggered the drop, so a jammed restart can be diagnosed precisely (a bad
-    type vs. an unregistered class vs. an unreadable record all land here distinctly)."""
+    """Why one journaled path could not be recovered.
+
+    ``reason`` is ``"missing"``, ``"owned_elsewhere"``, or ``"bad_type"``.
+    """
     path: Path
     reason: str
     error_type: str
@@ -100,12 +66,7 @@ class DroppedMember:
 
 @dataclass
 class RebuildReport:
-    """Outcome of a ``rebuild`` / ``reconcile`` pass, partitioned by what happened to each
-    journaled path. ``dropped_owned_elsewhere`` is the subset the wiring helper retries after a
-    TTL back-off (those may be this process's own not-yet-expired leases).
-
-    The ``dropped_*`` lists are the quick path-only buckets; ``failures`` carries the SAME drops
-    enriched with the triggering exception (type + message) for diagnosing a stuck restart."""
+    """Outcome of ``rebuild`` / ``reconcile``."""
     readded: list[Path] = field(default_factory=list)
     dropped_missing: list[Path] = field(default_factory=list)
     dropped_owned_elsewhere: list[Path] = field(default_factory=list)
@@ -154,7 +115,7 @@ class PoolMembershipJournal:
         return self._path
 
     def live_paths(self) -> set[Path]:
-        """A copy of the currently-journaled live membership (folder paths)."""
+        """In-memory mirror (may differ from ``members()`` before disk sync)."""
         return {Path(p) for p in self._live}
 
     # -- Driver wiring (observer attach/detach) ----------------------------
@@ -219,10 +180,7 @@ class PoolMembershipJournal:
         *,
         registry: CaseTypeRegistry = case_type_registry,
     ) -> RebuildReport:
-        """Reconcile an explicit list of paths and re-admit any that rehydrate.
-
-        Used by the wiring helper to retry the ``dropped_owned_elsewhere`` subset after a TTL
-        back-off. Re-added paths are merged into the live set and the file is compacted."""
+        """Reconcile an explicit path list (used by ``restore_pool_from_journal`` polling)."""
         report = self._reconcile_paths(paths, add_fn, registry)
         self._live |= {str(p) for p in report.readded}
         self._compact()
@@ -263,9 +221,7 @@ class PoolMembershipJournal:
     def _classify(
         path: Path, registry: CaseTypeRegistry
     ) -> tuple[str, FolderBackedCase | None, BaseException | None]:
-        """Reconcile a single journaled path against the folder on disk. The lease is the
-        arbiter: a successful rehydrate means we (re)acquired ownership. On a drop, the
-        triggering exception is returned alongside the category so callers can see WHY."""
+        """Rehydrate one path; return outcome category and optional case or error."""
         try:
             case = registry.rehydrate(Path(path))
         except FileNotFoundError as err:
@@ -279,9 +235,11 @@ class PoolMembershipJournal:
     # -- Reading the journal ----------------------------------------------
 
     def _read_members(self) -> list[Path]:
-        """Replay the file to the set of paths whose most recent op is ``add``, preserving
-        first-seen order. A torn final line (crash mid-append) is tolerated; a malformed line
-        anywhere else is a real corruption and raised."""
+        """Replay file to paths whose latest op is ``add``.
+
+        Invalid JSON on the final line is tolerated. Invalid JSON elsewhere raises.
+        Semantically invalid records (bad op/path) are skipped.
+        """
         if not self._path.exists():
             return []
         lines = self._path.read_text(encoding="utf-8").splitlines()
@@ -311,9 +269,7 @@ class PoolMembershipJournal:
         return [Path(p) for p in order if last_op[p] == "add"]
 
     def members(self) -> list[Path]:
-        """The current journaled membership (paths whose most recent op is ``add``), replayed
-        from disk. The starting point for a lease-aware restore that wants to inspect leases
-        before instantiating anything."""
+        """Membership replayed from disk (may differ from ``live_paths()``)."""
         return self._read_members()
 
     # -- Writing the journal ----------------------------------------------
@@ -356,26 +312,7 @@ class PoolMembershipJournal:
         self._removals_since_compaction = 0
 
 
-# ---------------------------------------------------------------------------
-# Lease-aware fast-restart recovery (the wiring seam; driver stays ignorant)
-# ---------------------------------------------------------------------------
-#
-# The crash-recovery problem the journal cannot solve alone: a fresh pool may start before the
-# dead pool's leases have expired. Every still-held lease then looks identical to a live
-# competitor's — and you cannot tell them apart from a single look. The discriminator is
-# MOVEMENT over time: a live owner re-stamps each lease's "valid-until" mtime within the TTL,
-# while a dead owner's leases sit frozen and count down. So recovery runs in two phases:
-#
-#   Phase 1 (gate, instantiates NOTHING): stat every member's lease file, then look again after
-#       one beat window. If ANY held lease advanced, a live owner exists -> abort, having taken
-#       nothing (this is what prevents a half-and-half split-brain). If all held leases are
-#       frozen, the old owner is believed dead.
-#   Phase 2 (reclaim, incremental): acquire the already-free cases now and poll the frozen ones,
-#       admitting each as its lease lapses, up to a TTL-bounded deadline. Instantiating a case
-#       secures its lease (the constructor calls acquire()), so a successful add IS the claim.
-#       Belt-and-suspenders: if a frozen lease springs back to life mid-reclaim (an owner that
-#       stalled past its own TTL and resumed — already a contract violation it must self-detect
-#       via OwnershipLostError), it is surfaced as a conflict rather than fought over.
+# Lease-aware fast-restart (see restore_pool_from_journal)
 
 
 @dataclass
