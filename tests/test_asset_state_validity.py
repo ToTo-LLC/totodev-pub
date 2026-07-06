@@ -229,10 +229,11 @@ def test_keep_true_seeds_manifest_at_create(tmp_path):
     case = TicketCase.create_case_in_folder(folder)
     try:
         assert "ticket.yaml" in case.case_assets.keep_list()
+        assert "assets/ticket.yaml" in case.case_assets.keep_manifest.list_rules()
         case.case_assets.write("ticket.yaml", b"title: kept\n")
         case.case_assets.write("scratch.txt", b"ephemeral")
-        purged = case.case_assets.purge_ephemeral()
-        assert "scratch.txt" in purged
+        purged = case._keep_manifest.purge()
+        assert purged == ["assets/scratch.txt"]
         assert case.case_assets.asset_path("ticket.yaml").exists()
     finally:
         case.case_detach()
@@ -258,3 +259,35 @@ def test_bypass_via_case_assets_ignores_gate(tmp_path):
         assert obj.lines == 9
     finally:
         case.case_detach()
+
+
+def test_case_add_keep_rules_retains_custom_file(tmp_path):
+    folder = tmp_path / "custom-keep"
+    case = TicketCase.create_case_in_folder(folder)
+    try:
+        export = folder / "exports" / "summary.pdf"
+        export.parent.mkdir(parents=True)
+        export.write_bytes(b"%PDF-summary")
+        case.case_add_keep_rules("exports/summary.pdf")
+        case.case_assets.write("scratch.txt", b"ephemeral")
+        purged = case._keep_manifest.purge()
+        assert "assets/scratch.txt" in purged
+        assert export.exists()
+        assert export.read_bytes() == b"%PDF-summary"
+    finally:
+        case.case_detach()
+
+
+def test_close_purge_retains_framework_and_kept_assets(tmp_path):
+    folder = tmp_path / "close-purge"
+    with TicketCase.create_case_in_folder(folder, case_id="t-close") as case:
+        case.case_assets.write("ticket.yaml", b"title: kept\n")
+        case.case_assets.write("ephemeral.txt", b"gone")
+        asyncio.run(case.open_ticket())
+        asyncio.run(case.close_ticket())
+        assert case.case_is_closed
+    assert (folder / "case_record.yaml").exists()
+    assert list((folder / "events").rglob("*"))  # event log present
+    assert (folder / "assets" / "ticket.yaml").exists()
+    assert not (folder / "assets" / "ephemeral.txt").exists()
+    assert (folder / "_keep.txt").exists()

@@ -182,8 +182,8 @@ def test_logs_isolated_from_assets(tmp_path):
         case.case_assets.write("ephemeral.bin", b"data")  # not kept
         # logs/ lives at the case root, never under assets/
         assert all(not rel.startswith(LOGS_DIR_NAME) for rel in case.case_assets.list_assets())
-        # Asset purge must not touch the log file.
-        case.case_assets.purge_ephemeral()
+        # Case-wide purge must not touch the log file (baseline keeps logs/case.log).
+        case._keep_manifest.purge()
         assert _log_path(folder).exists()
         assert "isolation-marker" in _log_path(folder).read_text(encoding="utf-8")
 

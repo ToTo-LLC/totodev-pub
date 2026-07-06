@@ -12,9 +12,20 @@ RECORD_NAME     = "case_record.yaml"
 LEASE_NAME      = ".case.lease"      # single-owner lease: content-free; mtime = "valid-until"
 EVENTS_DIR_NAME = "events"           # case event-log folder (PrimitiveEventLog storage)
 ASSETS_DIR_NAME = "assets"           # the downstream-owned asset "playground"
-KEEP_LIST_NAME  = "_keep_assets.txt" # retention manifest at the CASE ROOT (NOT under assets/)
+KEEP_LIST_NAME  = "_keep.txt"        # retention manifest at the CASE ROOT (case-relative rules)
 LOGS_DIR_NAME   = "logs"             # per-case folder-logging tee (NOT under assets/)
 LOG_FILE_NAME   = "case.log"         # the single appended per-case log file inside logs/
+
+# Framework-owned keep rules seeded idempotently at case create/bind. Every rule is
+# case-relative (exact path or glob). Purge deletes any file under the case folder
+# that matches no keep rule. KEEP_LIST_NAME and LEASE_NAME are NOT listed here — both
+# are unconditionally hard-skipped by CaseKeepManifest, so they never need to appear
+# in their own rule list.
+FRAMEWORK_KEEP_RULES = (
+    RECORD_NAME,
+    f"{EVENTS_DIR_NAME}/**",
+    f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}",
+)
 
 # Reserved case-owned artifacts at the case root; create_case_in_folder() rejects targets
 # that already contain any of these names to avoid colliding with a prior case.

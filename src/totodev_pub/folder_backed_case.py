@@ -16,7 +16,7 @@ Core pieces
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
 CaseEventLogReader      — read-oriented convention interpreter over PrimitiveEventLog.
 CaseJournal             — domain-aware event-log write facade (internal; reads use case_events).
-CaseAssets              — working-file playground + retention manifest (_keep_assets.txt).
+CaseAssets              — working-file playground + retention manifest (_keep.txt).
 FolderBackedCase        — ABC you subclass to define a case type.
 FolderBackedCaseReader  — lock-free read-only folder view (no lease, no registry).
 CaseReadView            — Protocol shared by live case and reader.
@@ -111,6 +111,7 @@ from totodev_pub.folder_backed_case_support.case_record import CaseRecord
 from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
 from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
+from totodev_pub.folder_backed_case_support.case_keep_manifest import CaseKeepManifest
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 from totodev_pub.folder_backed_case_support.heartbeat_lease import (
     HeartbeatLease, LeaseAlreadyHeldError, LeaseOwnershipLostError,)
@@ -656,11 +657,21 @@ class FolderBackedCase(ABC):
         Quick use:
           Your working files live here. Use case.case_assets.folder, .asset_path(...),
           .relative_path(...), .write(...), .add_keep_rules(...), .list_assets(), etc.
-          Anything not kept via the manifest is purged when the case closes.
+          Asset keep rules are stored in ``_keep.txt`` with an ``assets/`` prefix.
+          Anything not matched by the manifest is purged when the case closes.
 
         Maintainer notes:
-          Kept off this class's own namespace so asset concerns stay grouped in one place."""
+          Kept off this class's own namespace so asset concerns stay grouped in one place.
+          For non-asset files, use ``case_add_keep_rules()`` instead."""
         return self._assets
+
+    def case_add_keep_rules(self, *rules: str | Path) -> None:
+        """Append case-relative keep rules to ``_keep.txt`` (exact path or glob).
+
+        Use this from subclass hooks (especially ``on_closing()``) to retain files
+        outside ``assets/``. For assets, prefer ``case_assets.add_keep_rules()`` or
+        ``case_assets.write(..., keep=True)``."""
+        self._keep_manifest.add_rules(*rules)
 
     def case_load_dataclass(self, alias: str) -> object:
         """Load a declared asset alias after checking it is trustworthy in the current
@@ -915,8 +926,10 @@ class FolderBackedCase(ABC):
     def on_closing(self) -> None:
         """Overridable hook fired in phase 1 (pre-finalization): assets still exist,
         record not yet stamped. Override to retain/extract final artifacts before the
-        ephemeral purge. Default: no-op. Heavy async work belongs in an async ``before_``
-        hook on the closing transition; this hook is synchronous."""
+        ephemeral purge — call ``case_add_keep_rules()`` for non-asset paths or
+        ``case_assets.add_keep_rules()`` for assets. Default: no-op. Heavy async work
+        belongs in an async ``before_`` hook on the closing transition; this hook is
+        synchronous."""
 
     @classmethod
     def generate_case_id(cls) -> str:
@@ -1130,7 +1143,11 @@ class FolderBackedCase(ABC):
         materializes the folder + record (minting `case_id` via
         `generate_case_id()` when needed), then immediately calls this
         constructor to attach the live object.
-        """
+
+        Retention at close is manifest-driven: ``_keep.txt`` at the case root lists
+        every file that survives purge. Framework artifacts are seeded automatically;
+        subclasses must call ``case_add_keep_rules()`` (or ``case_assets.add_keep_rules()``
+        for assets) for any custom files they want retained."""
         self._bind_existing_case_dir(case_folder, check_type=True)
 
     def _bind_existing_case_dir(
@@ -1185,10 +1202,13 @@ class FolderBackedCase(ABC):
                 on_disk=self._record.case_object_type, loading_class=cls.__name__
             )
         self._journal = CaseJournal.for_folder(self._folder)
+        self._keep_manifest = CaseKeepManifest(self._folder)
+        self._keep_manifest.ensure_framework_rules()
         self._assets = CaseAssets(
             self._folder,
             asset_specs=type(self)._resolve_asset_book().spec_map(),
             flexible_dataclass_loading=cls.flexible_dataclass_loading,
+            keep_manifest=self._keep_manifest,
         )
         self._listeners: list = []        # fn(case, event_name, info)
         # State is derived from the event log on load; transitions then cache on
@@ -1261,7 +1281,7 @@ class FolderBackedCase(ABC):
             2. on_closing() — subclass retains/extracts final artifacts
             3. _notify("CASE_CLOSING") — pre-purge observers (audit, test harness)
           Phase 2 — POST-FINALIZATION (immutable, still BOUND):
-            4. assets.purge_ephemeral() — drop everything not in the keep manifest
+            4. _keep_manifest.purge() — drop everything not matched in _keep.txt
             5. _record.closed stamped + FORCE-flushed (authoritative seal)
             6. heartbeat(force) — keep the lock fresh; closure does NOT detach (the
                object stays bound so owners can harvest before calling case_detach())
@@ -1285,7 +1305,7 @@ class FolderBackedCase(ABC):
             self.on_closing()
             self._notify(SIG_CLOSING, src=src, dest=dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
-            self._assets.purge_ephemeral()
+            self._keep_manifest.purge()
             # The case logically ends here; apply the closure log-retention policy alongside
             # the asset purge. PURGE rewrites logs/case.log with a single sentinel line.
             if get_case_log_retention() is LogRetention.PURGE:

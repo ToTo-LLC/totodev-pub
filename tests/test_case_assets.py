@@ -24,9 +24,10 @@ def test_add_keep_rules_accepts_absolute_exact_path(tmp_path):
     assets.add_keep_rules(str(absolute_keep))
 
     assert assets.keep_list() == ["keep/me.txt"]
-    purged = assets.purge_ephemeral()
+    assert "assets/keep/me.txt" in assets.keep_manifest.list_rules()
+    purged = assets.keep_manifest.purge()
 
-    assert purged == ["drop/me.txt"]
+    assert purged == ["assets/drop/me.txt"]
     assert assets.asset_path("keep/me.txt").exists()
     assert not assets.asset_path("drop/me.txt").exists()
 
@@ -41,9 +42,9 @@ def test_add_keep_rules_accepts_absolute_glob_path(tmp_path):
     assets.add_keep_rules(absolute_glob)
 
     assert assets.keep_list() == ["results/*.json"]
-    purged = assets.purge_ephemeral()
+    purged = assets.keep_manifest.purge()
 
-    assert purged == ["other/c.json", "results/b.txt"]
+    assert purged == ["assets/other/c.json", "assets/results/b.txt"]
     assert assets.asset_path("results/a.json").exists()
     assert not assets.asset_path("results/b.txt").exists()
     assert not assets.asset_path("other/c.json").exists()
