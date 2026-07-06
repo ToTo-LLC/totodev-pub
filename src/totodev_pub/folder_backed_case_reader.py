@@ -92,20 +92,20 @@ class FolderBackedCaseReader:
         return self._peek_record().created
 
     @property
-    def case_closed_at(self) -> datetime.datetime | None:
-        return self._peek_record().closed
+    def case_terminal_at(self) -> datetime.datetime | None:
+        return self._peek_record().terminal
 
     @property
     def case_state(self) -> str | None:
         return self._peek_events().current_state
 
     @property
-    def case_is_closed(self) -> bool:
-        return self._peek_events().is_closed
+    def case_is_terminal(self) -> bool:
+        return self._peek_events().is_terminal
 
     @property
-    def case_is_open(self) -> bool:
-        return not self.case_is_closed
+    def case_is_live(self) -> bool:
+        return not self.case_is_terminal
 
     @property
     def case_last_activity(self) -> datetime.datetime | None:

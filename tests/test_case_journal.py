@@ -76,10 +76,10 @@ def test_log_enter_state_sets_current_state(tmp_path):
     assert journal.current_state == "closed"
 
 
-def test_log_closed_carries_from_state(tmp_path):
+def test_log_terminal_carries_from_state(tmp_path):
     journal = _journal(tmp_path)
-    journal.log_closed("done", from_state="open")
-    ev = next(journal.primitive.events(label_glob="CASE_CLOSED"))
+    journal.log_terminal("done", from_state="open")
+    ev = next(journal.primitive.events(label_glob="CASE_TERMINAL"))
     assert ev.value == "done"
     assert _data_of(ev)["from"] == "open"
 

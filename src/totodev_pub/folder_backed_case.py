@@ -96,7 +96,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
     DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
-    EV_CLOSED, EV_ALERT, SIG_CLOSING,
+    EV_TERMINAL, EV_ALERT, SIG_TERMINATING,
 )
 from totodev_pub.folder_backed_case_support.helpers import _utcnow, _new_time_slug
 from totodev_pub.folder_backed_case_support.exceptions import (
@@ -152,7 +152,7 @@ class FolderBackedCase(ABC):
     Subclass this ABC, set ``fsm_state_chains``, and declare the hook methods
     the chains name. Provides: case folder (record + event log + assets), async
     FSM via ``transitions``, one-step ``case_advance()`` driving, ephemeral-file
-    retention, the two-phase closing hook, and a single-owner heartbeat lease.
+    retention, the two-phase termination hook, and a single-owner heartbeat lease.
 
     How this class is organized
     ---------------------------
@@ -218,7 +218,7 @@ class FolderBackedCase(ABC):
     #
     # DSL cheatsheet:
     #   ^state           leading  `^` = initial state
-    #   state^           trailing `^` = terminal (closing) state
+    #   state^           trailing `^` = terminal state
     #   A==trigger-->B   `==` connector = MANUAL edge (fired by `await case.trigger()`)
     #   A--trigger-->B   `--` connector = AUTO edge (fired by case_advance(); a driver loops it)
     #   guard#trigger    binds method `guard_<guard>` as the edge's guard
@@ -439,7 +439,7 @@ class FolderBackedCase(ABC):
                 "no edge to flow into. Name the trigger to fire, or drop trigger_kwargs."
             )
         initial = self.case_state
-        if self.case_is_closed:         # terminal short-circuits first (a closed case stays
+        if self.case_is_terminal:       # terminal short-circuits first (a terminal case stays
             return AdvanceResult(initial, self.case_state)   # bound; lease cleared only by case_detach())
         self._check_active()            # else refuse to drive a detached husk
         # Every poll is proof of active ownership, so beat the lease here (throttled — a
@@ -572,9 +572,9 @@ class FolderBackedCase(ABC):
         return self._record.created
 
     @property
-    def case_closed_at(self) -> datetime.datetime | None:
-        """Closure timestamp when closed; None while open."""
-        return self._record.closed
+    def case_terminal_at(self) -> datetime.datetime | None:
+        """Termination timestamp when terminal; None while live."""
+        return self._record.terminal
 
     @property
     def case_folder(self) -> Path:
@@ -582,14 +582,14 @@ class FolderBackedCase(ABC):
         return self._folder
 
     @property
-    def case_is_open(self) -> bool:
+    def case_is_live(self) -> bool:
         """True when current FSM state is not terminal."""
-        return self.case_state not in self._fsm.closed_states
+        return self.case_state not in self._fsm.terminal_states
 
     @property
-    def case_is_closed(self) -> bool:
+    def case_is_terminal(self) -> bool:
         """True when current FSM state is terminal."""
-        return self.case_state in self._fsm.closed_states
+        return self.case_state in self._fsm.terminal_states
 
     @property
     def case_is_detached(self) -> bool:
@@ -605,7 +605,7 @@ class FolderBackedCase(ABC):
     def case_advanceable(self) -> bool:
         """True when the CURRENT state has at least one auto-advanceable (`--`) exit, i.e.
         an unattended `case_advance()` could fire here (subject to guards). False for a
-        terminal/closed state or a state left only by MANUAL (`==`) edges.
+        terminal state or a state left only by MANUAL (`==`) edges.
 
         STRUCTURAL, not runtime: this reports whether an auto exit EXISTS, not whether a
         guard would currently permit it. A scheduler uses it to tell a genuinely manual-only
@@ -658,7 +658,7 @@ class FolderBackedCase(ABC):
           Your working files live here. Use case.case_assets.folder, .asset_path(...),
           .relative_path(...), .write(...), .add_keep_rules(...), .list_assets(), etc.
           Asset keep rules are stored in ``_keep.txt`` with an ``assets/`` prefix.
-          Anything not matched by the manifest is purged when the case closes.
+          Anything not matched by the manifest is purged when the case terminates.
 
         Maintainer notes:
           Kept off this class's own namespace so asset concerns stay grouped in one place.
@@ -668,7 +668,7 @@ class FolderBackedCase(ABC):
     def case_add_keep_rules(self, *rules: str | Path) -> None:
         """Append case-relative keep rules to ``_keep.txt`` (exact path or glob).
 
-        Use this from subclass hooks (especially ``on_closing()``) to retain files
+        Use this from subclass hooks (especially ``on_terminating()``) to retain files
         outside ``assets/``. For assets, prefer ``case_assets.add_keep_rules()`` or
         ``case_assets.write(..., keep=True)``."""
         self._keep_manifest.add_rules(*rules)
@@ -747,7 +747,7 @@ class FolderBackedCase(ABC):
     def peek_case_events(folder: Path) -> CaseEventLogReader:
         """A CaseEventLogReader over the folder's event log — lock-free, no live case,
         no registry. Uniform across every case type (the log format is not subclassed).
-        Exposes current_state, is_closed, last_activity, and .primitive for the raw log."""
+        Exposes current_state, is_terminal, last_activity, and .primitive for the raw log."""
         return CaseEventLogReader.for_folder(Path(folder))
 
     @staticmethod
@@ -923,12 +923,12 @@ class FolderBackedCase(ABC):
           `@FAIL>=n` divert edge, or record intent here and let the next case_advance() carry
           it out."""
 
-    def on_closing(self) -> None:
+    def on_terminating(self) -> None:
         """Overridable hook fired in phase 1 (pre-finalization): assets still exist,
         record not yet stamped. Override to retain/extract final artifacts before the
         ephemeral purge — call ``case_add_keep_rules()`` for non-asset paths or
         ``case_assets.add_keep_rules()`` for assets. Default: no-op. Heavy async work
-        belongs in an async ``before_`` hook on the closing transition; this hook is
+        belongs in an async ``before_`` hook on the terminating transition; this hook is
         synchronous."""
 
     @classmethod
@@ -1083,12 +1083,12 @@ class FolderBackedCase(ABC):
     # never be shadowed by a subclass. The binding check (validate_object_compatibility,
     # passed these via _bind_existing_case_dir) fails fast if a subclass redefines one in
     # its body, so descendants are free to use short names everywhere else. Deliberately
-    # excludes the override SEAMS (compile_fsm, generate_case_id, on_closing, case_dwell_secs,
+    # excludes the override SEAMS (compile_fsm, generate_case_id, on_terminating, case_dwell_secs,
     # ...) — those are MEANT to be overridden — and the hook-name conventions
     # (perform_/before_/after_/on_enter_/on_exit_/guard_), which belong to the subclass.
     _SEALED_MEMBER_NAMES: frozenset[str] = frozenset({
         "case_state", "case_folder", "case_assets", "case_nickname", "case_external_key",
-        "case_is_open", "case_is_closed", "case_transition_fail_count", "case_id",
+        "case_is_live", "case_is_terminal", "case_transition_fail_count", "case_id",
         "case_advance", "case_detach", "case_heartbeat", "case_fetch_record",
         "case_log_alert", "case_run_blocking", "case_reclassify_to",
         "case_add_transition_listener",
@@ -1114,9 +1114,9 @@ class FolderBackedCase(ABC):
         if cls._fsm.primary_chain is not None:
             logger.debug(
                 "FSM for %s: chains compiled (primary=%r, initial=%r, initial_states=%s, "
-                "closed=%s, auto-advance=%s)",
+                "terminal=%s, auto-advance=%s)",
                 cls.__name__, cls._fsm.primary_chain, cls._fsm.initial_state,
-                sorted(cls._fsm.initial_states), sorted(cls._fsm.closed_states),
+                sorted(cls._fsm.initial_states), sorted(cls._fsm.terminal_states),
                 cls._fsm.pipeline,
             )
 
@@ -1272,20 +1272,20 @@ class FolderBackedCase(ABC):
 
     def _on_state_changed(self, event) -> None:
         """Runs after EVERY transition (event is a transitions EventData). Records the
-        state-change entry, then on non-closing transitions throttled-flushes the record
-        and beats the lease. On the non-closed → closed EDGE, runs the two-phase close.
+        state-change entry, then on non-terminating transitions throttled-flushes the record
+        and beats the lease. On the non-terminal → terminal EDGE, runs the two-phase termination.
 
-        Two-phase closing (CASE_CLOSING / CASE_CLOSED distinction):
+        Two-phase termination (CASE_TERMINATING / CASE_TERMINAL distinction):
           Phase 1 — PRE-FINALIZATION (assets still exist):
-            1. Log CASE_CLOSED event
-            2. on_closing() — subclass retains/extracts final artifacts
-            3. _notify("CASE_CLOSING") — pre-purge observers (audit, test harness)
+            1. Log CASE_TERMINAL event
+            2. on_terminating() — subclass retains/extracts final artifacts
+            3. _notify("CASE_TERMINATING") — pre-purge observers (audit, test harness)
           Phase 2 — POST-FINALIZATION (immutable, still BOUND):
             4. _keep_manifest.purge() — drop everything not matched in _keep.txt
-            5. _record.closed stamped + FORCE-flushed (authoritative seal)
-            6. heartbeat(force) — keep the lock fresh; closure does NOT detach (the
+            5. _record.terminal stamped + FORCE-flushed (authoritative seal)
+            6. heartbeat(force) — keep the lock fresh; termination does NOT detach (the
                object stays bound so owners can harvest before calling case_detach())
-            7. _notify("CASE_CLOSED") — finalized-but-still-bound; the "safe to move"
+            7. _notify("CASE_TERMINAL") — finalized-but-still-bound; the "safe to move"
                signal is case_detach(), not this. Standalone: no-op.
         """
         src, dest = event.transition.source, event.transition.dest
@@ -1293,30 +1293,30 @@ class FolderBackedCase(ABC):
         self._journal.log_enter_state(dest, trigger=trigger, from_state=src)
         self._last_activity = _utcnow()
         self._state_entered_at = self._last_activity   # reset the time-guard dwell anchor
-        closing = src not in self._fsm.closed_states and dest in self._fsm.closed_states
-        if not closing:
-            # Throttled flush + lease beat at the boundary. Skipped on the closing edge:
+        terminating = src not in self._fsm.terminal_states and dest in self._fsm.terminal_states
+        if not terminating:
+            # Throttled flush + lease beat at the boundary. Skipped on the terminating edge:
             # the forced phase-2 seal supersedes the flush, and phase 2 beats explicitly.
             self._flush_record()
             self.case_heartbeat()
         else:
             # --- phase 1: pre-finalization --- assets still present ---
-            self._journal.log_closed(dest, from_state=src)
-            self.on_closing()
-            self._notify(SIG_CLOSING, src=src, dest=dest)
+            self._journal.log_terminal(dest, from_state=src)
+            self.on_terminating()
+            self._notify(SIG_TERMINATING, src=src, dest=dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
             self._keep_manifest.purge()
-            # The case logically ends here; apply the closure log-retention policy alongside
+            # The case logically ends here; apply the termination log-retention policy alongside
             # the asset purge. PURGE rewrites logs/case.log with a single sentinel line.
             if get_case_log_retention() is LogRetention.PURGE:
                 purge_case_log(self._folder / LOGS_DIR_NAME / LOG_FILE_NAME)
-            self._record.closed = self._last_activity
+            self._record.terminal = self._last_activity
             self._flush_record(force=True)
-            # Closure keeps the lock; it does NOT detach. Force a fresh beat so the now-idle
-            # (un-advanced) closed case holds a full-TTL grace window for owners to harvest
+            # Termination keeps the lock; it does NOT detach. Force a fresh beat so the now-idle
+            # (un-advanced) terminal case holds a full-TTL grace window for owners to harvest
             # before they call case_detach(). A crash still lapses the lock via the TTL.
             self.case_heartbeat(min_update_secs=0)
-            self._notify(EV_CLOSED, src=src, dest=dest)
+            self._notify(EV_TERMINAL, src=src, dest=dest)
 
     async def _on_fsm_exception(self, event) -> None:
         """Machine-level `on_exception` hook (wired by the machine factory): the SINGLE chokepoint

@@ -51,7 +51,7 @@ def test_reader_identity_fields_match_peek(tmp_path):
     assert reader.case_nickname == record.nickname == "nick"
     assert reader.case_object_type == record.case_object_type == "SimpleCase"
     assert reader.case_created == record.created
-    assert reader.case_closed_at is None
+    assert reader.case_terminal_at is None
 
 
 def test_reader_state_after_transition(tmp_path):
@@ -61,13 +61,13 @@ def test_reader_state_after_transition(tmp_path):
 
     reader = FolderBackedCaseReader(folder)
     assert reader.case_state == "open"
-    assert not reader.case_is_closed
-    assert reader.case_is_open
+    assert not reader.case_is_terminal
+    assert reader.case_is_live
     assert reader.case_events.current_state == "open"
     assert reader.case_events.current_state == FolderBackedCase.peek_case_events(folder).current_state
 
 
-def test_reader_closed_case(tmp_path):
+def test_reader_terminal_case(tmp_path):
     folder = tmp_path / "reader-004"
     with SimpleCase.create_case_in_folder(folder) as case:
         asyncio.run(case.begin())
@@ -75,9 +75,9 @@ def test_reader_closed_case(tmp_path):
 
     reader = FolderBackedCaseReader(folder)
     assert reader.case_state == "done"
-    assert reader.case_is_closed
-    assert not reader.case_is_open
-    assert reader.case_closed_at is not None
+    assert reader.case_is_terminal
+    assert not reader.case_is_live
+    assert reader.case_terminal_at is not None
 
 
 def test_reader_dwell_secs_non_negative(tmp_path):
@@ -206,7 +206,7 @@ def test_live_case_prep_properties(tmp_path):
     with SimpleCase.create_case_in_folder(folder, case_id="r-010", nickname="live") as case:
         assert case.case_object_type == "SimpleCase"
         assert case.case_created == case._record.created
-        assert case.case_closed_at is None
+        assert case.case_terminal_at is None
         assert case.case_events is case._journal.reader
         assert case.case_last_activity is not None
         asyncio.run(case.begin())

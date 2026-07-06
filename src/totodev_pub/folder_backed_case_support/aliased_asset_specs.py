@@ -265,7 +265,7 @@ class AliasedAssetSpecs:
 
     def validate_against_fsm(self, fsm: FsmChainSpec, *, flexible: bool) -> None:
         fsm_states = set(fsm.states)
-        closed = set(fsm.closed_states)
+        terminal_states = set(fsm.terminal_states)
         for alias, spec in self._specs.items():
             if not flexible:
                 if spec.loader is None:
@@ -291,11 +291,11 @@ class AliasedAssetSpecs:
                         f"alias {alias!r}: state(s) {sorted(unknown)!r} are not in "
                         f"this class's FSM ({sorted(fsm_states)!r})."
                     )
-                if spec.states & closed and not spec.keep:
-                    terminal = sorted(spec.states & closed)
+                if spec.states & terminal_states and not spec.keep:
+                    terminal = sorted(spec.states & terminal_states)
                     raise AssetSchemaError(
                         f"alias {alias!r} is valid in terminal state(s) "
                         f"{terminal!r} but keep is not True — it would be purged at "
-                        "close, breaking the semantics-#3 promise. Set keep=True on the "
+                        "termination, breaking the semantics-#3 promise. Set keep=True on the "
                         "declaration."
                     )

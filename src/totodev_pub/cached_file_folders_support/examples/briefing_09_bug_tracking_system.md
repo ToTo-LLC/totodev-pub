@@ -1,5 +1,8 @@
 # Briefing 9: Applying the Patterns — Bug Tracking System
 
+> **Out of date:** this briefing predates the `FolderBackedCase` class and does not
+> reflect it. Needs a full rewrite once that class stabilizes.
+
 ## Scenario Overview
 
 A development team needs a simple bug tracking system to manage bug reports during early-stage application development. The system allows users to report bugs and track their status. This is an ideal use case for `PrimitiveSchemaResolver` and `SimpleCacheORM` because:

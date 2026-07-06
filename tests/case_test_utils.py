@@ -29,7 +29,7 @@ async def drive_to_completion(
     None if it never stepped. For tests and one-off scripts only — see module docstring.
     """
     last: AdvanceResult | None = None
-    while case.case_is_open:
+    while case.case_is_live:
         candidates = case._forward_candidates(case.case_state)
         if not candidates:
             break

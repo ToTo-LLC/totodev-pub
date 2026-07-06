@@ -92,8 +92,8 @@ def test_create_and_basic_properties(tmp_path):
     try:
         assert case.case_id == "c-001"
         assert case.case_state == "new"
-        assert case.case_is_open
-        assert not case.case_is_closed
+        assert case.case_is_live
+        assert not case.case_is_terminal
     finally:
         case.case_detach()
 
@@ -101,7 +101,7 @@ def test_create_and_basic_properties(tmp_path):
 def test_context_manager_releases_lease(tmp_path):
     folder = tmp_path / "case-002"
     with SimpleCase.create_case_in_folder(folder, case_id="c-002") as case:
-        assert case.case_is_open
+        assert case.case_is_live
     # Lease file should be gone after the with-block exits
     assert not (folder / ".case.lease").exists()
 
@@ -123,7 +123,7 @@ def test_fsm_transitions(tmp_path):
         assert case.case_state == "open"
         asyncio.run(case.finish())
         assert case.case_state == "done"
-        assert case.case_is_closed
+        assert case.case_is_terminal
 
 
 def test_enter_state_event_carries_trigger_payload(tmp_path):
@@ -154,7 +154,7 @@ def test_peek_record_and_events(tmp_path):
 
     events = FolderBackedCase.peek_case_events(folder)
     assert events.current_state == "open"
-    assert not events.is_closed
+    assert not events.is_terminal
 
 
 def test_rehydrate_requires_registration(tmp_path):
@@ -928,14 +928,14 @@ def test_trigger_kwargs_without_trigger_raises(tmp_path):
     asyncio.run(scenario())
 
 
-def test_pinned_unknown_trigger_on_closed_case_is_noop(tmp_path):
-    """Closed-case precedence: the terminal short-circuit runs BEFORE trigger validation, so
-    even an unknown trigger on a closed case is a silent no-op rather than a ValueError."""
+def test_pinned_unknown_trigger_on_terminal_case_is_noop(tmp_path):
+    """Terminal-case precedence: the terminal short-circuit runs BEFORE trigger validation, so
+    even an unknown trigger on a terminal case is a silent no-op rather than a ValueError."""
     async def scenario():
-        with _PinAutoCase.create_case_in_folder(tmp_path / "closed", case_id="c-1") as case:
+        with _PinAutoCase.create_case_in_folder(tmp_path / "terminal", case_id="c-1") as case:
             await case.case_advance(trigger="alpha")
-            assert case.case_is_closed
-            result = await case.case_advance(trigger="bogus")   # would raise if open
+            assert case.case_is_terminal
+            result = await case.case_advance(trigger="bogus")   # would raise if live
             assert not result.progressed
             assert result.exceptions == ()
 

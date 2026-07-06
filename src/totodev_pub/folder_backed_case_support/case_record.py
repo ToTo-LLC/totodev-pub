@@ -53,7 +53,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     external_key: Optional[str] = None # caller-supplied id in an external system
     nickname: Optional[str] = None     # optional human-friendly label for listings
     created: datetime.datetime         # immutable
-    closed: Optional[datetime.datetime] = None  # stamped once on terminal entry
+    terminal: Optional[datetime.datetime] = None  # stamped once on terminal entry
     asset_aliases: dict[str, dict[str, Any]]  # alias -> {path, loader, states?}
     fsm_state_chains: list[str]        # the concrete class's raw state-chain DSL, verbatim
 
@@ -96,7 +96,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
                         )
         return v
 
-    @field_validator("created", "closed")
+    @field_validator("created", "terminal")
     @classmethod
     def _normalize_to_utc(cls, v: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
         """Coerce every timestamp to aware UTC on construction AND on load from disk.

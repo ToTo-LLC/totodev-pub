@@ -152,7 +152,7 @@ def test_purge_default_on_close(tmp_path):
         case.log.info("should-be-purged-marker")
         asyncio.run(case.begin())
         asyncio.run(case.finish())
-        assert case.case_is_closed
+        assert case.case_is_terminal
     contents = _log_path(folder).read_text(encoding="utf-8")
     assert contents.strip() == LOG_PURGE_SENTINEL
     assert "should-be-purged-marker" not in contents
@@ -165,7 +165,7 @@ def test_retain_preserves_contents_on_close(tmp_path):
         case.log.info("should-survive-marker")
         asyncio.run(case.begin())
         asyncio.run(case.finish())
-        assert case.case_is_closed
+        assert case.case_is_terminal
     contents = _log_path(folder).read_text(encoding="utf-8")
     assert "should-survive-marker" in contents
     assert LOG_PURGE_SENTINEL not in contents

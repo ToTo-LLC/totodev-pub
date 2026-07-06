@@ -9,7 +9,7 @@ archival, and discovery belong to a planned ``CaseManager`` (draft:
 notebooks/DEVDAVE/case_manager_classes/CaseManager Model.md).
 
 Typical lifecycle: ``start()`` → ``add(case)`` → autonomous ``advance()`` beats →
-``CLOSED`` event → ``remove()`` → ``stop()``.
+``TERMINATED`` event → ``remove()`` → ``stop()``.
 
 Concrete implementations
 ------------------------
@@ -62,7 +62,7 @@ class CasePoolEventNames(str, enum.Enum):
 
     Pool membership: ADMITTED, HALTED, REMOVED, EVICTED.
 
-    Advance-derived (typical beat order: ALERTED → ADVANCED → FAILED? → CLOSED).
+    Advance-derived (typical beat order: ALERTED → ADVANCED → FAILED? → TERMINATED).
     FAILED and ADVANCED are mutually exclusive. The same ``AdvanceResult`` may
     appear in multiple events within one beat.
     """
@@ -71,10 +71,10 @@ class CasePoolEventNames(str, enum.Enum):
     REMOVED  = "removed"
     EVICTED  = "evicted"    # rehydration failed or OwnershipLostError
 
-    ALERTED  = "alerted"
-    ADVANCED = "advanced"
-    CLOSED   = "closed"
-    FAILED   = "failed"
+    ALERTED    = "alerted"
+    ADVANCED   = "advanced"
+    TERMINATED = "terminated"
+    FAILED     = "failed"
 
 
 @dataclass(frozen=True)
@@ -228,9 +228,9 @@ class CasePoolDriver(ABC):
         """Cases with ``case_dwell_secs`` >= threshold. Default O(N)."""
         return [case for case in self if case.case_dwell_secs >= threshold_secs]
 
-    def closed_cases(self) -> list[FolderBackedCase]:
+    def terminal_cases(self) -> list[FolderBackedCase]:
         """Terminal cases awaiting removal. Default O(N)."""
-        return [case for case in self if case.case_is_closed]
+        return [case for case in self if case.case_is_terminal]
 
     def cases_in_state(self, state_name: str) -> list[FolderBackedCase]:
         """Cases in the given FSM state. Default O(N)."""
@@ -251,7 +251,7 @@ class CasePoolDriver(ABC):
     ) -> Hashable:
         """Subscribe to pool events. Returns the subscription handle.
 
-        ``advance_result`` is set for ALERTED, ADVANCED, CLOSED, FAILED; None for
+        ``advance_result`` is set for ALERTED, ADVANCED, TERMINATED, FAILED; None for
         membership events. The same instance may appear in multiple events per beat.
         """
 

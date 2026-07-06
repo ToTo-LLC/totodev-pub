@@ -201,19 +201,19 @@ def test_admission_tiers(tmp_path):
         manual.case_detach()
 
 
-def test_admission_closed_case_is_dormant(tmp_path):
+def test_admission_terminal_case_is_dormant(tmp_path):
     async def body():
         driver = TieredCasePoolDriver()
-        case = _make(AutoCase, tmp_path, "closed")
+        case = _make(AutoCase, tmp_path, "terminal")
         # Drive it to its terminal state first (still bound), then admit it.
         await case.case_advance()
         await case.case_advance()
-        assert case.case_is_closed
+        assert case.case_is_terminal
         driver.add(case)
         peek = driver.peek(case.case_folder)
-        assert peek.closed is True
+        assert peek.terminal is True
         assert peek.skip_countdown <= 0          # dormant
-        assert case in driver.closed_cases()
+        assert case in driver.terminal_cases()
         case.case_detach()
 
     _run(body())
@@ -290,7 +290,7 @@ def test_failure_holds_warm_with_backoff(tmp_path):
 # Events
 # ---------------------------------------------------------------------------
 
-def test_advance_event_order_alerted_advanced_closed(tmp_path):
+def test_advance_event_order_alerted_advanced_terminated(tmp_path):
     async def body():
         driver = TieredCasePoolDriver()
         case = _make(AlertProgressCase, tmp_path, "order")
@@ -298,11 +298,11 @@ def test_advance_event_order_alerted_advanced_closed(tmp_path):
         seen = []
         driver.case_event_subscribe(
             {CasePoolEventNames.ALERTED, CasePoolEventNames.ADVANCED,
-             CasePoolEventNames.CLOSED, CasePoolEventNames.FAILED},
+             CasePoolEventNames.TERMINATED, CasePoolEventNames.FAILED},
             lambda ev: seen.append(ev.event),
         )
         await driver.fire(case.case_folder, None)
-        assert seen == ["alerted", "advanced", "closed"]
+        assert seen == ["alerted", "advanced", "terminated"]
         case.case_detach()
 
     _run(body())

@@ -38,9 +38,9 @@ CASE_RESERVED_ARTIFACT_NAMES = (
     LOGS_DIR_NAME,
 )
 
-# Single line written in place of the log contents when the closure retention policy
+# Single line written in place of the log contents when the termination retention policy
 # is PURGE (the file is rewritten, never unlinked, so the folder layout stays stable).
-LOG_PURGE_SENTINEL = "Log auto-truncated by FolderBackedCase closure policy."
+LOG_PURGE_SENTINEL = "Log auto-truncated by FolderBackedCase termination policy."
 
 # Event-log labels written by the FolderBackedCase base class. Every label is
 # CASE_-prefixed so an observer can isolate the family's lifecycle events with a
@@ -49,12 +49,12 @@ LOG_PURGE_SENTINEL = "Log auto-truncated by FolderBackedCase closure policy."
 # CASE_BASE_EVENT_PREFIX is the class-family INVARIANT: every event label the base
 # class auto-generates (now funneled through CaseJournal) MUST start with it, so a
 # derived class can cleanly separate its own custom events from base lifecycle ones.
-# SIG_CLOSING reuses the prefix but is an in-memory listener signal, never logged.
+# SIG_TERMINATING reuses the prefix but is an in-memory listener signal, never logged.
 CASE_BASE_EVENT_PREFIX = "CASE_"
 
 EV_ENTER_STATE     = "CASE_ENTER_STATE"      # current fine-grained state (value = state name)
 EV_NEW             = "CASE_NEW"              # inception bookend
-EV_CLOSED          = "CASE_CLOSED"          # terminal bookend (value = closing state)
+EV_TERMINAL        = "CASE_TERMINAL"        # terminal bookend (value = the terminal state entered)
 EV_RECLASSIFY      = "CASE_RECLASSIFY"      # rebound to a different case subclass
 EV_ALERT           = "CASE_ALERT"           # needs-a-human escalation marker
 EV_FAIL_TRANSITION = "CASE_FAIL_TRANSITION" # pre-commit attempt failed (counted by @FAIL)
@@ -67,8 +67,8 @@ EV_TRIGGER_START   = "CASE_TRIGGER_START"   # a trigger's work slot began (value
                                             # means in-flight (lease live) or crashed (lease gone)
 
 # In-memory listener signal (passed to add_transition_listener callbacks, not logged).
-# The closed signal reuses EV_CLOSED; only the phase-1 closing signal is distinct.
-SIG_CLOSING = "CASE_CLOSING"   # phase-1 close: assets still present
+# The terminal signal reuses EV_TERMINAL; only the phase-1 terminating signal is distinct.
+SIG_TERMINATING = "CASE_TERMINATING"   # phase-1 termination: assets still present
 
 # Trigger timeout policy shared by FolderBackedCase and _CaseMachineFactory.
 DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0

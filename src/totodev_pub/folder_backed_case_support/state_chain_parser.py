@@ -17,8 +17,8 @@ States
 * A LEADING `^` marks an INITIAL state (a valid entry/root): `^new`. Initial states
   are also the reachability anchors (they are exempt from the "must have an incoming
   edge" rule), which is how an entry reached only via case_reclassify_to() is declared.
-* A TRAILING `^` marks a TERMINAL/closed state: `closed^`. Entering one fires the
-  two-phase close hook.
+* A TRAILING `^` marks a TERMINAL state: `closed^`. Entering one fires the
+  two-phase termination hook.
 * Initial and terminal are independent flags and may compose (`^x^`). A run of trailing
   markers is tolerated; any trailing glyph other than `^` is rejected, keeping the marker
   namespace closed against silent typos.
@@ -241,7 +241,7 @@ class FsmChainSpec:
                        A dict MAY also carry the private key "_fact_guards" (a list of
                        {"name","op","operand"} factual guards, e.g. @DWELL/@FAIL) — stripped
                        and compiled into `conditions` callables before reaching the machine.
-        closed_states  states marked terminal (trailing `^`).
+        terminal_states  states marked terminal (trailing `^`).
         initial_states states marked initial (leading `^`); also reachability anchors.
         initial_state  the DEFAULT entry state (first initial-marked, in chain order).
         auto_edges     {(source, trigger)} edges eligible for advance() (`--` connector).
@@ -270,7 +270,7 @@ class FsmChainSpec:
     """
     states: list[str] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)
-    closed_states: set[str] = field(default_factory=set)
+    terminal_states: set[str] = field(default_factory=set)
     initial_states: set[str] = field(default_factory=set)
     initial_state: Optional[str] = None
     auto_edges: set[tuple[str, str]] = field(default_factory=set)
@@ -343,7 +343,7 @@ class FsmChainSpec:
                 "no initial state declared; mark at least one entry state with a LEADING "
                 "'^', e.g. '^new--...'"
             )
-        if not self.closed_states:
+        if not self.terminal_states:
             raise FsmChainParseError(
                 "no terminal state declared; mark at least one end state with a TRAILING "
                 "'^', e.g. '...-->closed^'"
@@ -357,7 +357,7 @@ class FsmChainSpec:
             in_dests.add(t["dest"])
 
         for s in self.states:
-            terminal = s in self.closed_states
+            terminal = s in self.terminal_states
             if terminal and s in out_sources:
                 raise FsmChainParseError(
                     f"state {s!r} is marked terminal ('^') but has an outgoing transition; "
@@ -404,7 +404,7 @@ class FsmChainSpec:
         for w in self.pending_wildcards:
             trigger, dest = w["trigger"], w["dest"]
             for s in self.states:
-                if s in self.closed_states or s == dest:
+                if s in self.terminal_states or s == dest:
                     continue
                 if (trigger, s) in claimed:
                     continue
@@ -1084,7 +1084,7 @@ class StateChainParser:
         if name not in spec.states:
             spec.states.append(name)
         if terminal:
-            spec.closed_states.add(name)
+            spec.terminal_states.add(name)
         if initial:
             spec.initial_states.add(name)
             if spec.initial_state is None:        # first initial-marked state wins as default

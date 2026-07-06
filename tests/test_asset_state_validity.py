@@ -285,7 +285,7 @@ def test_close_purge_retains_framework_and_kept_assets(tmp_path):
         case.case_assets.write("ephemeral.txt", b"gone")
         asyncio.run(case.open_ticket())
         asyncio.run(case.close_ticket())
-        assert case.case_is_closed
+        assert case.case_is_terminal
     assert (folder / "case_record.yaml").exists()
     assert list((folder / "events").rglob("*"))  # event log present
     assert (folder / "assets" / "ticket.yaml").exists()

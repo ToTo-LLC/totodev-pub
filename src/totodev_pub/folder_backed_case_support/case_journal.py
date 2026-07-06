@@ -35,7 +35,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_ENTER_STATE,
     EV_NEW,
-    EV_CLOSED,
+    EV_TERMINAL,
     EV_RECLASSIFY,
     EV_ALERT,
     EV_FAIL_TRANSITION,
@@ -110,9 +110,9 @@ class CaseJournal:
         data = {"trigger": trigger, "from": from_state} if trigger is not None else None
         return self._append_base(EV_ENTER_STATE, state, data)
 
-    def log_closed(self, closing_state: str, *, from_state: str) -> PrimitiveEventProxy:
-        """Terminal bookend (CASE_CLOSED; value = closing state)."""
-        return self._append_base(EV_CLOSED, closing_state, {"from": from_state})
+    def log_terminal(self, terminal_state: str, *, from_state: str) -> PrimitiveEventProxy:
+        """Terminal bookend (CASE_TERMINAL; value = the terminal state entered)."""
+        return self._append_base(EV_TERMINAL, terminal_state, {"from": from_state})
 
     def log_reclassify(
         self, new_type: str, *, from_type: str, at_state: str

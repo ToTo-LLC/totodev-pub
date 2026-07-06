@@ -222,10 +222,10 @@ def test_compact_from_live_rewrites_atomically(tmp_path):
 # Reconciliation outcomes (rebuild against folders on disk)
 # ---------------------------------------------------------------------------
 
-def test_rebuild_readmits_open_case(tmp_path):
+def test_rebuild_readmits_live_case(tmp_path):
     case_type_registry.register_case_types(AutoCase)
     journal = PoolMembershipJournal(tmp_path / "journal.jsonl")
-    case = _make(AutoCase, tmp_path, "open")
+    case = _make(AutoCase, tmp_path, "live")
     folder = case.case_folder
     _emit(journal, CasePoolEventNames.ADMITTED, folder)
     case.case_detach()                       # free the lease so rehydrate can take it
@@ -234,26 +234,26 @@ def test_rebuild_readmits_open_case(tmp_path):
     report = journal.rebuild(readded.append)
     assert report.readded == [folder]
     assert len(readded) == 1 and not readded[0].case_is_detached
-    assert not readded[0].case_is_closed
+    assert not readded[0].case_is_terminal
     readded[0].case_detach()
 
 
-def test_rebuild_readmits_closed_case(tmp_path):
+def test_rebuild_readmits_terminal_case(tmp_path):
     async def body():
         case_type_registry.register_case_types(AutoCase)
         journal = PoolMembershipJournal(tmp_path / "journal.jsonl")
-        case = _make(AutoCase, tmp_path, "closed")
+        case = _make(AutoCase, tmp_path, "terminal")
         folder = case.case_folder
         await case.case_advance()
         await case.case_advance()
-        assert case.case_is_closed
+        assert case.case_is_terminal
         _emit(journal, CasePoolEventNames.ADMITTED, folder)
         case.case_detach()
 
         readded = []
         report = journal.rebuild(readded.append)
         assert report.readded == [folder]
-        assert readded[0].case_is_closed
+        assert readded[0].case_is_terminal
         readded[0].case_detach()
 
     _run(body())

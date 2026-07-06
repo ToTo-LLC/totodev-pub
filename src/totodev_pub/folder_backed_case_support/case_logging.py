@@ -44,7 +44,7 @@ _CASE_LOGGER_PARENT_NAME = "totodev_pub.case"
 
 
 class LogRetention(enum.Enum):
-    """What happens to a case's `logs/case.log` when the case reaches a closed state."""
+    """What happens to a case's `logs/case.log` when the case reaches a terminal state."""
 
     PURGE = "purge"     # rewrite the file with a single sentinel line (default)
     RETAIN = "retain"   # keep the full contents (typical for dev/test)
@@ -56,7 +56,7 @@ _RETENTION: LogRetention = LogRetention.PURGE
 
 
 def set_case_log_retention(policy: LogRetention) -> None:
-    """Set the process-global closure retention policy for per-case folder logs.
+    """Set the process-global termination retention policy for per-case folder logs.
 
     This is a coarse, out-of-band developer-debugging knob — NOT a per-object or
     mainstream-API setting. Call it once at process startup (e.g. a dev/test
@@ -69,7 +69,7 @@ def set_case_log_retention(policy: LogRetention) -> None:
 
 
 def get_case_log_retention() -> LogRetention:
-    """The current process-global closure retention policy (defaults to PURGE)."""
+    """The current process-global termination retention policy (defaults to PURGE)."""
     return _RETENTION
 
 

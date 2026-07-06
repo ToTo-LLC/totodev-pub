@@ -15,7 +15,7 @@ from totodev_pub.primitive_event_log_support.event_proxy import PrimitiveEventPr
 from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_ENTER_STATE,
-    EV_CLOSED,
+    EV_TERMINAL,
     EV_ENTRY_EXCEPTION,
     EV_FAIL_TRANSITION,
     EV_TRIGGER_START,
@@ -66,14 +66,14 @@ class CaseEventLogReader:
         return ev.value if ev else None
 
     @property
-    def is_closed(self) -> bool:
-        """True when a CASE_CLOSED bookend event is present."""
-        return bool(self._log.has_event(EV_CLOSED))
+    def is_terminal(self) -> bool:
+        """True when a CASE_TERMINAL bookend event is present."""
+        return bool(self._log.has_event(EV_TERMINAL))
 
     @property
     def status(self) -> str:
-        """Coarse 'open' / 'closed'."""
-        return "closed" if self.is_closed else "open"
+        """Coarse 'live' / 'terminal'."""
+        return "terminal" if self.is_terminal else "live"
 
     @property
     def last_activity(self) -> Optional[datetime.datetime]:

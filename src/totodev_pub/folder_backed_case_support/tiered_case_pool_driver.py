@@ -16,7 +16,7 @@ launch gate only — no seniority among due cases beyond incidental sweep order.
 
 Implements ``CasePoolDriver`` with extensions: ``peek``, ``by_tier``, ``snapshot``,
 ``find_by_external_key``, ``settle``. Each case has a ``_Slot`` (tier +
-``skip_countdown``); ``_DORMANT`` (-1) marks closed or in-flight slots. Beat loop:
+``skip_countdown``); ``_DORMANT`` (-1) marks terminal or in-flight slots. Beat loop:
 sweep → heartbeat slice → ``asyncio.sleep(I0)``. No disk management —
 ``PoolMembershipJournal`` handles crash recovery separately.
 """
@@ -52,7 +52,7 @@ from totodev_pub.folder_backed_case_support.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-# _DORMANT (-1): closed or in-flight — never decremented or fired. Live slots fire at 0
+# _DORMANT (-1): terminal or in-flight — never decremented or fired. Live slots fire at 0
 # and reload countdown; they never rest at 0 between beats.
 _DORMANT = -1
 
@@ -97,15 +97,15 @@ class _TierPolicy:
         return {Tier.HOT: self.M_HOT, Tier.WARM: self.M_WARM, Tier.COLD: self.M_COLD}[tier]
 
     def admission_tier(self, case: FolderBackedCase) -> Tier:
-        """Initial tier for a freshly added (open) case: default HOT, but a structural
-        dead-end (no auto exits) starts WARM. (Closed cases never enter rotation.)"""
+        """Initial tier for a freshly added (live) case: default HOT, but a structural
+        dead-end (no auto exits) starts WARM. (Terminal cases never enter rotation.)"""
         return Tier.HOT if case.case_advanceable else Tier.WARM
 
     def reclassify(self, slot: "_Slot", result: AdvanceResult) -> None:
         """Mutate ``slot`` (tier / reset_multiple / streaks) from the latest result.
 
-        Only ever called for a NON-closed case (closed cases are made dormant by the driver
-        and never reclassified). Maps result.progressed / failed / no-op to tier changes.
+        Only ever called for a NON-terminal case (terminal cases are made dormant by the
+        driver and never reclassified). Maps result.progressed / failed / no-op to tier changes.
         """
         if result.progressed:
             slot.tier = Tier.HOT
@@ -158,7 +158,7 @@ class _Slot:
     noop_streak: int = 0
     fail_streak: int = 0
     in_flight: bool = False
-    closed: bool = False
+    terminal: bool = False
     halt_requested: bool = False
     halt_settled: bool = False           # HALTED event has fired
     last_result: Optional[AdvanceResult] = None
@@ -177,7 +177,7 @@ class CasePeek:
     state: str
     tier: Tier
     in_flight: bool
-    closed: bool
+    terminal: bool
     halt_requested: bool
     noop_streak: int
     fail_streak: int
@@ -253,10 +253,10 @@ class TieredCasePoolDriver(CasePoolDriver):
         self._emit(CasePoolEventNames.ADMITTED, case)
 
     def _make_slot(self, case: FolderBackedCase) -> _Slot:
-        if case.case_is_closed:
+        if case.case_is_terminal:
             return _Slot(
                 case=case, tier=Tier.COLD, reset_multiple=self._policy.M_COLD,
-                skip_countdown=_DORMANT, closed=True,
+                skip_countdown=_DORMANT, terminal=True,
             )
         tier = self._policy.admission_tier(case)
         reset_multiple = self._policy.base_multiple(tier)
@@ -313,7 +313,7 @@ class TieredCasePoolDriver(CasePoolDriver):
         self._sweep_preamble()
         try:
             for slot in list(self._by_folder.values()):
-                if slot.skip_countdown <= 0:          # dormant (closed / in-flight)
+                if slot.skip_countdown <= 0:          # dormant (terminal / in-flight)
                     continue
                 slot.skip_countdown -= 1
                 if slot.skip_countdown != 0:
@@ -402,7 +402,7 @@ class TieredCasePoolDriver(CasePoolDriver):
 
     def boost(self, case_folder: Path) -> None:
         slot = self._by_folder[case_folder]
-        if slot.closed or slot.halt_requested:
+        if slot.terminal or slot.halt_requested:
             return                                # nothing to nudge
         if not slot.in_flight:
             slot.skip_countdown = 1               # fire next beat; tier/cadence unchanged
@@ -448,7 +448,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             # any awaiter (fire()); beat-launched tasks have their exception consumed.
             self._release_slot_grant(slot)
             self._finish_in_flight(slot)
-            if not slot.halt_requested and not slot.closed:
+            if not slot.halt_requested and not slot.terminal:
                 slot.skip_countdown = max(1, slot.reset_multiple)
             raise
         self._complete_step(slot, result)
@@ -461,9 +461,9 @@ class TieredCasePoolDriver(CasePoolDriver):
         if result.progressed:
             slot.last_advanced_at = time.monotonic()
 
-        closed_now = slot.case.case_is_closed
-        if closed_now:
-            slot.closed = True
+        terminal_now = slot.case.case_is_terminal
+        if terminal_now:
+            slot.terminal = True
         else:
             old_reset = slot.reset_multiple
             self._policy.reclassify(slot, result)
@@ -480,7 +480,7 @@ class TieredCasePoolDriver(CasePoolDriver):
         if slot.halt_requested:
             slot.skip_countdown = _DORMANT
             self._settle_halt(slot)
-        elif closed_now:
+        elif terminal_now:
             slot.skip_countdown = _DORMANT
 
     def _slot_post_step(self, slot: _Slot, result: AdvanceResult) -> None:
@@ -507,7 +507,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             self._emit(CasePoolEventNames.HALTED, slot.case)
 
     def _emit_advance_events(self, slot: _Slot, result: AdvanceResult) -> None:
-        # Order: ALERTED → ADVANCED → FAILED → CLOSED
+        # Order: ALERTED → ADVANCED → FAILED → TERMINATED
         case = slot.case
         if result.alerted:
             self._emit(CasePoolEventNames.ALERTED, case, result)
@@ -515,9 +515,9 @@ class TieredCasePoolDriver(CasePoolDriver):
             self._emit(CasePoolEventNames.ADVANCED, case, result)
         if result.failed:
             self._emit(CasePoolEventNames.FAILED, case, result)
-        if slot.closed and result.progressed:
-            # CLOSED is always preceded by ADVANCED in the same beat.
-            self._emit(CasePoolEventNames.CLOSED, case, result)
+        if slot.terminal and result.progressed:
+            # TERMINATED is always preceded by ADVANCED in the same beat.
+            self._emit(CasePoolEventNames.TERMINATED, case, result)
 
     # -- Detach recovery + eviction ---------------------------------------
 
@@ -555,7 +555,7 @@ class TieredCasePoolDriver(CasePoolDriver):
     def _heartbeat_slice(self) -> None:
         """Walk a slice of the store, beating each retained case's lease. A full lap
         completes in ~HEARTBEAT_WALK_PERIOD (well inside the TTL). Every retained case is
-        walked — including closed-awaiting-removal — through the same _live_or_evict
+        walked — including terminal-awaiting-removal — through the same _live_or_evict
         chokepoint so a quietly-detached idle case is rehydrated or evicted here."""
         n = len(self._by_folder)
         if n == 0:
@@ -608,9 +608,9 @@ class TieredCasePoolDriver(CasePoolDriver):
                 out.append(slot.case)
         return out
 
-    def closed_cases(self) -> list[FolderBackedCase]:
+    def terminal_cases(self) -> list[FolderBackedCase]:
         # Override the O(N) ABC default with the cached slot flag.
-        return [slot.case for slot in self._by_folder.values() if slot.closed]
+        return [slot.case for slot in self._by_folder.values() if slot.terminal]
 
     # -- Events ------------------------------------------------------------
 
@@ -660,7 +660,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             state=slot.case.case_state,
             tier=slot.tier,
             in_flight=slot.in_flight,
-            closed=slot.closed,
+            terminal=slot.terminal,
             halt_requested=slot.halt_requested,
             noop_streak=slot.noop_streak,
             fail_streak=slot.fail_streak,
@@ -679,7 +679,7 @@ class TieredCasePoolDriver(CasePoolDriver):
     def snapshot(self) -> dict[str, Any]:
         """Pull-based aggregate diagnostics (extension)."""
         in_flight = sum(1 for s in self._by_folder.values() if s.in_flight)
-        closed = sum(1 for s in self._by_folder.values() if s.closed)
+        terminal = sum(1 for s in self._by_folder.values() if s.terminal)
         blocked = len(self.blocked_cases())
         oldest_dwell_secs = 0.0
         oldest_case: Optional[Path] = None
@@ -692,7 +692,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             "total": len(self._by_folder),
             "by_tier": self.by_tier(),
             "in_flight": in_flight,
-            "closed": closed,
+            "terminal": terminal,
             "blocked": blocked,
             "lease_ttl_secs": DEFAULT_LEASE_TTL_SECS,
             "oldest_dwell_secs": oldest_dwell_secs,
