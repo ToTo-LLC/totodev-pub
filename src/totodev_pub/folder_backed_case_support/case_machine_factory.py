@@ -188,8 +188,8 @@ class _CaseMachineFactory:
                     "still let the lease lapse; consider a shorter trigger_warn_secs.",
                     case.case_id, trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
                 )
-            # CASE_TRIGGER_START before work (see CaseJournal.log_trigger_start).
-            journal.log_trigger_start(trigger, state=state, warn=warn, kill=kill)
+            # CASE_TRIGGER_STARTED before work (see CaseJournal.log_trigger_started).
+            journal.log_trigger_started(trigger, state=state, warn=warn, kill=kill)
             start = time.monotonic()
             completed = False
             try:
@@ -207,7 +207,7 @@ class _CaseMachineFactory:
                 ) from None
             finally:
                 # Slow-warn on a completed-but-slow step only. A hard-abort already speaks
-                # for itself via CASE_TRIGGER_TIMEOUT, and an ownership-loss cancel (or any
+                # for itself via CASE_TRIGGER_TIMED_OUT, and an ownership-loss cancel (or any
                 # other raise) is not a "slow work" condition, so neither should double-log.
                 if completed:
                     elapsed = time.monotonic() - start

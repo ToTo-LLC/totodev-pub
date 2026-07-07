@@ -27,12 +27,12 @@ class AdvanceResult:
         initial_state  the state the case was in when case_advance() began.
         final_state    the state the case is in when case_advance() returned.
         trigger        the auto trigger that fired (or, on a failure, the one attempted);
-                       None when nothing was attempted (e.g. already closed / no candidates).
+                       None when nothing was attempted (e.g. already terminal / no candidates).
         exceptions     exceptions encountered, carried as DATA (not raised): a transition
                        failure (the original exception, decorated with `.case_context`),
                        and/or an AutoAdvanceBlocked when the case is provably stuck. Usually
                        empty or a single entry.
-        alerts         CASE_ALERT messages logged during this step (e.g. from inside a hook
+        alerts         CASE_ALERTED messages logged during this step (e.g. from inside a hook
                        or the auto-block detector), harvested by case_advance() so a blind
                        driver sees an alert that neither changed state nor raised. Empty when
                        none.
@@ -61,7 +61,7 @@ class AdvanceResult:
 
     @property
     def alerted(self) -> bool:
-        """Did the step log at least one CASE_ALERT (harvested into `alerts`)?"""
+        """Did the step log at least one CASE_ALERTED (harvested into `alerts`)?"""
         return bool(self.alerts)
 
     def __bool__(self) -> bool:

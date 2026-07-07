@@ -150,8 +150,8 @@ class TriggerTimeout(Exception):
     ceiling (the `~<dur>` soft timeout, or the default, times the kill multiple). Raised by
     the timing wrapper after asyncio.wait_for cancels the work; it is an ordinary Exception
     so it funnels through the machine's on_exception handler like any other pre-commit
-    failure — but is recognized there and logged as CASE_TRIGGER_TIMEOUT (NOT
-    CASE_FAIL_TRANSITION), keeping a timeout visually distinct in the event log.
+    failure — but is recognized there and logged as CASE_TRIGGER_TIMED_OUT (NOT
+    CASE_TRANSITION_FAILED), keeping a timeout visually distinct in the event log.
 
     A timeout IS a failed pre-commit attempt: the case never left its source state, and it
     counts toward @FAIL (see CaseJournal.count_fails_this_dwell) so the retry cap applies and

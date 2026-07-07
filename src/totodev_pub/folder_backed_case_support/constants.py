@@ -52,22 +52,22 @@ LOG_PURGE_SENTINEL = "Log auto-truncated by FolderBackedCase termination policy.
 # SIG_TERMINATING reuses the prefix but is an in-memory listener signal, never logged.
 CASE_BASE_EVENT_PREFIX = "CASE_"
 
-EV_ENTER_STATE     = "CASE_ENTER_STATE"      # current fine-grained state (value = state name)
-EV_NEW             = "CASE_NEW"              # inception bookend
-EV_TERMINAL        = "CASE_TERMINAL"        # terminal bookend (value = the terminal state entered)
-EV_RECLASSIFY      = "CASE_RECLASSIFY"      # rebound to a different case subclass
-EV_ALERT           = "CASE_ALERT"           # needs-a-human escalation marker
-EV_FAIL_TRANSITION = "CASE_FAIL_TRANSITION" # pre-commit attempt failed (counted by @FAIL)
-EV_ENTRY_EXCEPTION = "CASE_ENTRY_EXCEPTION" # post-commit on_enter/after raised (NOT counted)
-EV_TRIGGER_SLOW    = "CASE_TRIGGER_SLOW"    # a trigger's work outran its soft timeout (warning)
-EV_TRIGGER_TIMEOUT = "CASE_TRIGGER_TIMEOUT" # a trigger's work was hard-aborted at the kill ceiling
-EV_TRIGGER_START   = "CASE_TRIGGER_START"   # a trigger's work slot began (value = trigger name);
-                                            # resolved by the next ENTER_STATE / FAIL_TRANSITION /
-                                            # TRIGGER_TIMEOUT / ENTRY_EXCEPTION — a dangling one
+EV_STATE_ENTERED     = "CASE_STATE_ENTERED"     # current fine-grained state (value = state name)
+EV_CREATED           = "CASE_CREATED"           # inception bookend
+EV_TERMINATED        = "CASE_TERMINATED"        # terminal bookend (value = the terminal state entered)
+EV_RECLASSIFIED      = "CASE_RECLASSIFIED"      # rebound to a different case subclass
+EV_ALERTED           = "CASE_ALERTED"           # needs-a-human escalation marker
+EV_TRANSITION_FAILED = "CASE_TRANSITION_FAILED" # pre-commit attempt failed (counted by @FAIL)
+EV_ENTRY_EXCEPTION   = "CASE_ENTRY_EXCEPTION"   # post-commit on_enter/after raised (NOT counted)
+EV_TRIGGER_SLOW      = "CASE_TRIGGER_SLOW"      # a trigger's work outran its soft timeout (warning)
+EV_TRIGGER_TIMED_OUT = "CASE_TRIGGER_TIMED_OUT" # a trigger's work was hard-aborted at the kill ceiling
+EV_TRIGGER_STARTED   = "CASE_TRIGGER_STARTED"   # a trigger's work slot began (value = trigger name);
+                                            # resolved by the next STATE_ENTERED / TRANSITION_FAILED /
+                                            # TRIGGER_TIMED_OUT / ENTRY_EXCEPTION — a dangling one
                                             # means in-flight (lease live) or crashed (lease gone)
 
 # In-memory listener signal (passed to add_transition_listener callbacks, not logged).
-# The terminal signal reuses EV_TERMINAL; only the phase-1 terminating signal is distinct.
+# The terminal signal reuses EV_TERMINATED; only the phase-1 terminating signal is distinct.
 SIG_TERMINATING = "CASE_TERMINATING"   # phase-1 termination: assets still present
 
 # Trigger timeout policy shared by FolderBackedCase and _CaseMachineFactory.

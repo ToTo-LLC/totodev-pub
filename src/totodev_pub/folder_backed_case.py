@@ -96,7 +96,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
     DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
-    EV_TERMINAL, EV_ALERT, SIG_TERMINATING,
+    EV_TERMINATED, EV_ALERTED, SIG_TERMINATING,
 )
 from totodev_pub.folder_backed_case_support.helpers import _utcnow, _new_time_slug
 from totodev_pub.folder_backed_case_support.exceptions import (
@@ -280,7 +280,7 @@ class FolderBackedCase(ABC):
         """First-time inception of a brand-new case.
 
         Creates a fresh case folder, writes the record, binds a live lease-held
-        instance, and logs CASE_NEW + initial CASE_ENTER_STATE. For reopening an
+        instance, and logs CASE_CREATED + initial CASE_STATE_ENTERED. For reopening an
         existing folder use ``MyCase(folder)`` or ``case_type_registry.rehydrate(folder)``.
 
         Planned ``CaseManager`` (draft: notebooks/DEVDAVE/case_manager_classes/CaseManager
@@ -341,12 +341,12 @@ class FolderBackedCase(ABC):
         ]
         if keep_paths:
             case.case_assets.add_keep_rules(*keep_paths)
-        case._journal.log_new(
+        case._journal.log_created(
             cls.__name__,
             case_id=record.case_id,
             external_key=record.external_key,
         )
-        case._journal.log_enter_state(cls._fsm.initial_state)
+        case._journal.log_state_entered(cls._fsm.initial_state)
         return case
 
     # Re-opening an existing case by its concrete class is the constructor `cls(folder)`;
@@ -416,7 +416,7 @@ class FolderBackedCase(ABC):
               from here, all with no progress.
             * BLOCKED — only on the NO-ARGUMENT sweep: when nothing fired/raised AND the
               state has no timed escape, a synthetic AutoAdvanceBlocked is carried in
-              result.exceptions (one CASE_ALERT logged on first detection per dwell).
+              result.exceptions (one CASE_ALERTED logged on first detection per dwell).
               Deterministic. NOT synthesized for a pinned `trigger=...` call.
           Misuse guards that RAISE (programming errors, not flow conditions): DetachedCaseError
           (acting on a detached husk); ValueError (unknown trigger name, a manual edge fired
@@ -452,7 +452,7 @@ class FolderBackedCase(ABC):
         # Two driving modes, each its own focused helper: pin ONE edge (auto OR manual), or
         # sweep the auto edges in declared order. Both shape outcomes via _attempt_one_trigger.
         # Wrap the single dedicated alert-logging method for the duration of the step so any
-        # CASE_ALERT logged (from a hook, or the auto-block detector) is harvested into the
+        # CASE_ALERTED logged (from a hook, or the auto-block detector) is harvested into the
         # AdvanceResult — otherwise an alert that neither changed state nor raised would be
         # invisible to a blind driver. Restore in finally and fold the messages in.
         return await self._advance_collecting_alerts(initial, trigger, trigger_kwargs)
@@ -460,7 +460,7 @@ class FolderBackedCase(ABC):
     async def _advance_collecting_alerts(
         self, initial: str, trigger: str | None, trigger_kwargs: dict | None,
     ) -> AdvanceResult:
-        """Run the chosen advance helper while harvesting CASE_ALERTs into the result.
+        """Run the chosen advance helper while harvesting CASE_ALERTED events into the result.
 
         Temporarily overrides the instance's case_log_alert so each call both records the
         message locally AND performs its normal on-disk logging, then restores the class
@@ -631,7 +631,7 @@ class FolderBackedCase(ABC):
     def case_dwell_secs(self) -> float:
         """Seconds the case has spent in its CURRENT state — the value the `@DWELL` guard
         compares against (the sibling of `case_transition_fail_count`). Measured from
-        `self._state_entered_at` (the latest CASE_ENTER_STATE, or creation for a brand-new
+        `self._state_entered_at` (the latest CASE_STATE_ENTERED, or creation for a brand-new
         case).
 
         It is ALSO an override SEAM: a subclass may override this property (e.g. to fake the
@@ -696,7 +696,7 @@ class FolderBackedCase(ABC):
     # ---- operator alert channel (type-agnostic escalation marker) ----
 
     def case_log_alert(self, short_msg: str = "", *, where: str | None = None) -> None:
-        """Record a CASE_ALERT: the case family's single type-agnostic "this case needs a
+        """Record a CASE_ALERTED: the case family's single type-agnostic "this case needs a
         human to look at it" marker.
 
         Quick use:
@@ -704,13 +704,13 @@ class FolderBackedCase(ABC):
           case type, an observer can surface flagged cases without knowing any internals.
           Use SPARINGLY on the low-volume audit log: raise one for an integrity risk or a
           substantial deviation from norms, NOT for routine, recoverable defects the flow
-          absorbs. Orthogonal to the FSM (does not change state or close the case).
+          absorbs. Orthogonal to the FSM (does not change state or terminate the case).
 
         Args:
             short_msg: a brief human-readable reason (terse phrase, not a stack trace).
             where: locus of concern; defaults to the current state.
         """
-        self._journal.log_alert(
+        self._journal.log_alerted(
             where or self.case_state, msg=short_msg
         )
 
@@ -1020,7 +1020,7 @@ class FolderBackedCase(ABC):
         self, new_cls: type[FolderBackedCase]
     ) -> FolderBackedCase:
         """Rebind this case to a different FolderBackedCase subclass via a two-phase
-        COMMIT, logging a CASE_RECLASSIFY event. The CALLER owns compatibility.
+        COMMIT, logging a CASE_RECLASSIFIED event. The CALLER owns compatibility.
 
         Advanced:
           Use when a case must change its TYPE mid-life (e.g. a generic intake becomes a
@@ -1042,7 +1042,7 @@ class FolderBackedCase(ABC):
         # new one. __new__ + _bind_existing_case_dir bypasses __init__'s gated public path.
         fresh = new_cls.__new__(new_cls)
         fresh._bind_existing_case_dir(self._folder, check_type=False)
-        fresh._journal.log_reclassify(
+        fresh._journal.log_reclassified(
             new_cls.__name__, from_type=from_name, at_state=fresh.case_state
         )
         fresh._record.case_object_type = new_cls.__name__   # CONSCIOUS stamp
@@ -1220,9 +1220,9 @@ class FolderBackedCase(ABC):
             self._as_utc(self._journal.last_activity) or self._record.created
         )
         # When the CURRENT state was entered — dwell anchor for @DWELL guards,
-        # from the latest CASE_ENTER_STATE; a brand-new case has none yet, so fall back.
+        # from the latest CASE_STATE_ENTERED; a brand-new case has none yet, so fall back.
         self._state_entered_at: datetime.datetime = (
-            self._as_utc(self._journal.last_enter_state_mtime()) or self._record.created
+            self._as_utc(self._journal.last_state_entered_mtime()) or self._record.created
         )
         # The lease TTL is a single fixed crash-recovery window (see constants.py); the
         # provider is a constant function, not a per-state policy.
@@ -1256,7 +1256,7 @@ class FolderBackedCase(ABC):
         return dt.astimezone(datetime.timezone.utc) if dt is not None else None
 
     def _derive_state(self) -> str | None:
-        """Current state = the most recent CASE_ENTER_STATE entry. Delegates to the
+        """Current state = the most recent CASE_STATE_ENTERED entry. Delegates to the
         journal (over the same CaseEventLogReader the peek path uses) — no-drift
         guarantee is structural."""
         return self._journal.current_state
@@ -1275,9 +1275,9 @@ class FolderBackedCase(ABC):
         state-change entry, then on non-terminating transitions throttled-flushes the record
         and beats the lease. On the non-terminal → terminal EDGE, runs the two-phase termination.
 
-        Two-phase termination (CASE_TERMINATING / CASE_TERMINAL distinction):
+        Two-phase termination (CASE_TERMINATING / CASE_TERMINATED distinction):
           Phase 1 — PRE-FINALIZATION (assets still exist):
-            1. Log CASE_TERMINAL event
+            1. Log CASE_TERMINATED event
             2. on_terminating() — subclass retains/extracts final artifacts
             3. _notify("CASE_TERMINATING") — pre-purge observers (audit, test harness)
           Phase 2 — POST-FINALIZATION (immutable, still BOUND):
@@ -1285,12 +1285,12 @@ class FolderBackedCase(ABC):
             5. _record.terminal stamped + FORCE-flushed (authoritative seal)
             6. heartbeat(force) — keep the lock fresh; termination does NOT detach (the
                object stays bound so owners can harvest before calling case_detach())
-            7. _notify("CASE_TERMINAL") — finalized-but-still-bound; the "safe to move"
+            7. _notify("CASE_TERMINATED") — finalized-but-still-bound; the "safe to move"
                signal is case_detach(), not this. Standalone: no-op.
         """
         src, dest = event.transition.source, event.transition.dest
         trigger = event.event.name if event.event is not None else None
-        self._journal.log_enter_state(dest, trigger=trigger, from_state=src)
+        self._journal.log_state_entered(dest, trigger=trigger, from_state=src)
         self._last_activity = _utcnow()
         self._state_entered_at = self._last_activity   # reset the time-guard dwell anchor
         terminating = src not in self._fsm.terminal_states and dest in self._fsm.terminal_states
@@ -1301,7 +1301,7 @@ class FolderBackedCase(ABC):
             self.case_heartbeat()
         else:
             # --- phase 1: pre-finalization --- assets still present ---
-            self._journal.log_terminal(dest, from_state=src)
+            self._journal.log_terminated(dest, from_state=src)
             self.on_terminating()
             self._notify(SIG_TERMINATING, src=src, dest=dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
@@ -1316,7 +1316,7 @@ class FolderBackedCase(ABC):
             # (un-advanced) terminal case holds a full-TTL grace window for owners to harvest
             # before they call case_detach(). A crash still lapses the lock via the TTL.
             self.case_heartbeat(min_update_secs=0)
-            self._notify(EV_TERMINAL, src=src, dest=dest)
+            self._notify(EV_TERMINATED, src=src, dest=dest)
 
     async def _on_fsm_exception(self, event) -> None:
         """Machine-level `on_exception` hook (wired by the machine factory): the SINGLE chokepoint
@@ -1330,16 +1330,16 @@ class FolderBackedCase(ABC):
 
         Steps, in order:
           1. NO-DRIFT REMEDY (post-commit only): if we advanced in memory but the durable
-             CASE_ENTER_STATE write never ran (the after_state_change writer was skipped by
+             CASE_STATE_ENTERED write never ran (the after_state_change writer was skipped by
              the raise), write it now so the on-disk log can never lag in-memory state.
           2. DECORATE the exception with structured `case_context` (case_id, trigger,
              source/dest, commit phase) so a type-agnostic driver can branch without parsing
              messages — attached HERE so it travels regardless of how the trigger was fired.
-          3. LOG a terse, COUNTABLE failure fact (NOT a CASE_ALERT): CASE_FAIL_TRANSITION for
+          3. LOG a terse, COUNTABLE failure fact (NOT a CASE_ALERTED): CASE_TRANSITION_FAILED for
              a pre-commit failure (the kind `@FAIL` counts and retries re-attempt), or
              CASE_ENTRY_EXCEPTION for a post-commit entry-hook raise (it DID enter; logged
              and hooked, but NOT counted by @FAIL). A pre-commit TriggerTimeout is logged as
-             CASE_TRIGGER_TIMEOUT instead — visually distinct, still @FAIL-counted.
+             CASE_TRIGGER_TIMED_OUT instead — visually distinct, still @FAIL-counted.
           4. Call on_transition_exception(...) so the case may compensate.
           5. RE-RAISE the original exception. case_advance() catches it and folds it into an
              AdvanceResult; a direct caller gets the raise (fail-fast preserved)."""
@@ -1356,11 +1356,12 @@ class FolderBackedCase(ABC):
         post_commit = dest is not None and self.case_state == dest
 
         # 1. No-drift remedy. NOTE (sharp edge): if dest is a TERMINAL state, the two-phase
-        # close in _on_state_changed was also skipped here; we reconcile the CASE_ENTER_STATE
-        # but do NOT attempt the close from inside the exception handler. Terminal-entry
-        # failures still need the close path made idempotent/re-runnable.
+        # termination in _on_state_changed was also skipped here; we reconcile the
+        # CASE_STATE_ENTERED but do NOT attempt termination from inside the exception
+        # handler. Terminal-entry failures still need the termination path made
+        # idempotent/re-runnable.
         if post_commit and self._journal.current_state != dest:
-            self._journal.log_enter_state(dest, trigger=trigger, from_state=src)
+            self._journal.log_state_entered(dest, trigger=trigger, from_state=src)
             self._last_activity = _utcnow()
             self._state_entered_at = self._last_activity
 
@@ -1384,11 +1385,11 @@ class FolderBackedCase(ABC):
         detail = {"trigger": trigger, "source": src, "dest": dest,
                   "error": type(err).__name__, "msg": str(err)[:200]}
         if isinstance(err, TriggerTimeout):
-            self._journal.log_trigger_timeout(trigger or src, detail)
+            self._journal.log_trigger_timed_out(trigger or src, detail)
         elif post_commit:
             self._journal.log_entry_exception(dest or src, detail)
         else:
-            self._journal.log_fail_transition(trigger or src, detail)
+            self._journal.log_transition_failed(trigger or src, detail)
 
         # 4. Let the case react. final_state reflects where we actually ended up.
         final_state = dest if post_commit else src
@@ -1456,9 +1457,9 @@ class FolderBackedCase(ABC):
 
     def _make_blocked(self, candidates) -> AutoAdvanceBlocked:
         """Build the AutoAdvanceBlocked marker for the current (provably stuck) state,
-        logging a SINGLE CASE_ALERT the first time we detect the block in this dwell so it
+        logging a SINGLE CASE_ALERTED the first time we detect the block in this dwell so it
         is visible on disk without spamming the low-volume log on every case_advance() call."""
-        if not self._journal.has_event_since_enter(EV_ALERT):
+        if not self._journal.has_event_since_enter(EV_ALERTED):
             self.case_log_alert(f"auto-advance blocked in {self.case_state!r}", where=self.case_state)
         return AutoAdvanceBlocked(
             self.case_id, self.case_state, candidates=[t for t, _ in candidates]
@@ -1470,7 +1471,7 @@ class FolderBackedCase(ABC):
     #   * a stalled external job   -> a `@DWELL>...` timed-escape edge ripens and case_advance()
     #                                 fires it (in-band, declarative, self-healing);
     #   * a genuinely stuck state  -> AutoAdvanceBlocked, carried in AdvanceResult + one
-    #                                 CASE_ALERT per dwell;
+    #                                 CASE_ALERTED per dwell;
     #   * a hung case_advance() call -> an out-of-band concern for the driver (e.g. wrapping
     #                                 case_advance() in asyncio.wait_for); the case cannot observe
     #                                 it itself.

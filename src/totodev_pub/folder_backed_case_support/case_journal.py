@@ -33,16 +33,16 @@ from totodev_pub.primitive_event_log import PrimitiveEventLog
 from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
 from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
-    EV_ENTER_STATE,
-    EV_NEW,
-    EV_TERMINAL,
-    EV_RECLASSIFY,
-    EV_ALERT,
-    EV_FAIL_TRANSITION,
+    EV_STATE_ENTERED,
+    EV_CREATED,
+    EV_TERMINATED,
+    EV_RECLASSIFIED,
+    EV_ALERTED,
+    EV_TRANSITION_FAILED,
     EV_ENTRY_EXCEPTION,
     EV_TRIGGER_SLOW,
-    EV_TRIGGER_TIMEOUT,
-    EV_TRIGGER_START,
+    EV_TRIGGER_TIMED_OUT,
+    EV_TRIGGER_STARTED,
 )
 
 
@@ -89,18 +89,18 @@ class CaseJournal:
 
     # ---- domain writes (lifecycle facts) ----
 
-    def log_new(
+    def log_created(
         self, case_type: str, *, case_id: str, external_key: str | None
     ) -> PrimitiveEventProxy:
-        """Inception bookend (CASE_NEW)."""
+        """Inception bookend (CASE_CREATED)."""
         return self._append_base(
-            EV_NEW, case_type, {"case_id": case_id, "external_key": external_key}
+            EV_CREATED, case_type, {"case_id": case_id, "external_key": external_key}
         )
 
-    def log_enter_state(
+    def log_state_entered(
         self, state: str, *, trigger: str | None = None, from_state: str | None = None,
     ) -> PrimitiveEventProxy:
-        """Current fine-grained state entry (CASE_ENTER_STATE; value = state name).
+        """Current fine-grained state entry (CASE_STATE_ENTERED; value = state name).
 
         When the entry was produced by a transition, `trigger` (and `from_state`)
         ride in the data payload so history can answer "which trigger produced this
@@ -108,50 +108,50 @@ class CaseJournal:
         stays a payload-free marker; readers treat a missing payload as
         trigger-unknown (also true of folders written before this payload existed)."""
         data = {"trigger": trigger, "from": from_state} if trigger is not None else None
-        return self._append_base(EV_ENTER_STATE, state, data)
+        return self._append_base(EV_STATE_ENTERED, state, data)
 
-    def log_terminal(self, terminal_state: str, *, from_state: str) -> PrimitiveEventProxy:
-        """Terminal bookend (CASE_TERMINAL; value = the terminal state entered)."""
-        return self._append_base(EV_TERMINAL, terminal_state, {"from": from_state})
+    def log_terminated(self, terminal_state: str, *, from_state: str) -> PrimitiveEventProxy:
+        """Terminal bookend (CASE_TERMINATED; value = the terminal state entered)."""
+        return self._append_base(EV_TERMINATED, terminal_state, {"from": from_state})
 
-    def log_reclassify(
+    def log_reclassified(
         self, new_type: str, *, from_type: str, at_state: str
     ) -> PrimitiveEventProxy:
-        """Rebind to a different case subclass (CASE_RECLASSIFY)."""
+        """Rebind to a different case subclass (CASE_RECLASSIFIED)."""
         return self._append_base(
-            EV_RECLASSIFY, new_type, {"from": from_type, "at_state": at_state}
+            EV_RECLASSIFIED, new_type, {"from": from_type, "at_state": at_state}
         )
 
-    def log_alert(self, where: str, *, msg: str = "") -> PrimitiveEventProxy:
-        """Needs-a-human escalation marker (CASE_ALERT)."""
-        return self._append_base(EV_ALERT, where, {"msg": msg})
+    def log_alerted(self, where: str, *, msg: str = "") -> PrimitiveEventProxy:
+        """Needs-a-human escalation marker (CASE_ALERTED)."""
+        return self._append_base(EV_ALERTED, where, {"msg": msg})
 
-    def log_fail_transition(self, value: str, detail: dict) -> PrimitiveEventProxy:
-        """Pre-commit attempt failed (CASE_FAIL_TRANSITION; counted by @FAIL)."""
-        return self._append_base(EV_FAIL_TRANSITION, value, detail)
+    def log_transition_failed(self, value: str, detail: dict) -> PrimitiveEventProxy:
+        """Pre-commit attempt failed (CASE_TRANSITION_FAILED; counted by @FAIL)."""
+        return self._append_base(EV_TRANSITION_FAILED, value, detail)
 
     def log_entry_exception(self, value: str, detail: dict) -> PrimitiveEventProxy:
         """Post-commit on_enter/after raised (CASE_ENTRY_EXCEPTION; NOT counted)."""
         return self._append_base(EV_ENTRY_EXCEPTION, value, detail)
 
-    def log_trigger_timeout(self, value: str, detail: dict) -> PrimitiveEventProxy:
-        """A trigger's work was hard-aborted at the kill ceiling (CASE_TRIGGER_TIMEOUT;
+    def log_trigger_timed_out(self, value: str, detail: dict) -> PrimitiveEventProxy:
+        """A trigger's work was hard-aborted at the kill ceiling (CASE_TRIGGER_TIMED_OUT;
         @FAIL-counted, but visually distinct from an ordinary failed transition)."""
-        return self._append_base(EV_TRIGGER_TIMEOUT, value, detail)
+        return self._append_base(EV_TRIGGER_TIMED_OUT, value, detail)
 
-    def log_trigger_start(
+    def log_trigger_started(
         self, trigger: str, *, state: str, warn: float, kill: float,
     ) -> PrimitiveEventProxy:
-        """A trigger's work slot began (CASE_TRIGGER_START; value = trigger name, so an
+        """A trigger's work slot began (CASE_TRIGGER_STARTED; value = trigger name, so an
         in-flight trigger is glob-scannable in the events folder). Written just before
         the timed `perform_` work runs — only for edges that HAVE work; instantaneous
         pure-routing transitions log nothing. Resolved by whichever completion fact
-        follows (CASE_ENTER_STATE on success; CASE_FAIL_TRANSITION / CASE_TRIGGER_TIMEOUT /
+        follows (CASE_STATE_ENTERED on success; CASE_TRANSITION_FAILED / CASE_TRIGGER_TIMED_OUT /
         CASE_ENTRY_EXCEPTION on failure): a dangling START with a live lease means the
         work is in flight NOW; with a dead lease, the owner crashed mid-work. See
-        CaseEventLogReader.unresolved_trigger_start for the read side."""
+        CaseEventLogReader.unresolved_trigger_started for the read side."""
         return self._append_base(
-            EV_TRIGGER_START, trigger,
+            EV_TRIGGER_STARTED, trigger,
             {"state": state, "warn_secs": warn, "kill_secs": kill},
         )
 
@@ -171,7 +171,7 @@ class CaseJournal:
 
     @property
     def current_state(self) -> Optional[str]:
-        """Current state = the most recent CASE_ENTER_STATE value."""
+        """Current state = the most recent CASE_STATE_ENTERED value."""
         return self._reader.current_state
 
     @property
@@ -179,21 +179,21 @@ class CaseJournal:
         """Modification time of the most recent event, or None if the log is empty."""
         return self._reader.last_activity
 
-    def last_enter_state_mtime(self) -> Optional[datetime.datetime]:
-        """Mtime of the latest CASE_ENTER_STATE event (the dwell anchor), or None when
+    def last_state_entered_mtime(self) -> Optional[datetime.datetime]:
+        """Mtime of the latest CASE_STATE_ENTERED event (the dwell anchor), or None when
         the case has not entered a state yet (brand-new). Naive/local, like all
         event-log mtimes; the caller converts to aware UTC."""
-        return self._reader.last_enter_state_mtime
+        return self._reader.last_state_entered_mtime
 
     def count_fails_this_dwell(self) -> int:
         """Count of failed pre-commit attempts since the current state was entered — the
-        fact the `@FAIL` guard compares against. Counts BOTH CASE_FAIL_TRANSITION (the
-        work raised) and CASE_TRIGGER_TIMEOUT (the work was hard-aborted): a timeout IS a
+        fact the `@FAIL` guard compares against. Counts BOTH CASE_TRANSITION_FAILED (the
+        work raised) and CASE_TRIGGER_TIMED_OUT (the work was hard-aborted): a timeout IS a
         failed attempt, and counting it here is what stops a timing-out trigger from
         re-firing forever under the implicit `@FAIL<1` cap. STATE-scoped: every failed
         attempt in this dwell counts, regardless of which trigger raised. Derived from the
         event log (no stored counter), so it is correct across process restarts and resets
-        naturally at the next CASE_ENTER_STATE.
+        naturally at the next CASE_STATE_ENTERED.
 
         The interpretation itself lives on the reader (`transition_fail_count`); this stays
         as the journal's domain-named read surface, delegating like `last_activity`."""
@@ -203,7 +203,7 @@ class CaseJournal:
         """True if an event with `label` has been logged since the current state was
         entered. Used to keep blocked-state alerts to one per dwell."""
         for ev in self._reader.primitive.events(recent_first=True):
-            if ev.label == EV_ENTER_STATE:
+            if ev.label == EV_STATE_ENTERED:
                 return False
             if ev.label == label:
                 return True

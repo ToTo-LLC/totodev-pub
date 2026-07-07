@@ -43,11 +43,11 @@ Connectors  `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
   UNSUPPORTED — we cannot promise to evaluate at an exact instant/count, so an equality
   test would create false expectations). Two facts are recognized:
     * `@DWELL<op><dur>` — seconds spent in the SOURCE state (dwell since the latest
-      CASE_ENTER_STATE). The operand is a duration, units s|m|h|d, float allowed
+      CASE_STATE_ENTERED). The operand is a duration, units s|m|h|d, float allowed
       (`@DWELL>90s`, `@DWELL>=1.5h`, `@DWELL>0.5d`). `case_dwell_secs` on the case computes it.
       A `>`/`>=` dwell guard is SELF-RELAXING (it ripens with time) and is what gives a
       state a guaranteed TIMED ESCAPE (see classify()/AutoAdvanceBlocked).
-    * `@FAIL<op>N` — count of `CASE_FAIL_TRANSITION` events logged since the current state
+    * `@FAIL<op>N` — count of `CASE_TRANSITION_FAILED` events logged since the current state
       was entered (failed pre-commit attempts to LEAVE this state). The operand is a bare
       integer, NO unit (`@FAIL<3`, `@FAIL>=3`). State-scoped: every failed attempt in this
       dwell counts regardless of which trigger raised. This is the retry knob — list a

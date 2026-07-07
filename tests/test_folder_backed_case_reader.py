@@ -190,11 +190,11 @@ def test_reader_active_trigger_visible_while_work_runs(tmp_path):
 
 
 def test_reader_active_trigger_requires_live_lease(tmp_path):
-    """A dangling CASE_TRIGGER_START whose owner is gone (lease absent/expired) reads
+    """A dangling CASE_TRIGGER_STARTED whose owner is gone (lease absent/expired) reads
     as NOT active — that folder crashed mid-work; it is not in flight."""
     folder = tmp_path / "reader-012"
     with SlowWorkCase.create_case_in_folder(folder) as case:
-        case._journal.log_trigger_start("work", state="new", warn=5.0, kill=10.0)
+        case._journal.log_trigger_started("work", state="new", warn=5.0, kill=10.0)
         # While the owner is live (lease held), the dangling START reads as active.
         assert FolderBackedCaseReader(folder).case_active_trigger is not None
     # Owner detached: same log contents, no live lease -> not active.

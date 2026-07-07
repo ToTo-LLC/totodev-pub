@@ -119,7 +119,7 @@ class FolderBackedCaseReader:
     @property
     def case_dwell_secs(self) -> float:
         record = self._peek_record()
-        entered_at = self._as_utc(self._peek_events().last_enter_state_mtime) or record.created
+        entered_at = self._as_utc(self._peek_events().last_state_entered_mtime) or record.created
         return (_utcnow() - entered_at).total_seconds()
 
     @property
@@ -150,15 +150,15 @@ class FolderBackedCaseReader:
 
     @property
     def case_active_trigger(self) -> ActiveTrigger | None:
-        """Unresolved ``CASE_TRIGGER_START`` with live lease, or None.
+        """Unresolved ``CASE_TRIGGER_STARTED`` with live lease, or None.
 
-        See ``CaseEventLogReader.unresolved_trigger_start``. ``elapsed_secs`` grows
+        See ``CaseEventLogReader.unresolved_trigger_started``. ``elapsed_secs`` grows
         between reads (wall-clock from start event mtime).
         """
         lease_left = self.case_lease_secs_left
         if lease_left is None or lease_left <= 0:
             return None
-        ev = self._peek_events().unresolved_trigger_start
+        ev = self._peek_events().unresolved_trigger_started
         if ev is None:
             return None
         started = self._as_utc(ev.mtime)

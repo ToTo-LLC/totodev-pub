@@ -159,7 +159,7 @@ def test_fail_fact_guard_reads_journal_count(tmp_path):
     try:
         guard = _factory(case)._make_fact_guard("FAIL", ">=", 1)
         assert guard(None) is False            # no failures yet this dwell
-        case._journal.log_fail_transition("go", {"trigger": "go"})
+        case._journal.log_transition_failed("go", {"trigger": "go"})
         assert guard(None) is True
     finally:
         case.case_detach()
@@ -186,7 +186,7 @@ def test_perform_wrapper_hard_aborts_with_trigger_timeout(tmp_path):
         wrapped = _factory(case)._make_perform_wrapper("go", "perform_go")
         with pytest.raises(TriggerTimeout):
             asyncio.run(wrapped(None))
-        # The wrapper raises the timeout; CASE_TRIGGER_TIMEOUT logging is _on_fsm_exception's
+        # The wrapper raises the timeout; CASE_TRIGGER_TIMED_OUT logging is _on_fsm_exception's
         # job, and a hard-abort never doubles as a slow warning.
         assert _slow_events(case) == []
     finally:
@@ -211,7 +211,7 @@ def test_perform_wrapper_logs_slow_when_over_soft_but_under_kill(tmp_path):
 
 
 def test_perform_wrapper_logs_trigger_start_before_work(tmp_path):
-    """CASE_TRIGGER_START is written before the work runs, so it survives (and dates)
+    """CASE_TRIGGER_STARTED is written before the work runs, so it survives (and dates)
     a failed attempt — the durable 'this trigger is in flight' marker."""
     case = _case(tmp_path)
     try:
@@ -219,7 +219,7 @@ def test_perform_wrapper_logs_trigger_start_before_work(tmp_path):
         wrapped = _factory(case)._make_perform_wrapper("go", "perform_go")
         with pytest.raises(ValueError, match="boom"):
             asyncio.run(wrapped(None))
-        starts = list(case._journal.primitive.events(label_glob="CASE_TRIGGER_START"))
+        starts = list(case._journal.primitive.events(label_glob="CASE_TRIGGER_STARTED"))
         assert len(starts) == 1
         assert starts[0].value == "go"
         data = _data_of(starts[0])
