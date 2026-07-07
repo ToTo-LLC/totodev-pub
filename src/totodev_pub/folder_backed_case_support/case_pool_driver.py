@@ -21,11 +21,73 @@ choke permits) is throttled but not seniority-ranked.
 cases should burst through automatic work one-at-a-time (or front-of-line first)
 and the head of the queue should win scarce capacity over cases behind it.
 
-Invocation model
-----------------
-Each beat (``advance()``) has three obligations with **no promised ordering**:
+Contract for implementers
+--------------------------
+Everything below is a MUST unless noted otherwise. ``TieredCasePoolDriver`` and its
+subclass ``QueuedCasePoolDriver`` are the reference for what honoring it looks like.
 
-1. Heartbeat cases due this beat (keep leases live).
+1. Identity. A case's folder path is the sole key across container access
+   (``__contains__``, ``__getitem__``, ``find``), membership (``add``, ``remove``,
+   ``request_halt``), and manual driving (``fire``, ``boost``). It must not change while
+   the case is in the pool. Extra indexes (case_id, external_key, queue order, ...) are
+   conveniences layered over the folder-keyed store, never a replacement for it.
+
+2. Admission is not rehydration. ``add()`` accepts only an already-live, lease-held
+   object. A detached case handed to ``add()`` is a caller error — reject it (e.g.
+   ``DetachedCaseError``) rather than rehydrating on the caller's behalf. This is
+   deliberately asymmetric with #3: rehydration tolerance covers cases that go stale
+   *after* admission, not admission itself.
+
+3. Rehydration tolerance. ``advance()`` and ``fire()`` — and any other path that touches
+   a case's liveness, including heartbeating — MUST auto-rehydrate a detached case
+   before driving it, keyed by folder path, and MUST fire ``EVICTED`` and drop the case
+   if rehydration is impossible (folder gone, owned elsewhere). Route these checks
+   through one internal chokepoint so a case is never evicted twice. After a successful
+   rehydrate, container access must return the fresh live object.
+
+4. Lease liveness is a guarantee, not a nicety. Whatever cadence a driver uses, every
+   case that remains in the pool (and isn't already settled for removal) must have its
+   lease refreshed before the TTL lapses. "Heartbeat cases due this beat" describes a
+   scheduling *policy* for picking who gets heartbeated on a given beat; that no case's
+   lease is ever allowed to expire is the underlying, non-negotiable guarantee.
+
+5. No overlapping steps on one case. ``FolderBackedCase`` forbids more than one FSM
+   trigger in flight on a single live object (``CaseTransitionInFlightError``). A
+   driver's own concurrency must not violate this: if a step is already in flight for a
+   case, ``fire()`` must coalesce with it (await the existing task) rather than
+   launching a second ``case_advance()``.
+
+6. Halt is terminal for scheduling. Once ``HALTED`` has fired for a case, the driver
+   must not schedule further advances for it. ``request_halt()`` returns immediately;
+   ``HALTED`` fires exactly once, when the case is no longer in-flight or scheduled.
+   There is no in-place undo: to drive the case again, ``remove()`` it and ``add()`` it
+   back (re-admission builds a fresh scheduling slot; tier/streaks/queue position reset).
+
+7. Event discipline.
+   - Membership events fire exactly once per transition: ``ADMITTED`` on a successful
+     ``add()``, ``REMOVED`` on a successful ``remove()``, ``HALTED`` once a halt request
+     settles, ``EVICTED`` on rehydration failure / lost ownership.
+   - Per beat, a case's advance-derived events follow
+     ``ALERTED -> ADVANCED -> FAILED -> TERMINATED``; ``ADVANCED``/``FAILED`` are
+     mutually exclusive for one ``AdvanceResult``, and ``TERMINATED`` never fires
+     without an ``ADVANCED`` in the same beat.
+   - ``advance_result`` is populated for the four advance-derived events, ``None`` for
+     membership events.
+
+8. Query defaults are a floor. ``stalled_cases()``, ``terminal_cases()``,
+   ``cases_in_state()``, ``failed_cases()`` have default O(N) implementations. A
+   subclass may override any of them with a cached/indexed version (as
+   ``TieredCasePoolDriver.terminal_cases()`` does), but an override must return the
+   same set the default would — faster, never different.
+
+9. The ABC is the portable surface. Diagnostics/extension APIs (``peek``, ``snapshot``,
+   ``by_tier``, ``settle``, ``find_by_external_key``, ...) live on concrete subclasses.
+   Code written against ``CasePoolDriver`` alone must not assume any of that extra
+   surface exists.
+
+Each beat (``advance()``) has three scheduling obligations with **no promised ordering**:
+
+1. Heartbeat cases due this beat (keep leases live — see #4 above).
 2. Fire ``case_advance()`` on cases due to advance.
 3. Pace work with an async-friendly smoothing strategy (``asyncio.sleep`` is one
    valid choice, not guaranteed).
@@ -93,14 +155,16 @@ class CasePoolEvent:
 class CasePoolDriver(ABC):
     """Scheduling seam over a pool of FolderBackedCase objects.
 
-    Container-like access by folder path. Concrete subclasses are named for their
-    policy (e.g. ``TieredCasePoolDriver``). Do not change a case's folder path
-    while it is in the pool.
+    Container-like access by folder path; concrete subclasses are named for their
+    policy (e.g. ``TieredCasePoolDriver``). The full derived-class contract lives in
+    the module docstring above — the load-bearing invariants are:
 
-    Rehydration tolerance: ``advance()`` and ``fire()`` MUST auto-rehydrate detached
-    cases before driving (keyed by folder path). On failure (folder gone, owned
-    elsewhere), evict and fire ``EVICTED``. Other methods may use cached state or
-    return objects as-is — not every method rehydrates.
+    - Folder path is the sole identity key and must not change while a case is in the
+      pool (extra indexes are layered conveniences, never authoritative).
+    - ``add()`` requires an already-live object; it is not a rehydration point.
+    - ``advance()``/``fire()`` MUST auto-rehydrate a detached case (keyed by folder
+      path) before driving it, and fire ``EVICTED`` if that's impossible.
+    - Once ``HALTED`` fires for a case, it must never be scheduled again.
     """
 
     def __init__(self) -> None:
@@ -134,6 +198,7 @@ class CasePoolDriver(ABC):
     def add(self, case: FolderBackedCase) -> None:
         """Add a live, lease-held case to the pool.
 
+        On success, fire ``ADMITTED`` exactly once (see module docstring #7).
         Raises ValueError if the folder path is already present.
         """
 
@@ -142,13 +207,15 @@ class CasePoolDriver(ABC):
         """Request that a case stop being driven. Returns immediately.
 
         HALTED fires once settled (no longer in-flight or scheduled). Wait for
-        HALTED before ``remove()`` if an advance may be in progress.
+        HALTED before ``remove()`` if an advance may be in progress. Halt is not
+        reversible in place; to drive again, ``remove()`` then ``add()`` the case.
         """
 
     @abstractmethod
     def remove(self, case_folder: Path) -> FolderBackedCase:
         """Remove a case and return the still-bound object.
 
+        On success, fire ``REMOVED`` exactly once (see module docstring #7).
         Raises CaseInFlightError if an advance is in progress.
         Does not detach or release the lease.
         """
@@ -157,7 +224,7 @@ class CasePoolDriver(ABC):
 
     @abstractmethod
     async def advance(self, suggested_interval_secs: float | None = None) -> None:
-        """Perform one beat. See module docstring for the three obligations.
+        """Perform one beat. See module docstring for scheduling obligations and contract.
 
         Subclasses MUST rehydrate detached cases before driving (see class docstring).
         ``suggested_interval_secs`` is advisory.

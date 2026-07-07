@@ -12,6 +12,9 @@ Two acquire paths:
 - ``try_acquire`` — non-blocking, only during an open sweep (beat-quantized budget).
 - ``acquire_priority`` — may await; for manual ``fire()`` paths.
 
+The sweep budget is frozen at ``begin_sweep()``; mid-sweep ``release()`` does not
+replenish it until the next sweep.
+
 All paths are all-or-nothing: a multi-resource request succeeds only when every
 name in the set can be granted together, or the caller gets ``None`` / keeps waiting.
 """

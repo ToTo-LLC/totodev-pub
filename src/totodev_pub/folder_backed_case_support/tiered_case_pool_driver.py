@@ -13,6 +13,9 @@ queue-ordered, seniority-first bursting, see ``QueuedCasePoolDriver``.
 observations. Every live case is polled on its tier schedule; promotion/demotion
 adjusts cadence. Contested capacity (concurrency ceiling, choke permits) is a
 launch gate only — no seniority among due cases beyond incidental sweep order.
+If a gate declines, ``case_advance()`` is not called; the slot retries next beat
+(``skip_countdown = 1``, not a full tier reload). See ``ChokePermitGovernor`` for
+beat-quantized permit budgeting.
 
 Implements ``CasePoolDriver`` with extensions: ``peek``, ``by_tier``, ``snapshot``,
 ``find_by_external_key``, ``settle``. Each case has a ``_Slot`` (tier +
