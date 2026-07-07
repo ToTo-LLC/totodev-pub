@@ -56,6 +56,42 @@ class CaseInFlightError(Exception):
         self.folder = folder
 
 
+class CaseTransitionInFlightError(Exception):
+    """FolderBackedCase enforces at most ONE FSM trigger invocation in flight per live
+    object at a time. Raised immediately (fail-fast, not queued) when a second trigger
+    is attempted — via case_advance() or directly (`await case.<trigger>()`) — while
+    another is still being processed on this SAME object (guards, `before`/perform_,
+    on_enter/on_exit/after have not all completed for the first attempt yet).
+
+    This is a REENTRANCY misuse guard, not a transition outcome: it is raised BEFORE any
+    guard/condition runs for the second attempt, so nothing is logged to the case's event
+    log and it does NOT count toward @FAIL. It is deliberately NOT folded into
+    AdvanceResult — case_advance() re-raises it exactly like OwnershipLostError, so a
+    caller inspecting AdvanceResult never sees this mixed in with real transition
+    failures.
+
+    Typically means: a driver-external caller obtained this case (e.g. via
+    CaseManager.get()) and called a trigger directly while a driver beat (or another
+    caller) was already advancing it. CasePoolDriver.fire() does not hit this path for
+    its own beats — it detects an in-flight slot and awaits the existing task instead of
+    calling fire() again; this error is for callers that bypass that coalescing.
+
+    There is deliberately no public "is a transition in flight?" predicate: guards are
+    expected to be quick, so the exposure window is small, and a check-then-act boolean
+    would still be racy. Catch this exception instead."""
+    def __init__(self, case_id: str, folder: Path, active_trigger: Optional[str]):
+        trig = f" (currently running {active_trigger!r})" if active_trigger else ""
+        super().__init__(
+            f"Case {case_id!r} at {folder} already has a transition in flight{trig}; "
+            "this object does not allow reentrant/concurrent trigger calls. Wait for "
+            "the current attempt to finish, or route through a driver that coalesces "
+            "concurrent fire() calls."
+        )
+        self.case_id = case_id
+        self.folder = folder
+        self.active_trigger = active_trigger
+
+
 class UnregisteredCaseTypeError(Exception):
     """Raised by CaseTypeRegistry.rehydrate() and peek_class(return_class_object=True)
     when the stored case_object_type has no matching entry in the registry — i.e. the

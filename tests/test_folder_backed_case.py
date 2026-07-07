@@ -23,6 +23,7 @@ from totodev_pub.folder_backed_case_support.case_type_registry import (
 from totodev_pub.folder_backed_case_support.exceptions import (
     FsmBindingError,
     OwnershipLostError,
+    CaseTransitionInFlightError,
     UnregisteredCaseTypeError,
     MissingAssetSchemaError,
     MissingTriggerChokesError,
@@ -938,6 +939,109 @@ def test_pinned_unknown_trigger_on_terminal_case_is_noop(tmp_path):
             result = await case.case_advance(trigger="bogus")   # would raise if live
             assert not result.progressed
             assert result.exceptions == ()
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Non-reentrancy guard: at most one FSM trigger invocation in flight per live
+# object at a time. See CaseTransitionInFlightError / _on_prepare_fsm_event.
+# ---------------------------------------------------------------------------
+
+class _ReentrancyCase(FolderBackedCase):
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """AUTO edge `go` blocks on an injected gate (asyncio.Event, set by the test after
+    creation) so a test can hold ONE transition in flight and attempt a second,
+    concurrent trigger call while the first is still awaiting."""
+    fsm_state_chains = ["^new--go-->open==finish-->done^"]
+
+    async def perform_go(self, tctx):
+        await self._gate.wait()
+
+
+def test_direct_trigger_call_raises_when_reentrant(tmp_path):
+    """A direct `await case.<trigger>()` while another trigger is already in flight on
+    the SAME object raises CaseTransitionInFlightError immediately (fail-fast, not
+    queued) — and does not pollute the event log or count toward @FAIL."""
+    async def scenario():
+        with _ReentrancyCase.create_case_in_folder(tmp_path / "reent-1", case_id="r-1") as case:
+            case._gate = asyncio.Event()
+            task = asyncio.create_task(case.go())
+            await asyncio.sleep(0.01)          # let it reach perform_go and start awaiting the gate
+            assert case._transition_in_flight is True
+
+            start = time.monotonic()
+            with pytest.raises(CaseTransitionInFlightError) as excinfo:
+                await case.go()
+            elapsed = time.monotonic() - start
+            assert elapsed < 0.1               # rejected before ever touching the gate/guard
+            assert excinfo.value.case_id == "r-1"
+            assert excinfo.value.active_trigger == "go"
+            # Rejected BEFORE any guard/condition ran for this call: nothing logged.
+            assert case._journal.count_fails_this_dwell() == 0
+
+            case._gate.set()
+            result = await task                # the FIRST call completes normally
+            assert result is True
+            assert case.case_state == "open"
+            assert case._transition_in_flight is False   # guard released after completion
+
+    asyncio.run(scenario())
+
+
+def test_case_advance_raises_when_reentrant_not_folded_into_result(tmp_path):
+    """The same guard applies to case_advance(): a reentrant call RAISES rather than
+    returning an AdvanceResult with the error folded into `exceptions` — mirrors how
+    OwnershipLostError is surfaced."""
+    async def scenario():
+        with _ReentrancyCase.create_case_in_folder(tmp_path / "reent-2", case_id="r-2") as case:
+            case._gate = asyncio.Event()
+            task = asyncio.create_task(case.case_advance())
+            await asyncio.sleep(0.01)
+
+            with pytest.raises(CaseTransitionInFlightError):
+                await case.case_advance()
+
+            case._gate.set()
+            result = await task
+            assert result.progressed
+            assert result.trigger == "go"
+            assert result.exceptions == ()     # the rejection never touched this result
+
+    asyncio.run(scenario())
+
+
+class _FlakyOnceCase(FolderBackedCase):
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Auto edge whose work raises exactly once, to verify the reentrancy guard is
+    released even when the guarded transition itself fails. Needs an explicit @FAIL
+    tolerance above 1 — an auto edge with no @FAIL annotation gets an implicit
+    @FAIL<1 (one attempt, no retry), which would otherwise block the SECOND attempt
+    regardless of the reentrancy guard and make this test's intent ambiguous."""
+    fsm_state_chains = ["^new--@FAIL<3#go-->done^"]
+    fail_once: bool = True
+
+    async def perform_go(self, tctx):
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("boom")
+
+
+def test_guard_releases_after_failed_transition(tmp_path):
+    async def scenario():
+        with _FlakyOnceCase.create_case_in_folder(tmp_path / "flaky", case_id="f-1") as case:
+            result1 = await case.case_advance()
+            assert result1.failed
+            assert isinstance(result1.exceptions[0], RuntimeError)
+            assert case._transition_in_flight is False   # released despite the failure
+
+            result2 = await case.case_advance()          # retry now succeeds
+            assert result2.progressed
+            assert case.case_state == "done"
 
     asyncio.run(scenario())
 

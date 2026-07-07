@@ -103,7 +103,8 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
     CaseTypeMismatchError, RecordTypeMismatchError,
     IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
-    AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError, MissingTriggerChokesError,)
+    AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError, MissingTriggerChokesError,
+    CaseTransitionInFlightError,)
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_type_spec import CaseTypeSpec
@@ -423,7 +424,16 @@ class FolderBackedCase(ABC):
           without trigger_kwargs, or trigger_kwargs given with no trigger). Also RAISES
           OwnershipLostError (NOT folded into the result) if a beat — the pre-step one below
           or the in-flight keepalive — finds the folder reclaimed by another owner: a fatal
-          invariant breach, not a step outcome.
+          invariant breach, not a step outcome. Also RAISES CaseTransitionInFlightError (also
+          NOT folded into the result) if another trigger call is ALREADY in flight on this
+          same object — this method is deliberately NON-REENTRANT: at most one FSM trigger
+          invocation may be executing on a given live case at a time, checked and enforced
+          fail-fast (not queued) via _on_prepare_fsm_event. A direct `await case.<trigger>()`
+          call is guarded the same way. A driver's fire() does not hit this for its own
+          beats — it detects an in-flight slot and awaits the existing task's result instead
+          of calling fire() again; this exception is for callers that bypass that coalescing
+          (e.g. a caller that obtained a live reference via CaseManager.get() and calls a
+          trigger directly while a beat is already advancing the same case).
 
         Contract (well-behaved async hooks):
           The lease keepalive — and cooperative scheduling generally — depends on a trigger's
@@ -441,6 +451,17 @@ class FolderBackedCase(ABC):
         initial = self.case_state
         if self.case_is_terminal:       # terminal short-circuits first (a terminal case stays
             return AdvanceResult(initial, self.case_state)   # bound; lease cleared only by case_detach())
+        # Non-reentrancy: fail fast BEFORE touching _advance_collecting_alerts' shared
+        # case_log_alert override (see that method) — a second overlapping case_advance()
+        # envelope must never partially set up its own alert-collection state only to be
+        # rejected deeper inside by _on_prepare_fsm_event, which would leave the FIRST
+        # call's override clobbered by the second call's own finally block. This is a
+        # PEEK, not a set: the actual flag is owned solely by _on_prepare_fsm_event /
+        # _on_finalize_fsm_event, which fire for this same call's own trigger attempt a
+        # few lines below — setting it here too would make case_advance() misreport
+        # itself as reentrant against its OWN inner trigger call.
+        if self._transition_in_flight:
+            raise CaseTransitionInFlightError(self.case_id, self._folder, self._active_trigger_name)
         self._check_active()            # else refuse to drive a detached husk
         # Every poll is proof of active ownership, so beat the lease here (throttled — a
         # no-op if < min_update_secs since our last beat). This covers the long-dwelling
@@ -530,6 +551,8 @@ class FolderBackedCase(ABC):
                 return AdvanceResult(initial, self.case_state, trigger=trigger)
             return None
         except OwnershipLostError:      # FATAL: surfaced exactly like the pre-step beat does.
+            raise
+        except CaseTransitionInFlightError:   # misuse, not a transition outcome: raise, don't fold.
             raise
         except Exception as err:        # absorbed: reported as data, not raised at the driver
             return AdvanceResult(initial, self.case_state, trigger=trigger,
@@ -1247,6 +1270,12 @@ class FolderBackedCase(ABC):
             state_provider=lambda: (c := _case_ref()) and c.case_state,
         )
         write_attach_banner(self.log)
+        # Non-reentrancy guard (see _on_prepare_fsm_event / CaseTransitionInFlightError):
+        # at most one FSM trigger invocation may be in flight on this object at a time.
+        # Reset here so a freshly (re)bound instance — including case_reclassify_to's
+        # fresh object — never inherits a stale flag.
+        self._transition_in_flight: bool = False
+        self._active_trigger_name: str | None = None
         # Instance-time machine binding is delegated to _CaseMachineFactory.
         self._machine = _CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
 
@@ -1268,7 +1297,43 @@ class FolderBackedCase(ABC):
     # ---- FSM attachment via transitions (async-first composition pattern) ----
     # Machine construction + callback wiring live in _CaseMachineFactory; the case keeps
     # the override seams the factory reads back (trigger_warn_secs, case_dwell_secs) and the
-    # named lifecycle callbacks the machine binds (_on_state_changed, _on_fsm_exception).
+    # named lifecycle callbacks the machine binds (_on_state_changed, _on_fsm_exception,
+    # _on_prepare_fsm_event, _on_finalize_fsm_event).
+
+    def _on_prepare_fsm_event(self, event_data) -> None:
+        """Machine `prepare_event` hook — the single chokepoint EVERY trigger call passes
+        through before any guard/condition runs (covers case_advance() and a direct
+        `await case.<trigger>()` alike). Enforces the non-reentrancy invariant: at most
+        one FSM event may be in flight on this object at a time.
+
+        DELIBERATELY SYNCHRONOUS (no `await` before the check-and-set): the `transitions`
+        library runs this to completion without yielding the event loop, so the
+        check-and-set below is atomic with respect to any OTHER concurrent trigger call
+        on this same object — whichever call's prepare hook actually executes first
+        always wins, regardless of scheduling order. See CaseTransitionInFlightError.
+
+        Marks `event_data` (not just `self`) as "mine to clear" via `_case_guard_owner`:
+        `finalize_event` below ALWAYS fires exactly once per trigger() call — even for a
+        call rejected before prepare_event ever ran (e.g. the trigger has no edge from
+        the CURRENT state) — so finalize must only clear the flag for the call that
+        actually set it, or it could wrongly release a flag held by a genuinely in-flight
+        transition."""
+        if self._transition_in_flight:
+            raise CaseTransitionInFlightError(
+                self.case_id, self._folder, self._active_trigger_name
+            )
+        self._transition_in_flight = True
+        self._active_trigger_name = (
+            event_data.event.name if event_data.event is not None else None
+        )
+        event_data._case_guard_owner = True
+
+    def _on_finalize_fsm_event(self, event_data) -> None:
+        """Pairs with `_on_prepare_fsm_event` — see that method for why the ownership
+        check (rather than an unconditional clear) matters."""
+        if getattr(event_data, "_case_guard_owner", False):
+            self._transition_in_flight = False
+            self._active_trigger_name = None
 
     def _on_state_changed(self, event) -> None:
         """Runs after EVERY transition (event is a transitions EventData). Records the
@@ -1348,6 +1413,13 @@ class FolderBackedCase(ABC):
         # invariant breach, not a transition failure. Surface it WITHOUT logging a fail or
         # counting it toward @FAIL — the displaced owner must simply stop operating.
         if isinstance(err, OwnershipLostError):
+            raise err
+        # Reentrancy rejection from _on_prepare_fsm_event: raised BEFORE any guard/condition
+        # ran for THIS call, so there is nothing here to decorate or log — no transition was
+        # even attempted. Surface it exactly like OwnershipLostError: a misuse/invariant
+        # signal, not a transition outcome (never folded into AdvanceResult; see
+        # CaseTransitionInFlightError and _attempt_one_trigger's matching re-raise).
+        if isinstance(err, CaseTransitionInFlightError):
             raise err
         trigger = event.event.name if event.event is not None else None
         trans = event.transition

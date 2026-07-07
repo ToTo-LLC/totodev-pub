@@ -121,16 +121,26 @@ class _CaseMachineFactory:
         self._journal = journal
 
     def build(self, initial_state: str) -> AsyncMachine:
-        """Construct the case-bound machine (keepalive, timeouts, journal markers)."""
+        """Construct the case-bound machine (keepalive, timeouts, journal markers).
+
+        `queued=False` (the library default) is set EXPLICITLY here: this project
+        deliberately does not use `transitions`' async event-queueing mode, which would
+        silently defer a second concurrent trigger call rather than reject it. The
+        non-reentrancy guard (`_on_prepare_fsm_event` / `_on_finalize_fsm_event`, wired
+        below) gives immediate, cheap failure instead — see
+        CaseTransitionInFlightError."""
         return AsyncMachine(
             model=self._case,
             states=self._fsm.states,
             transitions=self._prepare_transitions(self._fsm.transitions),
             initial=initial_state,
             model_attribute="case_state",
+            prepare_event="_on_prepare_fsm_event",
             after_state_change="_on_state_changed",
+            finalize_event="_on_finalize_fsm_event",
             on_exception="_on_fsm_exception",
             send_event=True,
+            queued=False,
         )
 
     def _prepare_transitions(self, transitions: list[dict]) -> list[dict]:
