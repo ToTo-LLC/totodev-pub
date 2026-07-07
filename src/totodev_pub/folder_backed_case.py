@@ -1014,9 +1014,9 @@ class FolderBackedCase(ABC):
 
 
     def archive_grouping_label(self) -> str:
-        """Destination archive grouping when this case closes. Default: close month.
-        Override to key on creation date, fiscal period, tenant, etc."""
-        return _utcnow().strftime("%Y-%m-archive")
+        """Destination archive grouping when this case closes. Default: close month
+        (``YYYY-MM``). Override to key on creation date, fiscal period, tenant, etc."""
+        return _utcnow().strftime("%Y-%m")
 
     async def case_run_blocking(self, fn, /, *args, **kwargs):
         """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `perform_`. Runs `fn`
