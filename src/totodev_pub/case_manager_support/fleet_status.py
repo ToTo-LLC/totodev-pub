@@ -65,7 +65,9 @@ ROW_FIELD_ORDER = (
     "ext",
 )
 
-FleetStatusDecorator = Callable[[FolderBackedCase, Mapping[str, Any], dict[str, Any]], None]
+FleetStatusDecorator = Callable[
+    [FolderBackedCase, Mapping[str, Any]], Optional[dict[str, Any]]
+]
 
 
 class FleetStatusRow(BaseModel):
@@ -190,16 +192,22 @@ def _run_decorator(
     decorator: FleetStatusDecorator | None,
     warned_case_ids: set[str] | None,
 ) -> dict[str, Any]:
-    """Contained decorator invocation (spec §10.1): an exception or unserializable
-    ext logs a throttled warning and yields a vanilla ``{}`` — the publish never
-    fails and the beat never stalls because of a decorator."""
+    """Contained decorator invocation (spec §10.1). The decorator RETURNS the ext
+    dict (None/{} means "nothing to add"). An exception, a non-dict return, or an
+    unserializable ext logs a throttled warning and yields a vanilla ``{}`` — the
+    publish never fails and the beat never stalls because of a decorator."""
     if decorator is None:
         return {}
     warned = warned_case_ids if warned_case_ids is not None else set()
-    ext: dict[str, Any] = {}
     try:
-        decorator(case, MappingProxyType(standard), ext)
-        ext = dict(sorted(ext.items()))
+        returned = decorator(case, MappingProxyType(standard))
+        if returned is None:
+            returned = {}
+        if not isinstance(returned, dict):
+            raise TypeError(
+                f"fleet_status_decorator must return dict | None, got {type(returned).__name__}"
+            )
+        ext = dict(sorted(returned.items()))
         json.dumps(ext)  # serializability gate, before the board render
     except Exception:
         if case.case_id not in warned:

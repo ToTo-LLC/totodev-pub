@@ -139,14 +139,13 @@ def test_parse_board_last_wins_and_skips_malformed():
 def test_decorator_populates_ext_and_cannot_touch_standard(tmp_path):
     seen = {}
 
-    def decorator(case, standard, ext):
+    def decorator(case, standard):
         seen["standard_is_readonly"] = False
-        ext["nickname"] = "web-friendly"
-        ext["state_echo"] = standard["case_state"]
         try:
             standard["case_id"] = "hacked"
         except TypeError:
             seen["standard_is_readonly"] = True
+        return {"nickname": "web-friendly", "state_echo": standard["case_state"]}
 
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
     row = build_live_row(case, decorator=decorator)
@@ -156,16 +155,29 @@ def test_decorator_populates_ext_and_cannot_touch_standard(tmp_path):
     assert seen["standard_is_readonly"] is True
 
 
+def test_decorator_none_return_means_vanilla(tmp_path):
+    def quiet(case, standard):
+        return None  # bare `return` — the natural "nothing to add"
+
+    case = TicketCase.create_case_in_folder(tmp_path / "c1")
+    assert build_live_row(case, decorator=quiet)["ext"] == {}
+    case.case_detach()
+
+
 def test_decorator_failure_yields_vanilla_row(tmp_path):
-    def broken(case, standard, ext):
+    def broken(case, standard):
         raise RuntimeError("boom")
 
-    def unserializable(case, standard, ext):
-        ext["obj"] = object()
+    def unserializable(case, standard):
+        return {"obj": object()}
+
+    def wrong_type(case, standard):
+        return ["not", "a", "dict"]
 
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
     assert build_live_row(case, decorator=broken)["ext"] == {}
     assert build_live_row(case, decorator=unserializable)["ext"] == {}
+    assert build_live_row(case, decorator=wrong_type)["ext"] == {}
     case.case_detach()
 
 
@@ -260,8 +272,8 @@ async def test_unchanged_fleet_skips_republish(tmp_path):
 
 @pytest.mark.asyncio
 async def test_manager_decorator_wiring(tmp_path):
-    def decorator(case, standard, ext):
-        ext["from_decorator"] = case.case_id.upper()
+    def decorator(case, standard):
+        return {"from_decorator": case.case_id.upper()}
 
     manager = provision_fleet_manager(tmp_path, fleet_status_decorator=decorator)
     staging = tmp_path / "staging"
