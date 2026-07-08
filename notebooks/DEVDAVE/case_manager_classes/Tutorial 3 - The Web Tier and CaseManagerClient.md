@@ -557,6 +557,14 @@ tier, or a two-phase commit. What it needed was:
 That's the whole surface. Everything sophisticated — the lease, the pulse, the two-phase commits,
 the dead-lettering — exists precisely so that this list could stay this short.
 
+
+
+## 10. Docker Deployment Strategy
+
+Note that when using docker-based deployment the built-in filesystem isolation between the web application and the case manager process often needs to be bridged.  One of the most common ways is by having a separate, persistent shared volume (e.g. `volatile/` that both process mount similarly to make their semantics and log files comprehensible and consistent).
+
+
+
 ---
 
 ### Where to go next
