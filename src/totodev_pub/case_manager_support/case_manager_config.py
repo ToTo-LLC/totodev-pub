@@ -33,5 +33,3 @@ class CaseManagerConfig:
     register_types: Sequence[type["FolderBackedCase"]] = ()
     escalation_handlers: list[Callable[..., None]] = field(default_factory=list)
     cache_override: Any = None
-    # Optional fleet-board row decorator: fn(case, standard_fields_view) -> ext dict | None.
-    fleet_status_decorator: Callable[..., Any] | None = None

@@ -13,8 +13,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,10 +63,6 @@ ROW_FIELD_ORDER = (
     "fail_count",
     "ext",
 )
-
-FleetStatusDecorator = Callable[
-    [FolderBackedCase, Mapping[str, Any]], Optional[dict[str, Any]]
-]
 
 
 class FleetStatusRow(BaseModel):
@@ -171,10 +166,9 @@ def collect_case_status_facts(case_folder: Path) -> dict[str, Any]:
 def build_live_row(
     case: FolderBackedCase,
     *,
-    decorator: FleetStatusDecorator | None = None,
     warned_case_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Standard row for a live in-pool case, plus decorator-provided ``ext``."""
+    """Standard row for a live in-pool case, plus case-provided ``ext``."""
     row: dict[str, Any] = {
         "case_id": case.case_id,
         "external_key": case.case_external_key,
@@ -182,30 +176,26 @@ def build_live_row(
         "case_folder": str(case.case_folder),
     }
     row.update(collect_case_status_facts(case.case_folder))
-    row["ext"] = _run_decorator(case, row, decorator, warned_case_ids)
+    row["ext"] = _collect_case_ext_status_info(case, warned_case_ids)
     return {key: row[key] for key in ROW_FIELD_ORDER}
 
 
-def _run_decorator(
+def _collect_case_ext_status_info(
     case: FolderBackedCase,
-    standard: dict[str, Any],
-    decorator: FleetStatusDecorator | None,
     warned_case_ids: set[str] | None,
 ) -> dict[str, Any]:
-    """Contained decorator invocation (spec §10.1). The decorator RETURNS the ext
+    """Contained case_ext_status_info invocation (spec §10.1). The hook RETURNS the ext
     dict (None/{} means "nothing to add"). An exception, a non-dict return, or an
     unserializable ext logs a throttled warning and yields a vanilla ``{}`` — the
-    publish never fails and the beat never stalls because of a decorator."""
-    if decorator is None:
-        return {}
+    publish never fails and the beat never stalls because of a subclass hook."""
     warned = warned_case_ids if warned_case_ids is not None else set()
     try:
-        returned = decorator(case, MappingProxyType(standard))
+        returned = case.case_ext_status_info()
         if returned is None:
             returned = {}
         if not isinstance(returned, dict):
             raise TypeError(
-                f"fleet_status_decorator must return dict | None, got {type(returned).__name__}"
+                f"case_ext_status_info must return dict | None, got {type(returned).__name__}"
             )
         ext = dict(sorted(returned.items()))
         json.dumps(ext)  # serializability gate, before the board render
@@ -213,7 +203,7 @@ def _run_decorator(
         if case.case_id not in warned:
             warned.add(case.case_id)
             logger.warning(
-                "fleet_status_decorator failed for case %s; publishing vanilla row",
+                "case_ext_status_info failed for case %s; publishing vanilla row",
                 case.case_id,
                 exc_info=True,
             )
@@ -327,18 +317,16 @@ class FleetStatusBoardWriter:
         *,
         full_flush_interval_secs: float,
         terminal_retention_secs: float,
-        decorator: FleetStatusDecorator | None = None,
     ) -> None:
         self._board_path = manager_dir / FLEET_STATUS_FILENAME
         self._full_flush_interval_secs = full_flush_interval_secs
         self._terminal_retention_secs = terminal_retention_secs
-        self._decorator = decorator
         self._last_full_flush_monotonic: float | None = None
         self._last_hash: str | None = None
         self._last_rows: dict[str, dict[str, Any]] = {}
         # case_id → (frozen row, terminal_at) for the retention window
         self._retained: dict[str, tuple[dict[str, Any], datetime.datetime]] = {}
-        self._decorator_warned: set[str] = set()
+        self._ext_status_warned: set[str] = set()
         self._seeded = False
 
     @property
@@ -364,7 +352,7 @@ class FleetStatusBoardWriter:
             self._seed_from_disk()
         try:
             row = build_live_row(
-                case, decorator=self._decorator, warned_case_ids=self._decorator_warned
+                case, warned_case_ids=self._ext_status_warned
             )
         except Exception:
             logger.warning(
@@ -411,7 +399,7 @@ class FleetStatusBoardWriter:
         for case in live_cases:
             try:
                 row = build_live_row(
-                    case, decorator=self._decorator, warned_case_ids=self._decorator_warned
+                    case, warned_case_ids=self._ext_status_warned
                 )
             except Exception:
                 logger.warning(

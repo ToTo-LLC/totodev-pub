@@ -133,7 +133,6 @@ class CaseManager:
                 self._manager_dir,
                 full_flush_interval_secs=self._policy.fleet_status_full_flush_interval_secs,
                 terminal_retention_secs=self._policy.fleet_status_terminal_retention_secs,
-                decorator=config.fleet_status_decorator,
             )
 
     # ------------------------------------------------------------------
@@ -201,7 +200,6 @@ class CaseManager:
             registry=wiring.get("registry"),
             register_types=wiring.get("register_types") or (),
             cache_override=wiring.get("cache"),
-            fleet_status_decorator=wiring.get("fleet_status_decorator"),
         )
         manager = cls(config, driver=config.driver, cache=config.cache_override)
         manager._log_startup_summary()

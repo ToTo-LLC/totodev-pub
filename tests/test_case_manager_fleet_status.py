@@ -1,6 +1,6 @@
 # Part of the totodev_pub library.
 
-"""Fleet status board: writer, rows, decorator, retention (Fleet Status Board Spec)."""
+"""Fleet status board: writer, rows, case_ext_status_info, retention (Fleet Status Board Spec)."""
 
 import asyncio
 import json
@@ -19,6 +19,7 @@ from totodev_pub.case_manager_support.constants import (
     FLEET_BOARD_DISABLED_PREFIX,
     FLEET_STATUS_FILENAME,
 )
+from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
 from totodev_pub.case_manager_support.fleet_status import (
     FleetStatusBoardWriter,
@@ -133,52 +134,46 @@ def test_parse_board_last_wins_and_skips_malformed():
 
 
 # ---------------------------------------------------------------------------
-# Decorator (visitor) behavior
+# case_ext_status_info hook behavior
 # ---------------------------------------------------------------------------
 
 
-def test_decorator_populates_ext_and_cannot_touch_standard(tmp_path):
-    seen = {}
-
-    def decorator(case, standard):
-        seen["standard_is_readonly"] = False
-        try:
-            standard["case_id"] = "hacked"
-        except TypeError:
-            seen["standard_is_readonly"] = True
-        return {"nickname": "web-friendly", "state_echo": standard["case_state"]}
-
+def test_case_ext_status_info_populates_ext(tmp_path):
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
-    row = build_live_row(case, decorator=decorator)
+    case.case_ext_status_info = lambda: {
+        "nickname": "web-friendly",
+        "state_echo": case.case_state,
+    }
+    row = build_live_row(case)
     case.case_detach()
     assert row["ext"] == {"nickname": "web-friendly", "state_echo": row["case_state"]}
-    assert row["case_id"] != "hacked"
-    assert seen["standard_is_readonly"] is True
 
 
-def test_decorator_none_return_means_vanilla(tmp_path):
-    def quiet(case, standard):
-        return None  # bare `return` — the natural "nothing to add"
-
+def test_case_ext_status_info_none_return_means_vanilla(tmp_path):
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
-    assert build_live_row(case, decorator=quiet)["ext"] == {}
+    case.case_ext_status_info = lambda: None
+    assert build_live_row(case)["ext"] == {}
     case.case_detach()
 
 
-def test_decorator_failure_yields_vanilla_row(tmp_path):
-    def broken(case, standard):
+def test_case_ext_status_info_failure_yields_vanilla_row(tmp_path):
+    case = TicketCase.create_case_in_folder(tmp_path / "c1")
+
+    def broken():
         raise RuntimeError("boom")
 
-    def unserializable(case, standard):
+    def unserializable():
         return {"obj": object()}
 
-    def wrong_type(case, standard):
+    def wrong_type():
         return ["not", "a", "dict"]
 
-    case = TicketCase.create_case_in_folder(tmp_path / "c1")
-    assert build_live_row(case, decorator=broken)["ext"] == {}
-    assert build_live_row(case, decorator=unserializable)["ext"] == {}
-    assert build_live_row(case, decorator=wrong_type)["ext"] == {}
+    case.case_ext_status_info = broken
+    assert build_live_row(case)["ext"] == {}
+    case.case_ext_status_info = unserializable
+    assert build_live_row(case)["ext"] == {}
+    case.case_ext_status_info = wrong_type
+    assert build_live_row(case)["ext"] == {}
     case.case_detach()
 
 
@@ -341,14 +336,21 @@ async def test_unchanged_fleet_skips_republish(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_manager_decorator_wiring(tmp_path):
-    def decorator(case, standard):
-        return {"from_decorator": case.case_id.upper()}
+async def test_manager_case_ext_status_info_wiring(tmp_path):
+    class ExtStatusCase(ManualCase):
+        def case_ext_status_info(self):
+            return {"from_hook": self.case_id.upper()}
 
-    manager = provision_fleet_manager(tmp_path, fleet_status_decorator=decorator)
+    manager = CaseManager.open(
+        tmp_path / "cache",
+        register_types=[TicketCase, TerminalCase, ManualCase, ExtStatusCase],
+        enable_fleet_status_board=True,
+        fleet_status_full_flush_interval_secs=0.0,
+        maintenance_interval_secs=0.01,
+    )
     staging = tmp_path / "staging"
     staging.mkdir()
-    seed_detached_case(ManualCase, staging / "c1")
+    seed_detached_case(ExtStatusCase, staging / "c1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
     await manager.start()
@@ -356,7 +358,7 @@ async def test_manager_decorator_wiring(tmp_path):
         def decorated():
             rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
             row = rows.get(case.case_id)
-            return row is not None and row.ext.get("from_decorator") == case.case_id.upper()
+            return row is not None and row.ext.get("from_hook") == case.case_id.upper()
         assert await wait_for(decorated)
     finally:
         await manager.stop()

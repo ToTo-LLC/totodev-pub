@@ -89,6 +89,7 @@ import weakref
 from abc import ABC
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME, LEASE_NAME, EVENTS_DIR_NAME, ASSETS_DIR_NAME, KEEP_LIST_NAME,
@@ -953,6 +954,31 @@ class FolderBackedCase(ABC):
         ``case_assets.add_keep_rules()`` for assets. Default: no-op. Heavy async work
         belongs in an async ``before_`` hook on the terminating transition; this hook is
         synchronous."""
+
+    def case_ext_status_info(self) -> dict[str, Any]:
+        """Overridable hook: extra fields this case wants attached to its fleet-board
+        row's "ext". Default: no-op (empty dict).
+
+        Quick use:
+          Override to surface transient, in-memory progress from inside a running step —
+          e.g. read an attribute a perform_* trigger updates as it works, and return it
+          here. Typically only meaningful while the case is sitting in one particular
+          state; return {} the rest of the time.
+
+          Must return a JSON-serializable dict[str, Any]. Any exception, non-dict
+          return, or unserializable value is logged (throttled per case) and treated
+          as {} — the board only degrades, it never fails or stalls the beat because
+          of this hook.
+
+        Advanced:
+          Keep this FAST and CHEAP — it may be called on every row build (as often as
+          once per maintenance tick), so never touch disk, never block, never await.
+          It may also be called WHILE a perform_* trigger for this case is actively
+          running (the fleet writer runs outside the trigger's own execution), so
+          reading a value mid-update is expected and fine: this hook has no
+          consistency guarantee relative to an in-flight trigger, and generally
+          shouldn't need one for a best-effort progress signal like this."""
+        return {}
 
     @classmethod
     def generate_case_id(cls) -> str:

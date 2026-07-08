@@ -141,12 +141,9 @@ folder — event log, lease, maybe an asset file — over and over just to rende
 Instead, the case-manager process itself, which is already building this row on every publish,
 can attach it once and let it ride along in the one file the client already reads.
 
-The attachment point is a `fleet_status_decorator` — a plain function, configured on
-`CaseManager`, called once per row as it's built:
-
-```python
-FleetStatusDecorator = Callable[[FolderBackedCase, Mapping[str, Any]], dict | None]
-```
+The attachment point is `case_ext_status_info()` — an overridable instance method on
+`FolderBackedCase`, called once per row as the manager builds it. Each case type decides what
+belongs in its own `ext`; no manager-level wiring required.
 
 Take `ocr_attachments` from `InquiryCase` (tutorial #1 §5): several documents, processed one at a
 time, taking anywhere from seconds to a couple of minutes. Nobody needs this progress persisted —
@@ -154,45 +151,32 @@ it's meaningless the moment the step finishes — so the hook just keeps it as a
 attribute on the case object, never touching disk for it:
 
 ```python
-async def perform_ocr_attachments(self, tctx):
-    docs = self.case_assets.list_assets()          # e.g. 2 attachments
-    for i, name in enumerate(docs, start=1):
-        self._ocr_current_file = name
-        await self.case_run_blocking(ocr_one_document, name)   # the actual slow work
-        self._ocr_progress = (i, len(docs))         # in-memory only — no file write per document
-    self._ocr_progress = None
-    self._ocr_current_file = None
+class InquiryCase(FolderBackedCase):
+    ...
+    async def perform_ocr_attachments(self, tctx):
+        docs = self.case_assets.list_assets()          # e.g. 2 attachments
+        for i, name in enumerate(docs, start=1):
+            self._ocr_current_file = name
+            await self.case_run_blocking(ocr_one_document, name)   # the actual slow work
+            self._ocr_progress = (i, len(docs))         # in-memory only — no file write per document
+        self._ocr_progress = None
+        self._ocr_current_file = None
+
+    def case_ext_status_info(self) -> dict[str, Any]:
+        progress = getattr(self, "_ocr_progress", None)
+        if progress is None:
+            return {}
+        processed, total = progress
+        return {
+            "completion_percent": int(100 * processed / total),   # e.g. 1 of 2 docs -> 50
+            "current_file": self._ocr_current_file,
+        }
+
+manager = CaseManager.open("/data/inquiries", register_types=[InquiryCase])
 ```
 
-The decorator reads that same in-memory state when the manager happens to be building this
-case's row, and returns `None` the rest of the time — so `ext` is simply absent outside the one
-step it's relevant to:
-
-```python
-def inquiry_fleet_decorator(case: FolderBackedCase, standard: Mapping[str, Any]) -> dict | None:
-    if standard.get("active_transition") != "ocr_attachments":
-        return None                                  # not OCR-ing right now: say nothing
-    progress = getattr(case, "_ocr_progress", None)
-    if progress is None:
-        return None
-    processed, total = progress
-    return {
-        "completion_percent": int(100 * processed / total),   # e.g. 1 of 2 docs -> 50
-        "current_file": case._ocr_current_file,
-    }
-
-manager = CaseManager.open(
-    "/data/inquiries",
-    register_types=[InquiryCase],
-    fleet_status_decorator=inquiry_fleet_decorator,
-)
-```
-
-`standard` is the row's already-computed standard fields (a read-only mapping) — checking
-`active_transition` there, rather than `case_state`, is what makes this correct: `case_state`
-stays `"received"` for the whole `ocr_attachments` step (it only changes to `digitized` once the
-step completes), so `active_transition` is the only field that actually distinguishes "OCR
-running" from "just sitting in `received`." From the web tier, this is just more fields on a row
+`_ocr_progress` being non-`None` already captures "mid-step right now" — no need to cross-check
+`active_transition` or `case_state`. From the web tier, this is just more fields on a row
 you're already reading:
 
 ```python
@@ -580,8 +564,10 @@ the dead-lettering — exists precisely so that this list could stay this short.
 - `totodev_pub/case_manager_client.py` — the complete web-tier surface; every method in this
   tutorial is a thin wrapper documented there.
 - `totodev_pub/case_manager_support/fleet_status.py` and `fleet_status_watcher.py` — the board's
-  on-disk format (`FleetStatusRow`), the `FleetStatusDecorator` hook behind `ext` (§2), and the
-  poll-and-diff watcher (`FleetEventKind`).
+  on-disk format (`FleetStatusRow`), the poll-and-diff watcher (`FleetEventKind`), and how rows
+  are built.
+- `totodev_pub/folder_backed_case.py` — `case_ext_status_info()` (§2), the per-case hook that
+  populates a row's `ext` dict.
 - `totodev_pub/folder_backed_case_reader.py` — the full read-only surface, including
   `case_active_trigger` and the asset-trust boundary (`case_load_dataclass`).
 - `totodev_pub/folder_backed_case_support/asset_dataclass_registry.py` — the opt-in typed-read
