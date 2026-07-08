@@ -22,6 +22,7 @@ class ManifestPaths(BaseModel):
     termination_pending: str
     eject_pending: str
     staging: str
+    fleet_status_board: Optional[str] = None
 
 
 class CaseManagerManifest(BaseModel, FileMappedPydanticMixin):

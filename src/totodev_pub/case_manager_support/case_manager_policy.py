@@ -61,6 +61,9 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     escalation_blocked: bool = False
     journal_attach_steady_state: bool = False
     journal_path: Optional[str] = None
+    enable_fleet_status_board: bool = False
+    fleet_status_refresh_interval_secs: float = 1.0
+    fleet_status_terminal_retention_secs: float = 120.0
 
     @classmethod
     def tier1_field_names(cls) -> frozenset[str]:
@@ -99,6 +102,9 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "escalation_blocked",
             "journal_attach_steady_state",
             "journal_path",
+            "enable_fleet_status_board",
+            "fleet_status_refresh_interval_secs",
+            "fleet_status_terminal_retention_secs",
         })
 
     def apply_tier2_overrides(self, **overrides: Any) -> "CaseManagerPolicy":

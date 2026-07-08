@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from totodev_pub.case_manager_support.case_manager_manifest import CaseManagerManifest
-from totodev_pub.case_manager_support.constants import MANIFEST_FILENAME
+from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME, MANIFEST_FILENAME
 from totodev_pub.case_manager_support.exceptions import ManagerNotFreshError
+from totodev_pub.case_manager_support.fleet_status import FleetStatusRow, read_board
+from totodev_pub.case_manager_support.fleet_watcher import FleetBoardWatcher
 from totodev_pub.case_manager_support.layout import CaseLocation, policy_manager_dir
 from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor, RequestHandle
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
@@ -105,6 +107,35 @@ class CaseManagerClient:
 
     async def wait_result(self, handle: RequestHandle, *, timeout: float = 30.0):
         return await self._mailbox.wait_result(handle, timeout=timeout)
+
+    def fleet_status_board_path(self) -> Path:
+        """The board's known location (manifest-advertised when available)."""
+        try:
+            manifest = self._manifest()
+            if manifest.paths.fleet_status_board:
+                return self._cache_root / manifest.paths.fleet_status_board
+        except Exception:
+            pass  # no/old manifest — the board location is fixed by policy anyway
+        return (
+            policy_manager_dir(self._cache_root, self._manager._policy)
+            / FLEET_STATUS_FILENAME
+        )
+
+    def read_fleet_status(self, *, only_if_fresh: bool = True) -> dict[str, FleetStatusRow]:
+        """One-file bulk fleet snapshot, last-wins merged by case_id.
+
+        Raises FleetStatusBoardDisabledError when the deployment has the board
+        disabled, and ManagerNotFreshError when only_if_fresh=True and the
+        manager heartbeat is stale/stopped."""
+        self._check_fresh(only_if_fresh)
+        return read_board(self.fleet_status_board_path())
+
+    def fleet_watcher(self, *, emit_initial: bool = False) -> FleetBoardWatcher:
+        """Snapshot-diff change watcher for LONG-LIVED observer processes (the
+        diff baseline lives in watcher memory). Call poll() on your cadence."""
+        return FleetBoardWatcher(
+            self.fleet_status_board_path(), emit_initial=emit_initial
+        )
 
     def submit_adopt(
         self,

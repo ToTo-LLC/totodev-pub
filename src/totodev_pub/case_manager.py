@@ -18,7 +18,11 @@ from totodev_pub.case_manager_support.adopt import AdoptResult, adopt_case_folde
 from totodev_pub.case_manager_support.case_manager_config import CaseManagerConfig
 from totodev_pub.case_manager_support.case_manager_manifest import CaseManagerManifest, ManifestPaths
 from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
-from totodev_pub.case_manager_support.constants import MANIFEST_FILENAME, POLICY_FILENAME
+from totodev_pub.case_manager_support.constants import (
+    FLEET_STATUS_FILENAME,
+    MANIFEST_FILENAME,
+    POLICY_FILENAME,
+)
 from totodev_pub.case_manager_support.eject import (
     EjectResult,
     EjectTicket,
@@ -27,6 +31,10 @@ from totodev_pub.case_manager_support.eject import (
     process_eject_ticket,
 )
 from totodev_pub.case_manager_support.escalation import CaseEscalation, EscalationRegistry
+from totodev_pub.case_manager_support.fleet_status import (
+    FleetStatusBoardWriter,
+    ensure_board_file,
+)
 from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
     CacheRootStateError,
@@ -117,6 +125,14 @@ class CaseManager:
         self._last_maintenance: float = 0.0
         self._recovered = False
         self.last_recover_report: RecoverReport | None = None
+        self._fleet_board: FleetStatusBoardWriter | None = None
+        if self._policy.enable_fleet_status_board:
+            self._fleet_board = FleetStatusBoardWriter(
+                self._manager_dir,
+                refresh_interval_secs=self._policy.fleet_status_refresh_interval_secs,
+                terminal_retention_secs=self._policy.fleet_status_terminal_retention_secs,
+                decorator=config.fleet_status_decorator,
+            )
 
     # ------------------------------------------------------------------
     # Construction: provision / attach / open
@@ -183,6 +199,7 @@ class CaseManager:
             registry=wiring.get("registry"),
             register_types=wiring.get("register_types") or (),
             cache_override=wiring.get("cache"),
+            fleet_status_decorator=wiring.get("fleet_status_decorator"),
         )
         manager = cls(config, driver=config.driver, cache=config.cache_override)
         manager._log_startup_summary()
@@ -272,6 +289,7 @@ class CaseManager:
                 )
         else:
             await self._settle_with_diagnostics()
+        self._refresh_fleet_status_board(force=True)
         self._write_manifest(running=False, stopped=True)
 
     async def _manager_loop(self) -> None:
@@ -319,13 +337,28 @@ class CaseManager:
             self._policy.redundant_purge_aberrant_after_secs is not None
         ):
             await loop.run_in_executor(None, lambda: run_redundant_purge(self._cache, self._policy))
+        self._refresh_fleet_status_board()
         self._write_manifest(running=True)
         self._detect_escalations()
+
+    def _refresh_fleet_status_board(self, *, force: bool = False) -> None:
+        if self._fleet_board is None:
+            return
+        try:
+            self._fleet_board.refresh_if_due(
+                list(self._driver),
+                locate=lambda cid: self.locate(case_id=cid),
+                force=force,
+            )
+        except Exception:
+            logger.warning("fleet status board refresh failed", exc_info=True)
 
     def _reconcile_terminal_in_pool(self) -> int:
         count = 0
         for case in self._driver.terminal_cases():
             if not ticket_exists(self._manager_dir, case.case_id):
+                if self._fleet_board is not None:
+                    self._fleet_board.note_terminal(case)
                 if begin_termination(
                     case,
                     manager_dir=self._manager_dir,
@@ -336,6 +369,8 @@ class CaseManager:
         return count
 
     def _on_terminated_event(self, event: CasePoolEvent) -> None:
+        if self._fleet_board is not None:
+            self._fleet_board.note_terminal(event.case)
         begin_termination(
             event.case,
             manager_dir=self._manager_dir,
@@ -666,6 +701,7 @@ class CaseManager:
             (mgr_dir / policy.fire_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
+        ensure_board_file(mgr_dir, enabled=policy.enable_fleet_status_board)
         live = mgr_dir.parent / policy.live_bucket
         live.mkdir(parents=True, exist_ok=True)
 
@@ -683,6 +719,7 @@ class CaseManager:
             termination_pending=rel(self._manager_dir / "termination" / "pending"),
             eject_pending=rel(self._manager_dir / "eject" / "pending"),
             staging=rel(self._manager_dir / self._policy.staging_subdir),
+            fleet_status_board=rel(self._manager_dir / FLEET_STATUS_FILENAME),
         )
         manifest = CaseManagerManifest(
             cache_root=str(self._cache_root),

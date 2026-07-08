@@ -89,6 +89,17 @@ class DuplicateCaseIdError(Exception):
         self.existing_grouping = existing_grouping
 
 
+class FleetStatusBoardDisabledError(Exception):
+    """The board file holds the disabled sentinel — the feature is off by policy."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The fleet status board is disabled for this deployment. Set "
+            "`enable_fleet_status_board=True` in the CaseManagerPolicy to render "
+            "a summary of cases."
+        )
+
+
 class ManagerNotFreshError(Exception):
     """Manager heartbeat stale or stopped_at set while only_if_fresh=True."""
 

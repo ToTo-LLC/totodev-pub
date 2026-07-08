@@ -23,6 +23,17 @@ DEFAULT_ADOPT_MAILBOX_SUBDIR = "adopt_mailbox"
 POLICY_FILENAME = "case_manager_policy.yaml"
 MANIFEST_FILENAME = "manifest.yaml"
 
+# ---- Fleet status board (Fleet Status Board Spec) ----
+FLEET_BOARD_PROTOCOL_VERSION = 1
+FLEET_STATUS_FILENAME = "fleet_status.jsonl"
+# The board file always exists at its known location; when the feature is off it
+# holds exactly this sentinel comment. Readers detect it by the stable prefix.
+FLEET_BOARD_DISABLED_PREFIX = "# Fleet status board disabled"
+FLEET_BOARD_DISABLED_SENTINEL = (
+    f"{FLEET_BOARD_DISABLED_PREFIX} — use `enable_fleet_status_board` in your "
+    "CaseManagerPolicy to render a summary of cases."
+)
+
 PLACEHOLDER_HEADER = (
     "# CaseManager cache placeholder — do not parse.\n"
     "# Authoritative case data lives in the slave directory (case_record.yaml).\n"

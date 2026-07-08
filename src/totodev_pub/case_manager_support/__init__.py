@@ -8,10 +8,17 @@ from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
     CaseNotFoundError,
     DuplicateCaseIdError,
+    FleetStatusBoardDisabledError,
     LiveCaseNotFoundError,
     ManagerNotFreshError,
     PolicyFileMissingError,
     RecoverRequiredError,
+)
+from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
+from totodev_pub.case_manager_support.fleet_watcher import (
+    FleetBoardWatcher,
+    FleetEvent,
+    FleetEventKind,
 )
 
 __all__ = [
@@ -19,6 +26,11 @@ __all__ = [
     "AmbiguousExternalKeyError",
     "CaseNotFoundError",
     "DuplicateCaseIdError",
+    "FleetStatusBoardDisabledError",
+    "FleetBoardWatcher",
+    "FleetEvent",
+    "FleetEventKind",
+    "FleetStatusRow",
     "LiveCaseNotFoundError",
     "ManagerNotFreshError",
     "PolicyFileMissingError",
