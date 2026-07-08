@@ -17,6 +17,7 @@ from totodev_pub.case_manager_support.constants import (
     DEFAULT_CASE_REF_PATH_TEMPLATE,
     DEFAULT_FIRE_MAILBOX_SUBDIR,
     DEFAULT_GROUPING_PATTERN,
+    DEFAULT_RECLASSIFY_MAILBOX_SUBDIR,
     DEFAULT_LIVE_BUCKET,
     DEFAULT_MANAGER_NAMESPACE,
     DEFAULT_STAGING_SUBDIR,
@@ -41,6 +42,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     adopt_drop_subdir: str = DEFAULT_ADOPT_DROP_SUBDIR
     fire_mailbox_subdir: str = DEFAULT_FIRE_MAILBOX_SUBDIR
     adopt_mailbox_subdir: str = DEFAULT_ADOPT_MAILBOX_SUBDIR
+    reclassify_mailbox_subdir: str = DEFAULT_RECLASSIFY_MAILBOX_SUBDIR
 
     # Tier 2 — operational tunables
     concurrency_ceiling: int = 50
@@ -61,8 +63,8 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     escalation_blocked: bool = False
     journal_attach_steady_state: bool = False
     journal_path: Optional[str] = None
-    enable_fleet_status_board: bool = False
-    fleet_status_refresh_interval_secs: float = 1.0
+    enable_fleet_status_board: bool = True
+    fleet_status_full_flush_interval_secs: float = 1.0
     fleet_status_terminal_retention_secs: float = 120.0
 
     @classmethod
@@ -79,6 +81,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "adopt_drop_subdir",
             "fire_mailbox_subdir",
             "adopt_mailbox_subdir",
+            "reclassify_mailbox_subdir",
         })
 
     @classmethod
@@ -103,7 +106,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "journal_attach_steady_state",
             "journal_path",
             "enable_fleet_status_board",
-            "fleet_status_refresh_interval_secs",
+            "fleet_status_full_flush_interval_secs",
             "fleet_status_terminal_retention_secs",
         })
 

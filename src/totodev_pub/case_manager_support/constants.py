@@ -19,6 +19,7 @@ DEFAULT_STAGING_SUBDIR = "staging"
 DEFAULT_ADOPT_DROP_SUBDIR = "adopt_drop"
 DEFAULT_FIRE_MAILBOX_SUBDIR = "fire_mailbox"
 DEFAULT_ADOPT_MAILBOX_SUBDIR = "adopt_mailbox"
+DEFAULT_RECLASSIFY_MAILBOX_SUBDIR = "reclassify_mailbox"
 
 POLICY_FILENAME = "case_manager_policy.yaml"
 MANIFEST_FILENAME = "manifest.yaml"
@@ -30,8 +31,8 @@ FLEET_STATUS_FILENAME = "fleet_status.jsonl"
 # holds exactly this sentinel comment. Readers detect it by the stable prefix.
 FLEET_BOARD_DISABLED_PREFIX = "# Fleet status board disabled"
 FLEET_BOARD_DISABLED_SENTINEL = (
-    f"{FLEET_BOARD_DISABLED_PREFIX} — use `enable_fleet_status_board` in your "
-    "CaseManagerPolicy to render a summary of cases."
+    f"{FLEET_BOARD_DISABLED_PREFIX} — set `enable_fleet_status_board=False` in "
+    "your CaseManagerPolicy to keep the board off (it is on by default)."
 )
 
 PLACEHOLDER_HEADER = (

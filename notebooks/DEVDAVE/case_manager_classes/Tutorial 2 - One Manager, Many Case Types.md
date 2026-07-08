@@ -305,7 +305,7 @@ is fast and the ingest tier is allowed to spend the LLM call.
 under management — visible on the fleet board, lease-protected, crash-recoverable — from second
 zero, and let the manager's own drive loop run the classification step (throttled by the same
 `llm` choke as everything else). The case then parks at `received`, and a small companion loop
-in the manager process performs the handoff:
+in the manager process performs the handoff with the manager's first-class facility:
 
 ```python
 async def reclassify_parked_inbound(manager: CaseManager) -> None:
@@ -315,20 +315,56 @@ async def reclassify_parked_inbound(manager: CaseManager) -> None:
             continue
         if reader.case_state != "received":
             continue                       # still classifying (or already swapped)
-        live = manager.get_live(reader.case_id)
-        verdict = live.case_load_dataclass("traffic_verdict")
+        verdict = reader.case_load_dataclass("traffic_verdict")
         target = SpamCase if verdict.verdict == "spam" else InquiryCase
-        fresh = live.case_reclassify_to(target)
-        fresh.case_detach()                # hand the folder back to the pool
+        await manager.reclassify_case(case_id=reader.case_id, target_type=target)
 ```
 
-That last line looks strange until you remember the pool's **rehydration tolerance**: a driver
-must tolerate a case that goes stale under it, re-opening the folder by path — *through the
-registry*, which reads the class name from the record. So after the reclassify-and-detach, the
-driver's very next touch of that slot rehydrates it as a `SpamCase` (or `InquiryCase`) and
-simply keeps driving. Our validation run confirms the full sequence inside a live
-`TieredCasePoolDriver`: the slot that admitted an `InboundCase` was, a few beats later, serving
-a terminal `SpamCase` — same folder, same case id, no remove/re-add, no manager restart.
+`reclassify_case` wraps `case_reclassify_to()` with the pool choreography a managed fleet
+needs. It pre-validates the shared-state contract (an incompatible target raises
+`IncompatibleReclassError` before the pool is touched), swaps the identity, and re-admits the
+fresh object on a **new scheduling slot** — and per the driver contract, a freshly admitted
+advanceable case starts **HOT** and is boosted to fire on the very next beat. That is the
+behavior you want after a specialization: whatever automated paths the new class opened up are
+taken immediately, not whenever the old slot's cadence would have come around. If the case
+happens to have a step in flight at that instant, the call raises `CaseInFlightError` and the
+companion loop simply retries next tick (for a case parked at a manual-only state this
+essentially never happens — the driver has nothing to fire).
+
+**Placement C — classify from another process entirely.** If the decision is made in the UI
+tier (say, a human reviews a low-confidence verdict and clicks "it's spam"), the web process
+doesn't need to touch the case at all — it drops a request in the manager's mailbox, exactly
+like firing a manual trigger:
+
+```python
+client = CaseManagerClient(cache_root)
+handle = client.submit_reclassify(case_id=case_id, target_type="SpamCase")
+result = await client.wait_result(handle, timeout=10.0)   # ReclassifyResult
+assert result.status == "completed" and result.to_type == "SpamCase"
+```
+
+`wait_result` is how the client learns of failure: a request the manager processes always resolves to
+a `ReclassifyResult`, `status="completed"` or `status="error"` (with `.error` holding the reason —
+unknown case, unregistered type, incompatible state, whatever). A request malformed enough to fail
+parsing entirely still resolves, since the correlation id lives in the filename independent of the
+body — the mailbox writes an error result for it rather than dropping it silently. Only a manager
+that's stopped or stuck can leave `wait_result` to time out and return `None`; treat that as "unknown,"
+not as an implicit failure, and lean on `only_if_fresh` (default `True`) to reject stale submissions
+before they're even written.
+
+`submit_reclassify` also runs a same-process **preflight** by default (`preflight=True`) — cheap,
+disk-based checks that fail fast, synchronously, before the mailbox is ever touched: is the case
+actually live, and (only if *this* process's registry happens to know the target class too) is the
+current state compatible with it. That parenthetical matters: a web tier that never imports case
+classes will always skip the second check silently and rely on the manager's authoritative one —
+exactly the deployment this section started with. Pass `preflight="strict"` if your client process
+*does* import the full case-type catalog and wants an unresolvable name treated as a bug rather than
+deferred, or `preflight=False` to skip local checks entirely.
+
+The manager process picks the request up on its next maintenance tick, runs the same
+`reclassify_case` path (same validation, same HOT re-admission), and writes a
+`ReclassifyResult` — `completed` with the from/to types and current state, or `error` with the
+reason (unknown case, unregistered type, incompatible state).
 
 From there the standard machinery takes over, per type: the new `SpamCase` terminates on the
 next sweep and archives into its own junk groupings (its `archive_grouping_label()` override
@@ -337,11 +373,12 @@ tutorial #1. The dashboard,
 reading the fleet board, watches a row's `case_type` column change from `InboundCase` to its
 specialization — which is exactly the operational story you want visible.
 
-(One honest caveat for production code: `get_live` hands you the same object the driver is
-scheduling, so a reclassify could collide with a step in flight. For a case parked at a
-manual-only state that is a non-issue in practice — the driver has nothing to fire — but a
-robust companion loop tolerates the occasional `CaseTransitionInFlightError` by just skipping
-and retrying next tick.)
+(A related mechanism worth knowing about even if you rarely need it: drivers also have
+**rehydration tolerance** — if a case object goes stale under a slot, the driver re-opens the
+folder by path *through the registry*, which reads the class name from the record. So even a
+bare `case_reclassify_to()` + `case_detach()` done behind the driver's back is eventually
+tolerated; the slot just keeps its old tier and cadence. `reclassify_case` is preferred
+precisely because it doesn't rely on that safety net and gets the HOT re-admission.)
 
 ---
 
@@ -384,3 +421,5 @@ every one of them to its own version of done.
   "rehydration tolerance," is the mechanism behind the in-pool swap.
 - `tests/test_folder_backed_case.py` — the reclassification type-gate under test
   (`test_reclassify_to_succeeds_through_type_gate`).
+- `tests/test_case_manager_reclassify.py` — `CaseManager.reclassify_case` and the
+  `ReclassifyRequest` mailbox round-trip (HOT re-admission, error results, the works).

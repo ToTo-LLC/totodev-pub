@@ -259,7 +259,7 @@ def write_disabled_sentinel(path: Path) -> None:
 def ensure_board_file(manager_dir: Path, *, enabled: bool) -> None:
     """Keep the board at its known location in the state the policy calls for
     (spec §3). Disabled → sentinel comment; enabled → an empty board appears if
-    nothing is there yet (the refresh loop takes over from there)."""
+    nothing is there yet (the writer's notify / publish_full path takes over)."""
     path = manager_dir / FLEET_STATUS_FILENAME
     first_line = ""
     if path.exists():
@@ -270,6 +270,15 @@ def ensure_board_file(manager_dir: Path, *, enabled: bool) -> None:
         publish_board(path, "")
     elif not enabled and (not path.exists() or not is_sentinel):
         write_disabled_sentinel(path)
+
+
+def append_board_row(path: Path, row: dict[str, Any]) -> None:
+    """Append one deterministic JSONL row (last-wins with prior lines)."""
+    ordered = {key: row.get(key) for key in ROW_FIELD_ORDER}
+    ordered["ext"] = dict(sorted((ordered.get("ext") or {}).items()))
+    line = json.dumps(ordered, separators=(",", ":"), ensure_ascii=False) + "\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line)
 
 
 def parse_board_text(text: str) -> dict[str, FleetStatusRow]:
@@ -299,23 +308,32 @@ def read_board(path: Path) -> dict[str, FleetStatusRow]:
 
 
 class FleetStatusBoardWriter:
-    """Manager-side board maintainer (spec §7, §8): builds live rows each refresh,
-    retains recently-terminal rows frozen, and publishes atomically — skipping the
-    write entirely when the rendered body hash is unchanged."""
+    """Sole editor of one fleet status board file.
+
+    Callers (typically CaseManager) only *notify*; this writer decides whether to
+    skip, append one JSONL row, or atomically rewrite the whole board. It assumes
+    exclusive ownership of the board path — concurrent writers are unsupported.
+
+    - ``notify(case)`` builds a row and, when the logical row changed (or
+      ``force=True``), either appends or full-flushes based on
+      ``full_flush_interval_secs`` since the last full publish.
+    - ``publish_full(...)`` rebuilds from the live pool + retained terminals and
+      publishes atomically, skipping the write when the body hash is unchanged.
+    """
 
     def __init__(
         self,
         manager_dir: Path,
         *,
-        refresh_interval_secs: float,
+        full_flush_interval_secs: float,
         terminal_retention_secs: float,
         decorator: FleetStatusDecorator | None = None,
     ) -> None:
         self._board_path = manager_dir / FLEET_STATUS_FILENAME
-        self._refresh_interval_secs = refresh_interval_secs
+        self._full_flush_interval_secs = full_flush_interval_secs
         self._terminal_retention_secs = terminal_retention_secs
         self._decorator = decorator
-        self._last_refresh_monotonic: float | None = None
+        self._last_full_flush_monotonic: float | None = None
         self._last_hash: str | None = None
         self._last_rows: dict[str, dict[str, Any]] = {}
         # case_id → (frozen row, terminal_at) for the retention window
@@ -327,30 +345,66 @@ class FleetStatusBoardWriter:
     def board_path(self) -> Path:
         return self._board_path
 
-    def refresh_if_due(
+    def notify(
         self,
-        live_cases: Iterable[FolderBackedCase],
+        case: FolderBackedCase,
         *,
-        locate: Callable[[str], Any],
         force: bool = False,
+        live_cases: Iterable[FolderBackedCase] | None = None,
+        locate: Callable[[str], Any] | None = None,
     ) -> bool:
-        now = time.monotonic()
-        if (
-            not force
-            and self._last_refresh_monotonic is not None
-            and (now - self._last_refresh_monotonic) < self._refresh_interval_secs
-        ):
-            return False
-        self._last_refresh_monotonic = now
-        return self.refresh(live_cases, locate=locate)
+        """Notify that ``case`` may have a new status row.
 
-    def refresh(
+        Returns True when the board file was written (append or full flush).
+        Unchanged rows are skipped silently unless ``force=True``.
+        When a write is due and the full-flush interval has elapsed, performs
+        ``publish_full`` (requires ``live_cases`` / ``locate``); otherwise appends.
+        """
+        if not self._seeded:
+            self._seed_from_disk()
+        try:
+            row = build_live_row(
+                case, decorator=self._decorator, warned_case_ids=self._decorator_warned
+            )
+        except Exception:
+            logger.warning(
+                "fleet board: failed to build row for case %s; skipping notify",
+                getattr(case, "case_id", "?"),
+                exc_info=True,
+            )
+            return False
+
+        prior = self._last_rows.get(row["case_id"])
+        if not force and prior is not None and prior == row:
+            return False
+
+        now = time.monotonic()
+        due_for_full = (
+            self._last_full_flush_monotonic is None
+            or (now - self._last_full_flush_monotonic) >= self._full_flush_interval_secs
+        )
+        if due_for_full and live_cases is not None and locate is not None:
+            # Fold this row into memory first so publish_full sees the fresh facts
+            # even if rebuilding the same case from the pool races with detach.
+            self._last_rows[row["case_id"]] = row
+            if row.get("is_terminal"):
+                self.note_terminal(case)
+            return self.publish_full(live_cases, locate=locate)
+
+        self._last_rows[row["case_id"]] = row
+        if row.get("is_terminal"):
+            self.note_terminal(case)
+        append_board_row(self._board_path, row)
+        self._recompute_hash_from_memory()
+        return True
+
+    def publish_full(
         self,
         live_cases: Iterable[FolderBackedCase],
         *,
         locate: Callable[[str], Any],
     ) -> bool:
-        """Rebuild + publish. Returns True when a new board was written."""
+        """Rebuild + publish the whole board. Returns True when a new file was written."""
         if not self._seeded:
             self._seed_from_disk()
         rows: dict[str, dict[str, Any]] = {}
@@ -378,17 +432,36 @@ class FleetStatusBoardWriter:
         self._last_rows = rows
         body = render_board_body(rows.values())
         digest = board_body_hash(body)
+        self._last_full_flush_monotonic = time.monotonic()
         if digest == self._last_hash:
             return False
         publish_board(self._board_path, body)
         self._last_hash = digest
         return True
 
+    def publish_full_if_due(
+        self,
+        live_cases: Iterable[FolderBackedCase],
+        *,
+        locate: Callable[[str], Any],
+        force: bool = False,
+    ) -> bool:
+        """Full rebuild when ``force`` or the flush interval since the last full publish."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_full_flush_monotonic is not None
+            and (now - self._last_full_flush_monotonic) < self._full_flush_interval_secs
+        ):
+            return False
+        return self.publish_full(live_cases, locate=locate)
+
     def note_terminal(self, case: FolderBackedCase) -> None:
-        """Manager hook: a case is leaving the pool via termination. Captures the
-        retained frozen row now — a fast auto-terminating case may never have
-        appeared on the board as live, so departure diffing alone is not enough.
-        Called before the termination pipeline moves the folder."""
+        """Capture a frozen retained row as a case leaves via termination.
+
+        Called before the termination pipeline moves the folder. A fast
+        auto-terminating case may never have appeared on the board as live.
+        """
         case_id = case.case_id
         prior = self._last_rows.get(case_id)
         row: dict[str, Any] = {
@@ -409,11 +482,15 @@ class FleetStatusBoardWriter:
         row["is_terminal"] = True
         if row.get("terminal_at") is None:
             row["terminal_at"] = _iso_utc(terminal_at)
-        self._retained[case_id] = (
-            {key: row.get(key) for key in ROW_FIELD_ORDER}, terminal_at
-        )
+        frozen = {key: row.get(key) for key in ROW_FIELD_ORDER}
+        self._retained[case_id] = (frozen, terminal_at)
+        self._last_rows[case_id] = frozen
 
     # ------------------------------------------------------------------
+
+    def _recompute_hash_from_memory(self) -> None:
+        body = render_board_body(self._last_rows.values())
+        self._last_hash = board_body_hash(body)
 
     def _seed_from_disk(self) -> None:
         """Carry 'just finished' rows across a manager restart when possible."""
@@ -431,6 +508,7 @@ class FleetStatusBoardWriter:
             if row_model.is_terminal:
                 terminal_at = parse_iso_utc(row_model.terminal_at) or now
                 self._retained[case_id] = (row, terminal_at)
+        self._recompute_hash_from_memory()
 
     def _absorb_departures(self, pool_ids: set[str], locate: Callable[[str], Any]) -> None:
         """Cases on the last board but no longer in the pool: terminal → retained

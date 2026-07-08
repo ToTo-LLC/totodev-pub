@@ -21,6 +21,7 @@ from totodev_pub.case_manager_support.constants import (
 )
 from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
 from totodev_pub.case_manager_support.fleet_status import (
+    FleetStatusBoardWriter,
     build_live_row,
     collect_case_status_facts,
     parse_board_text,
@@ -36,7 +37,7 @@ def provision_fleet_manager(tmp_path, **overrides):
     return provision_manager(
         tmp_path,
         enable_fleet_status_board=True,
-        fleet_status_refresh_interval_secs=0.0,
+        fleet_status_full_flush_interval_secs=0.0,
         **overrides,
     )
 
@@ -55,7 +56,7 @@ async def wait_for(predicate, *, timeout=3.0):
 
 
 def test_disabled_board_holds_sentinel(tmp_path):
-    manager = provision_manager(tmp_path)  # board not enabled
+    manager = provision_manager(tmp_path, enable_fleet_status_board=False)
     path = board_path(manager)
     assert path.exists()
     first = path.read_text(encoding="utf-8").splitlines()[0]
@@ -178,6 +179,75 @@ def test_decorator_failure_yields_vanilla_row(tmp_path):
     assert build_live_row(case, decorator=broken)["ext"] == {}
     assert build_live_row(case, decorator=unserializable)["ext"] == {}
     assert build_live_row(case, decorator=wrong_type)["ext"] == {}
+    case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# Writer notify: skip-if-unchanged, append, full flush
+# ---------------------------------------------------------------------------
+
+
+def _jsonl_data_lines(path):
+    return [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+
+def test_notify_skips_unchanged_row_unless_forced(tmp_path):
+    mgr_dir = tmp_path / "mgr"
+    mgr_dir.mkdir()
+    writer = FleetStatusBoardWriter(
+        mgr_dir, full_flush_interval_secs=999.0, terminal_retention_secs=120.0
+    )
+    case = TicketCase.create_case_in_folder(tmp_path / "c1")
+    assert writer.notify(case) is True  # first sighting
+    mtime1 = writer.board_path.stat().st_mtime_ns
+    size1 = writer.board_path.stat().st_size
+    assert writer.notify(case) is False  # unchanged → silent skip
+    assert writer.board_path.stat().st_mtime_ns == mtime1
+    assert writer.board_path.stat().st_size == size1
+    assert writer.notify(case, force=True) is True
+    assert writer.board_path.stat().st_mtime_ns != mtime1
+    case.case_detach()
+
+
+def test_notify_appends_changed_row_last_wins(tmp_path):
+    mgr_dir = tmp_path / "mgr"
+    mgr_dir.mkdir()
+    writer = FleetStatusBoardWriter(
+        mgr_dir, full_flush_interval_secs=999.0, terminal_retention_secs=120.0
+    )
+    case = TicketCase.create_case_in_folder(tmp_path / "c1")
+    assert writer.notify(case) is True
+    case.case_log_alert("ping")
+    assert writer.notify(case) is True
+    lines = _jsonl_data_lines(writer.board_path)
+    assert len(lines) == 2  # two appends, not compacted
+    merged = parse_board_text(writer.board_path.read_text(encoding="utf-8"))
+    assert merged[case.case_id].alert_count == 1
+    case.case_detach()
+
+
+def test_notify_full_flushes_when_interval_elapsed(tmp_path):
+    mgr_dir = tmp_path / "mgr"
+    mgr_dir.mkdir()
+    writer = FleetStatusBoardWriter(
+        mgr_dir, full_flush_interval_secs=0.0, terminal_retention_secs=120.0
+    )
+    case = TicketCase.create_case_in_folder(tmp_path / "c1")
+    assert writer.notify(case) is True
+    case.case_log_alert("one")
+    assert writer.notify(
+        case,
+        live_cases=[case],
+        locate=lambda _cid: None,
+    ) is True
+    lines = _jsonl_data_lines(writer.board_path)
+    assert len(lines) == 1  # compacted full rewrite
+    merged = parse_board_text(writer.board_path.read_text(encoding="utf-8"))
+    assert merged[case.case_id].alert_count == 1
     case.case_detach()
 
 

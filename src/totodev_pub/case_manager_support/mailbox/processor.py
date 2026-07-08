@@ -46,6 +46,39 @@ class AdoptRequest(BaseModel, FileMappedPydanticMixin):
     expected_case_id: str | None = None
 
 
+class ReclassifyRequest(BaseModel, FileMappedPydanticMixin):
+    """Ask the manager to switch a live pooled case to a different registered case type
+    (``FolderBackedCase.case_reclassify_to`` executed inside the manager process).
+
+    Addressing mirrors ``FireRequest``: exactly one of ``case_id`` / ``case_folder``.
+    ``target_type`` is the bare registered class name (``case_object_type`` vocabulary) —
+    class objects cannot travel through a file protocol."""
+
+    protocol_version: int = MAILBOX_PROTOCOL_VERSION
+    correlation_id: str
+    requested_at: str
+    case_id: str | None = None
+    case_folder: str | None = None
+    target_type: str = ""
+
+
+class ReclassifyResult(BaseModel, FileMappedPydanticMixin):
+    """Result file for a ReclassifyRequest. ``kind`` is the stable discriminator
+    ``poll_result`` keys on to tell this apart from fire/adopt results."""
+
+    kind: Literal["reclassify"] = "reclassify"
+    status: Literal["completed", "error"]
+    correlation_id: str
+    case_id: str | None = None
+    from_type: str | None = None
+    to_type: str | None = None
+    case_state: str | None = None
+    error: str | None = None
+    completed_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+
 @dataclass(frozen=True)
 class RequestHandle:
     correlation_id: str
@@ -73,12 +106,18 @@ class MailboxProcessor:
     def adopt_intake(self) -> Path:
         return self._mgr_dir / self._policy.adopt_mailbox_subdir / "intake"
 
+    def reclassify_intake(self) -> Path:
+        return self._mgr_dir / self._policy.reclassify_mailbox_subdir / "intake"
+
     def _ensure_dirs(self) -> None:
         for p in (
             self.fire_intake(),
             self._mgr_dir / self._policy.fire_mailbox_subdir / "malformed",
             self._mgr_dir / self._policy.adopt_mailbox_subdir / "pending",
             self.adopt_intake(),
+            self.reclassify_intake(),
+            self._mgr_dir / self._policy.reclassify_mailbox_subdir / "malformed",
+            self._mgr_dir / self._policy.reclassify_mailbox_subdir / "executing",
             self.results_dir(),
         ):
             p.mkdir(parents=True, exist_ok=True)
@@ -129,9 +168,39 @@ class MailboxProcessor:
         os.replace(tmp, final)
         return RequestHandle(corr, self.results_dir() / f"{corr}.yaml")
 
-    def poll_result(self, handle: RequestHandle) -> AdvanceResultSerializable | AdoptResult | None:
+    def submit_reclassify(
+        self,
+        *,
+        case_id: str | None = None,
+        case_folder: Path | None = None,
+        target_type: str,
+        correlation_id: str | None = None,
+    ) -> RequestHandle:
+        self._ensure_dirs()
+        corr = correlation_id or str(uuid.uuid4())
+        req = ReclassifyRequest(
+            correlation_id=corr,
+            requested_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            case_id=case_id,
+            case_folder=str(case_folder) if case_folder else None,
+            target_type=target_type,
+        )
+        tmp = self.reclassify_intake() / f".{corr}.yaml"
+        final = self.reclassify_intake() / f"{corr}.yaml"
+        req.save(str(tmp), retain_lock=False)
+        os.replace(tmp, final)
+        return RequestHandle(corr, self.results_dir() / f"{corr}.yaml")
+
+    def poll_result(
+        self, handle: RequestHandle
+    ) -> AdvanceResultSerializable | AdoptResult | ReclassifyResult | None:
         if not handle.result_path.exists():
             return None
+        try:
+            if "kind: reclassify" in handle.result_path.read_text():
+                return ReclassifyResult.load(str(handle.result_path), acquire_lock=False)
+        except Exception:
+            pass
         try:
             if "adopt" in handle.result_path.read_text()[:200].lower() or handle.result_path.read_text().find("source_folder") >= 0:
                 return AdoptResult.load(str(handle.result_path), acquire_lock=False)
@@ -165,6 +234,7 @@ class MailboxProcessor:
             return
         self._ensure_dirs()
         await self._process_fire_intake()
+        await self._process_reclassify_intake()
         await self._process_adopt_intake()
         self._sweep_old_results()
 
@@ -214,6 +284,79 @@ class MailboxProcessor:
                 err.save(str(self.results_dir() / f"{req.correlation_id}.yaml"), retain_lock=False)
                 firing.unlink(missing_ok=True)
 
+    async def _process_reclassify_intake(self) -> None:
+        intake = self.reclassify_intake()
+        for path in sorted(intake.glob("*.yaml")):
+            try:
+                req = ReclassifyRequest.load(str(path), acquire_lock=False)
+            except Exception as exc:
+                malformed = (
+                    self._mgr_dir / self._policy.reclassify_mailbox_subdir / "malformed" / path.name
+                )
+                malformed.parent.mkdir(parents=True, exist_ok=True)
+                path.rename(malformed)
+                # The correlation id is encoded in the filename even when the body fails
+                # to parse — use it so a waiting client gets an error result instead of
+                # silently timing out with no way to distinguish "still pending" from
+                # "dropped."
+                try:
+                    ReclassifyResult(
+                        status="error",
+                        correlation_id=path.stem,
+                        error=f"malformed reclassify request: {exc}",
+                    ).save(
+                        str(self.results_dir() / f"{path.stem}.yaml"), retain_lock=False
+                    )
+                except Exception:
+                    logger.exception(
+                        "_process_reclassify_intake: failed to write malformed-request "
+                        "result for %s", path,
+                    )
+                continue
+            executing_dir = (
+                self._mgr_dir / self._policy.reclassify_mailbox_subdir / "executing"
+                / (req.case_id or "unknown")
+            )
+            executing_dir.mkdir(parents=True, exist_ok=True)
+            executing = executing_dir / path.name
+            os.replace(path, executing)
+            addr: dict[str, Any] = (
+                {"case_id": req.case_id} if req.case_id
+                else {"case_folder": Path(req.case_folder) if req.case_folder else None}
+            )
+            from_type: str | None = None
+            try:
+                from_type = self._manager.reader(**addr).case_object_type
+            except Exception:
+                pass
+            try:
+                fresh = await self._manager.reclassify_case(
+                    case_id=req.case_id,
+                    case_folder=Path(req.case_folder) if req.case_folder else None,
+                    target_type=req.target_type,
+                )
+                result = ReclassifyResult(
+                    status="completed",
+                    correlation_id=req.correlation_id,
+                    case_id=fresh.case_id,
+                    from_type=from_type,
+                    to_type=type(fresh).__name__,
+                    case_state=fresh.case_state,
+                )
+            except Exception as exc:
+                result = ReclassifyResult(
+                    status="error",
+                    correlation_id=req.correlation_id,
+                    case_id=req.case_id,
+                    from_type=from_type,
+                    to_type=req.target_type,
+                    error=str(exc),
+                )
+            result.save(
+                str(self.results_dir() / f"{req.correlation_id}.yaml"), retain_lock=False
+            )
+            executing.unlink(missing_ok=True)
+
     async def _process_adopt_intake(self) -> None:
         intake = self.adopt_intake()
         pending_dir = self._mgr_dir / self._policy.adopt_mailbox_subdir / "pending"
@@ -248,6 +391,34 @@ class MailboxProcessor:
                         exception_messages=("dead-letter: recovered from firing/",),
                     )
                     err.save(str(self.results_dir() / f"{req.correlation_id}.yaml"), retain_lock=False)
+                    path.unlink(missing_ok=True)
+                    count += 1
+                except Exception:
+                    path.unlink(missing_ok=True)
+        return count
+
+    def replay_reclassify_on_recover(self) -> int:
+        """Dead-letter reclassify requests caught mid-execution by a crash. The two-phase
+        commit inside case_reclassify_to() means the case itself is consistent (old or new
+        type, never half); the requester just never got a result, so write an error result
+        telling them to re-check and resubmit if still wanted."""
+        count = 0
+        executing_root = self._mgr_dir / self._policy.reclassify_mailbox_subdir / "executing"
+        if executing_root.exists():
+            for path in executing_root.rglob("*.yaml"):
+                try:
+                    req = ReclassifyRequest.load(str(path), acquire_lock=False)
+                    err = ReclassifyResult(
+                        status="error",
+                        correlation_id=req.correlation_id,
+                        case_id=req.case_id,
+                        to_type=req.target_type,
+                        error="dead-letter: recovered from executing/",
+                    )
+                    err.save(
+                        str(self.results_dir() / f"{req.correlation_id}.yaml"),
+                        retain_lock=False,
+                    )
                     path.unlink(missing_ok=True)
                     count += 1
                 except Exception:

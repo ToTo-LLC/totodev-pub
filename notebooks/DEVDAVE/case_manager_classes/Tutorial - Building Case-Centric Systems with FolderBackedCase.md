@@ -163,22 +163,25 @@ into code almost verbatim.
 ## 4. Declaring the lifecycle: the state-chain DSL
 
 A case type declares its FSM as a list of **chain strings** — a compact, Mermaid-flavoured DSL
-that reads left to right as alternating states and connectors. The diagram above is exactly these
-nine chains:
+that reads left to right as alternating states and connectors. Every chain is complete in
+itself: it starts at a state and ends at a state (`stateA--trigger-->stateB`), optionally
+stringing several connector/state pairs together when that reads well. A state may appear in as
+many chains as needed; the parser merges them all into one graph. The diagram above is exactly
+these chains:
 
 ```python
 fsm_state_chains = [
-    # The automated intake pipeline.
-    "^received--@FAIL<3#ocr_attachments~2m-->digitized"
-    "--detect_sentiment~30s-->assessed"
-    "--analyze_intent~1m-->triaged"
-    "--dispatch-->waiting_for_answers",
+    # The automated intake pipeline, one edge per chain.
+    "^received--@FAIL<3#ocr_attachments~2m-->digitized",
+    "digitized--detect_sentiment~30s-->assessed",
+    "assessed--analyze_intent~1m-->triaged",
+    "triaged--dispatch-->waiting_for_answers",
 
     # Once every issue has an expert answer, draft and hand to a human.
-    "waiting_for_answers--answers_complete#compose_reply~1m-->drafted"
-    "--submit_for_review-->waiting_for_approval",
+    "waiting_for_answers--answers_complete#compose_reply~1m-->drafted",
+    "drafted--submit_for_review-->waiting_for_approval",
 
-    # Human decisions.
+    # Human decisions (a chain may string several edges together).
     "waiting_for_approval==approve-->approved--send_reply~30s-->sent^",
     "waiting_for_approval==reject_draft-->triaged",
 
@@ -192,9 +195,6 @@ fsm_state_chains = [
     "*==cancel-->cancelled^",
 ]
 ```
-
-(The first two entries are single Python strings split across lines by adjacent-literal
-concatenation — one long chain each.)
 
 The grammar, piece by piece:
 
@@ -221,7 +221,7 @@ Two defaults are worth internalizing early because they encode the library's phi
 The chains are parsed and validated **at class-definition time**: misspelled states, unreachable
 states, dead-end non-terminals, and hook methods that match nothing all fail at import, not at
 2 a.m. And because the DSL *is* the lifecycle, a code review of a processing-rule change is a
-review of a ten-line diff a domain expert can read.
+review of a dozen-line diff a domain expert can read.
 
 ---
 
@@ -258,12 +258,12 @@ class InquiryCase(FolderBackedCase):
 
     # 1. The lifecycle (the DSL from §4).
     fsm_state_chains = [
-        "^received--@FAIL<3#ocr_attachments~2m-->digitized"
-        "--detect_sentiment~30s-->assessed"
-        "--analyze_intent~1m-->triaged"
-        "--dispatch-->waiting_for_answers",
-        "waiting_for_answers--answers_complete#compose_reply~1m-->drafted"
-        "--submit_for_review-->waiting_for_approval",
+        "^received--@FAIL<3#ocr_attachments~2m-->digitized",
+        "digitized--detect_sentiment~30s-->assessed",
+        "assessed--analyze_intent~1m-->triaged",
+        "triaged--dispatch-->waiting_for_answers",
+        "waiting_for_answers--answers_complete#compose_reply~1m-->drafted",
+        "drafted--submit_for_review-->waiting_for_approval",
         "waiting_for_approval==approve-->approved--send_reply~30s-->sent^",
         "waiting_for_approval==reject_draft-->triaged",
         "received--@FAIL>=3#refer_out-->needs_attention",
@@ -286,7 +286,7 @@ class InquiryCase(FolderBackedCase):
     # 3. Which capacity-constrained resources each step draws on.
     #    The case only NAMES them; the pool supplies the numeric limits.
     fsm_trigger_chokes = {
-        "ocr_attachments": {"ocr"},
+        "ocr_attachments": {"cpu"}, # on-server processing
         "detect_sentiment": {"llm"},
         "analyze_intent": {"llm"},
         "compose_reply": {"llm"},
@@ -295,7 +295,7 @@ class InquiryCase(FolderBackedCase):
     # ---- Automated work: one `perform_<trigger>` per edge that does something ----
 
     async def perform_ocr_attachments(self, tctx):
-        # Call your OCR service; write extracted text into the asset playground.
+        # Perform OCR extraction; write extracted text into the asset playground.
         self.case_assets.write("attachments/attachment-1.txt", ocr_text)
 
     async def perform_detect_sentiment(self, tctx):
@@ -357,7 +357,7 @@ also available. Every hook is `async` and takes one trigger-context argument (`t
 carries any kwargs the trigger call bundled — so `await case.approve(reviewer="dave")` delivers
 `reviewer` to the hooks via `tctx.kwargs`. A hook name that matches nothing in the DSL is treated
 as a typo and **fails at bind time** — the framework refuses to let a misspelled hook silently
-never run.
+be unreferenced.
 
 **Raising is failing, and failing is data.** If `perform_ocr_attachments` raises, the transition
 fails: the case stays in `received`, the failure is logged to the case's event log with enough
@@ -456,7 +456,7 @@ This folder *is* the runtime answer to the unwritten-requirements list from §1:
 ## 7. Test one case before you build a fleet
 
 Because a case binds to nothing but its folder, the intended workflow is to prove your case type
-correct **in isolation, in pytest**, before any manager exists:
+correct **in isolation, in pytest**, before running it in a pool via a manager:
 
 ```python
 import pytest
@@ -498,8 +498,8 @@ manager = CaseManager.open(
     "/data/inquiries",
     register_types=[InquiryCase],
     concurrency_ceiling=25,          # at most 25 case steps in flight at once
-    choke_limits={"ocr": 2, "llm": 8},   # the numbers behind the case's named chokes
-    enable_fleet_status_board=True,  # the UI tier's cheap bulk overview (§9)
+    choke_limits={"cpu": 2, "llm": 8},   # the numbers behind the case's named chokes
+    # fleet status board is on by default (§9); set enable_fleet_status_board=False to opt out
 )
 await manager.recover()              # reconcile disk state after any prior shutdown/crash
 await manager.start()                # the continuous drive-and-maintain loop
@@ -658,6 +658,6 @@ The source is deliberately documentation-heavy, organized for exactly this journ
 
 The internals are genuinely sophisticated — leases and heartbeats, two-phase termination,
 crash-safe ticketed moves, choke governors, non-reentrant trigger dispatch. The point of this
-branch is that *you shouldn't have to be.* You describe your case's lifecycle in a ten-line DSL,
+branch is that *you shouldn't have to be.* You describe your case's lifecycle in a dozen lines of DSL,
 its data in Pydantic, and its appetites in a dict — and the properties our clients actually need,
 the ones that used to cost weeks of fragile glue, come with the base class.

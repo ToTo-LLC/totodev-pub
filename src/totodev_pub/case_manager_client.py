@@ -7,18 +7,22 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from totodev_pub.case_manager_support.case_manager_manifest import CaseManagerManifest
 from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME, MANIFEST_FILENAME
-from totodev_pub.case_manager_support.exceptions import ManagerNotFreshError
+from totodev_pub.case_manager_support.exceptions import LiveCaseNotFoundError, ManagerNotFreshError
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow, read_board
-from totodev_pub.case_manager_support.fleet_watcher import FleetBoardWatcher
-from totodev_pub.case_manager_support.layout import CaseLocation, policy_manager_dir
+from totodev_pub.case_manager_support.fleet_status_watcher import FleetStatusBoardWatcher
+from totodev_pub.case_manager_support.layout import CaseLocation, live_grouping_key, policy_manager_dir
 from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor, RequestHandle
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.exceptions import (
+    IncompatibleReclassError,
+    UnregisteredCaseTypeError,
+)
 
 
 class CaseManagerClient:
@@ -102,6 +106,84 @@ class CaseManagerClient:
             trigger_kwargs=trigger_kwargs,
         )
 
+    def submit_reclassify(
+        self,
+        *,
+        case_id: str | None = None,
+        case_folder: Path | None = None,
+        target_type: str | type,
+        only_if_fresh: bool = True,
+        preflight: bool | Literal["strict"] = True,
+    ) -> RequestHandle:
+        """Queue a reclassification: switch a live pooled case to a different registered
+        case type (see ``CaseManager.reclassify_case``). ``target_type`` may be a class
+        or its bare registered name; only the name travels through the mailbox. The
+        result (via ``wait_result``/``poll_result``) is a ``ReclassifyResult``.
+
+        ``preflight`` runs the same-process, class-agnostic sanity checks below,
+        synchronously, before the request ever touches the mailbox — so an obviously
+        doomed request fails fast with the exact exception ``CaseManager.reclassify_case``
+        would eventually raise, instead of round-tripping through a maintenance tick just
+        to come back as an error result:
+
+        - ``True`` (default): the case must be live (``LiveCaseNotFoundError`` otherwise).
+          If — and only if — *this* process's case-type registry also knows
+          ``target_type`` (i.e. the case classes were imported/registered here too, not
+          just in the manager process), additionally check the shared-state contract
+          (``IncompatibleReclassError`` otherwise). When the type is unknown to this
+          process's registry that second check is silently skipped: a client tier that
+          never imports case classes (the common two-process split) still gets the free
+          existence check and nothing that requires class knowledge it doesn't have.
+        - ``"strict"``: same, but a ``target_type`` this process's registry can't resolve
+          raises ``UnregisteredCaseTypeError`` here instead of deferring to the manager.
+          Use this only when the client process is known to import the full case-type
+          catalog, so an unresolvable name is almost certainly a typo worth catching
+          immediately rather than a class the client simply hasn't loaded.
+        - ``False``: skip all of the above; submit unconditionally.
+
+        A clean preflight is advisory, not a guarantee — the case can change state or
+        leave the pool in the gap between this check and the manager's next maintenance
+        tick. The manager-side check inside ``reclassify_case`` is authoritative and
+        always runs regardless of this setting."""
+        self._check_fresh(only_if_fresh)
+        name = target_type if isinstance(target_type, str) else target_type.__name__
+        if preflight:
+            self._preflight_reclassify(
+                case_id=case_id,
+                case_folder=case_folder,
+                target_type_name=name,
+                strict=(preflight == "strict"),
+            )
+        return self._mailbox.submit_reclassify(
+            case_id=case_id,
+            case_folder=case_folder,
+            target_type=name,
+        )
+
+    def _preflight_reclassify(
+        self,
+        *,
+        case_id: str | None,
+        case_folder: Path | None,
+        target_type_name: str,
+        strict: bool,
+    ) -> None:
+        # NOTE: check the on-disk grouping, not loc.in_pool — this client attaches its
+        # OWN CaseManager/driver (a separate, unsynced in-memory pool from whatever
+        # process is actually running the fleet), so in_pool would read as False for
+        # every case, always. The live grouping key is a disk fact and needs no driver.
+        loc = self._manager.locate(case_id=case_id, case_folder=case_folder)
+        if loc is None or loc.grouping_key != live_grouping_key(self._manager._policy):
+            raise LiveCaseNotFoundError(case_id or (loc.case_id if loc else str(case_folder)))
+        target_cls = self._manager._registry.resolve_case_type(target_type_name)
+        if target_cls is None:
+            if strict:
+                raise UnregisteredCaseTypeError(target_type_name)
+            return  # unresolvable here; defer to the manager's authoritative check
+        reader = self._manager.reader(case_id=loc.case_id)
+        if reader.case_state not in target_cls.case_type_spec().fsm.states:
+            raise IncompatibleReclassError(reader.case_state, target_cls.__name__)
+
     def poll_result(self, handle: RequestHandle):
         return self._mailbox.poll_result(handle)
 
@@ -130,10 +212,10 @@ class CaseManagerClient:
         self._check_fresh(only_if_fresh)
         return read_board(self.fleet_status_board_path())
 
-    def fleet_watcher(self, *, emit_initial: bool = False) -> FleetBoardWatcher:
+    def fleet_status_watcher(self, *, emit_initial: bool = False) -> FleetStatusBoardWatcher:
         """Snapshot-diff change watcher for LONG-LIVED observer processes (the
         diff baseline lives in watcher memory). Call poll() on your cadence."""
-        return FleetBoardWatcher(
+        return FleetStatusBoardWatcher(
             self.fleet_status_board_path(), emit_initial=emit_initial
         )
 

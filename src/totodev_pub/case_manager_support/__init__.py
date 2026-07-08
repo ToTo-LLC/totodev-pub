@@ -15,8 +15,8 @@ from totodev_pub.case_manager_support.exceptions import (
     RecoverRequiredError,
 )
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
-from totodev_pub.case_manager_support.fleet_watcher import (
-    FleetBoardWatcher,
+from totodev_pub.case_manager_support.fleet_status_watcher import (
+    FleetStatusBoardWatcher,
     FleetEvent,
     FleetEventKind,
 )
@@ -27,7 +27,7 @@ __all__ = [
     "CaseNotFoundError",
     "DuplicateCaseIdError",
     "FleetStatusBoardDisabledError",
-    "FleetBoardWatcher",
+    "FleetStatusBoardWatcher",
     "FleetEvent",
     "FleetEventKind",
     "FleetStatusRow",

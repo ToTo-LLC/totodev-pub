@@ -72,9 +72,10 @@ from totodev_pub.case_manager_support.termination import (
     replay_pending,
     ticket_exists,
 )
-from totodev_pub.folder_backed_case import FolderBackedCase
+from totodev_pub.folder_backed_case import FolderBackedCase, IncompatibleReclassError
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
+from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
 from totodev_pub.folder_backed_case_support.case_pool_driver import (
     CasePoolDriver,
     CasePoolEvent,
@@ -126,10 +127,11 @@ class CaseManager:
         self._recovered = False
         self.last_recover_report: RecoverReport | None = None
         self._fleet_board: FleetStatusBoardWriter | None = None
+        self._fleet_event_handle: Any = None
         if self._policy.enable_fleet_status_board:
             self._fleet_board = FleetStatusBoardWriter(
                 self._manager_dir,
-                refresh_interval_secs=self._policy.fleet_status_refresh_interval_secs,
+                full_flush_interval_secs=self._policy.fleet_status_full_flush_interval_secs,
                 terminal_retention_secs=self._policy.fleet_status_terminal_retention_secs,
                 decorator=config.fleet_status_decorator,
             )
@@ -259,6 +261,18 @@ class CaseManager:
             CasePoolEventNames.TERMINATED,
             self._on_terminated_event,
         )
+        if self._fleet_board is not None:
+            self._fleet_event_handle = self._driver.case_event_subscribe(
+                {
+                    CasePoolEventNames.ADMITTED,
+                    CasePoolEventNames.ALERTED,
+                    CasePoolEventNames.ADVANCED,
+                    CasePoolEventNames.FAILED,
+                    CasePoolEventNames.REMOVED,
+                    CasePoolEventNames.EVICTED,
+                },
+                self._on_fleet_board_event,
+            )
         self._write_manifest(running=True)
         self._run_task = asyncio.create_task(self._manager_loop())
 
@@ -271,6 +285,12 @@ class CaseManager:
             except KeyError:
                 pass
             self._terminated_handle = None
+        if self._fleet_event_handle is not None:
+            try:
+                self._driver.case_event_unsubscribe(self._fleet_event_handle)
+            except KeyError:
+                pass
+            self._fleet_event_handle = None
         if self._run_task is not None:
             self._run_task.cancel()
             try:
@@ -289,7 +309,7 @@ class CaseManager:
                 )
         else:
             await self._settle_with_diagnostics()
-        self._refresh_fleet_status_board(force=True)
+        self._publish_fleet_status_board(force=True)
         self._write_manifest(running=False, stopped=True)
 
     async def _manager_loop(self) -> None:
@@ -337,21 +357,54 @@ class CaseManager:
             self._policy.redundant_purge_aberrant_after_secs is not None
         ):
             await loop.run_in_executor(None, lambda: run_redundant_purge(self._cache, self._policy))
-        self._refresh_fleet_status_board()
+        self._publish_fleet_status_board()
         self._write_manifest(running=True)
         self._detect_escalations()
 
-    def _refresh_fleet_status_board(self, *, force: bool = False) -> None:
+    def _fleet_locate(self) -> Callable[[str], Any]:
+        return lambda cid: self.locate(case_id=cid)
+
+    def _notify_fleet_board(self, case: FolderBackedCase, *, force: bool = False) -> None:
         if self._fleet_board is None:
             return
         try:
-            self._fleet_board.refresh_if_due(
+            self._fleet_board.notify(
+                case,
+                force=force,
+                live_cases=list(self._driver),
+                locate=self._fleet_locate(),
+            )
+        except Exception:
+            logger.warning("fleet status board notify failed", exc_info=True)
+
+    def _publish_fleet_status_board(self, *, force: bool = False) -> None:
+        if self._fleet_board is None:
+            return
+        try:
+            self._fleet_board.publish_full_if_due(
                 list(self._driver),
-                locate=lambda cid: self.locate(case_id=cid),
+                locate=self._fleet_locate(),
                 force=force,
             )
         except Exception:
-            logger.warning("fleet status board refresh failed", exc_info=True)
+            logger.warning("fleet status board full flush failed", exc_info=True)
+
+    def _on_fleet_board_event(self, event: CasePoolEvent) -> None:
+        """Interesting pool edges → notify the board; it decides append vs full flush.
+
+        REMOVED / EVICTED need a full publish so departed non-terminal cases drop
+        off the board (append alone cannot remove a case_id under last-wins).
+        """
+        if self._fleet_board is None:
+            return
+        if event.event in (CasePoolEventNames.REMOVED, CasePoolEventNames.EVICTED):
+            self._publish_fleet_status_board(force=True)
+            return
+        if event.event == CasePoolEventNames.ADVANCED:
+            ar = event.advance_result
+            if ar is None or not ar.progressed:
+                return
+        self._notify_fleet_board(event.case)
 
     def _reconcile_terminal_in_pool(self) -> int:
         count = 0
@@ -359,6 +412,7 @@ class CaseManager:
             if not ticket_exists(self._manager_dir, case.case_id):
                 if self._fleet_board is not None:
                     self._fleet_board.note_terminal(case)
+                    self._notify_fleet_board(case, force=True)
                 if begin_termination(
                     case,
                     manager_dir=self._manager_dir,
@@ -371,6 +425,7 @@ class CaseManager:
     def _on_terminated_event(self, event: CasePoolEvent) -> None:
         if self._fleet_board is not None:
             self._fleet_board.note_terminal(event.case)
+            self._notify_fleet_board(event.case, force=True)
         begin_termination(
             event.case,
             manager_dir=self._manager_dir,
@@ -502,6 +557,71 @@ class CaseManager:
         if loc is None:
             raise LiveCaseNotFoundError(case_id or str(case_folder))
         return await self._driver.fire(loc.case_folder, trigger, **trigger_kwargs)
+
+    async def reclassify_case(
+        self,
+        *,
+        case_id: str | None = None,
+        case_folder: Path | None = None,
+        target_type: str | type[FolderBackedCase],
+    ) -> FolderBackedCase:
+        """Switch a live pooled case to a different registered case type, in place.
+
+        Wraps ``FolderBackedCase.case_reclassify_to()`` with the pool choreography a
+        managed fleet needs: the case's slot is removed for the identity switch and the
+        fresh object re-admitted, which per the driver contract builds a NEW scheduling
+        slot — a freshly admitted advanceable case starts HOT, and the follow-up
+        ``boost()`` schedules it for the very next beat, so any automated paths the new
+        type opened up are taken immediately.
+
+        Addressing mirrors ``fire()``: exactly one of ``case_id`` / ``case_folder``.
+        ``target_type`` may be the registered class or its bare name (the mailbox path
+        always sends the name).
+
+        Raises:
+            LiveCaseNotFoundError: the case is not in the live pool.
+            UnregisteredCaseTypeError: ``target_type`` is not a registered case type.
+            IncompatibleReclassError: the case's current state is not a state of the
+                target class (checked BEFORE the slot is touched).
+            CaseInFlightError: a step is mid-flight for this case (from
+                ``driver.remove()``); retry after the step settles.
+        """
+        if isinstance(target_type, str):
+            target_cls = self._registry.resolve_case_type(target_type)
+            if target_cls is None:
+                raise UnregisteredCaseTypeError(target_type)
+        else:
+            target_cls = target_type
+            if self._registry.resolve_case_type(target_cls.__name__) is not target_cls:
+                raise UnregisteredCaseTypeError(target_cls.__name__)
+        loc = self._resolve_single(case_id=case_id, case_folder=case_folder)
+        if loc is None:
+            raise LiveCaseNotFoundError(case_id or str(case_folder))
+        case = self.get_live(loc.case_id)
+        # Pre-validate the shared-state contract before touching the slot, so an
+        # incompatible request leaves the pool untouched.
+        if case.case_state not in target_cls.case_type_spec().fsm.states:
+            raise IncompatibleReclassError(case.case_state, target_cls.__name__)
+        folder = case.case_folder
+        self._driver.remove(folder)      # raises CaseInFlightError if a step is running
+        try:
+            fresh = case.case_reclassify_to(target_cls)
+        except BaseException:
+            # Best-effort re-admission so the case never falls out of management.
+            try:
+                readd = case
+                if readd.case_is_detached:
+                    readd = self._registry.rehydrate(folder)
+                self._driver.add(readd)
+            except Exception:
+                logger.exception(
+                    "reclassify_case: failed to re-admit %s after reclassify error", folder
+                )
+            raise
+        self._driver.add(fresh)          # fresh slot: advanceable cases are admitted HOT
+        self._driver.boost(folder)       # and fire on the next beat
+        self._notify_fleet_board(fresh)
+        return fresh
 
     def locate(
         self,
@@ -699,6 +819,8 @@ class CaseManager:
             (mgr_dir / sub).mkdir(parents=True, exist_ok=True)
         for sub in ("intake", "malformed"):
             (mgr_dir / policy.fire_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
+        for sub in ("intake", "malformed", "executing"):
+            (mgr_dir / policy.reclassify_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
         ensure_board_file(mgr_dir, enabled=policy.enable_fleet_status_board)
@@ -713,6 +835,9 @@ class CaseManager:
             ),
             adopt_mailbox_intake=rel(
                 self._manager_dir / self._policy.adopt_mailbox_subdir / "intake"
+            ),
+            reclassify_mailbox_intake=rel(
+                self._manager_dir / self._policy.reclassify_mailbox_subdir / "intake"
             ),
             results=rel(self._manager_dir / "results"),
             adopt_drop=rel(self._manager_dir / self._policy.adopt_drop_subdir),

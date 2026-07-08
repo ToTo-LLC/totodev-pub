@@ -1,6 +1,6 @@
 # Part of the totodev_pub library.
 
-"""FleetBoardWatcher: snapshot-diff events, collection surface, client reads."""
+"""FleetStatusBoardWatcher: snapshot-diff events, collection surface, client reads."""
 
 import asyncio
 
@@ -16,8 +16,8 @@ from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME
 from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
-from totodev_pub.case_manager_support.fleet_watcher import (
-    FleetBoardWatcher,
+from totodev_pub.case_manager_support.fleet_status_watcher import (
+    FleetStatusBoardWatcher,
     FleetEventKind,
     diff_snapshots,
 )
@@ -125,7 +125,7 @@ def write_board(path, rows):
 def test_watcher_priming_and_mtime_short_circuit(tmp_path):
     path = tmp_path / FLEET_STATUS_FILENAME
     write_board(path, [row("c1")])
-    watcher = FleetBoardWatcher(path)
+    watcher = FleetStatusBoardWatcher(path)
     assert watcher.poll() == []          # priming poll establishes the baseline
     assert watcher.poll() == []          # unchanged mtime: no parse, no events
     write_board(path, [row("c1", case_state="done",
@@ -137,7 +137,7 @@ def test_watcher_priming_and_mtime_short_circuit(tmp_path):
 def test_watcher_emit_initial(tmp_path):
     path = tmp_path / FLEET_STATUS_FILENAME
     write_board(path, [row("c1"), row("c2")])
-    watcher = FleetBoardWatcher(path, emit_initial=True)
+    watcher = FleetStatusBoardWatcher(path, emit_initial=True)
     events = watcher.poll()
     assert kinds(events) == [FleetEventKind.CASE_APPEARED, FleetEventKind.CASE_APPEARED]
     assert [e.case_id for e in events] == ["c1", "c2"]
@@ -150,7 +150,7 @@ def test_watcher_collection_surface(tmp_path):
     case = TicketCase.create_case_in_folder(case_folder)
     case.case_detach()
     write_board(path, [row("c1", case_folder=str(case_folder)), row("c2")])
-    watcher = FleetBoardWatcher(path)
+    watcher = FleetStatusBoardWatcher(path)
     watcher.poll()
     assert len(watcher) == 2
     assert "c1" in watcher and "zzz" not in watcher
@@ -173,7 +173,7 @@ async def test_client_reads_and_watches_board(tmp_path):
     manager = provision_manager(
         tmp_path,
         enable_fleet_status_board=True,
-        fleet_status_refresh_interval_secs=0.0,
+        fleet_status_full_flush_interval_secs=0.0,
     )
     staging = tmp_path / "staging"
     staging.mkdir()
@@ -183,7 +183,7 @@ async def test_client_reads_and_watches_board(tmp_path):
     await manager.start()
     try:
         client = CaseManagerClient(tmp_path / "cache")
-        watcher = client.fleet_watcher(emit_initial=True)
+        watcher = client.fleet_status_watcher(emit_initial=True)
 
         async def poll_until_appeared():
             collected = []
@@ -206,7 +206,7 @@ async def test_client_reads_and_watches_board(tmp_path):
 
 
 def test_client_read_raises_when_disabled(tmp_path):
-    manager = provision_manager(tmp_path)  # board disabled by default
+    manager = provision_manager(tmp_path, enable_fleet_status_board=False)
     client = CaseManagerClient(tmp_path / "cache")
     with pytest.raises(FleetStatusBoardDisabledError):
         client.read_fleet_status(only_if_fresh=False)

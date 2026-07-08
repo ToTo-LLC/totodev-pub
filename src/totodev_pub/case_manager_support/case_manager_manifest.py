@@ -23,6 +23,9 @@ class ManifestPaths(BaseModel):
     eject_pending: str
     staging: str
     fleet_status_board: Optional[str] = None
+    # Optional for manifest back-compat: absent in manifests written before the
+    # reclassify mailbox existed.
+    reclassify_mailbox_intake: Optional[str] = None
 
 
 class CaseManagerManifest(BaseModel, FileMappedPydanticMixin):

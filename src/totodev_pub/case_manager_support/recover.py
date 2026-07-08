@@ -35,6 +35,7 @@ class RecoverReport:
     adopt_drop_skipped: int = 0
     mailbox_fire_replayed: int = 0
     mailbox_adopt_replayed: int = 0
+    mailbox_reclassify_replayed: int = 0
     dropped_paths: list[Path] = field(default_factory=list)
 
 
@@ -72,6 +73,7 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     if manager._policy.enable_mailbox:
         report.mailbox_fire_replayed = manager._mailbox.replay_fire_on_recover()
         report.mailbox_adopt_replayed = manager._mailbox.replay_adopt_on_recover()
+        report.mailbox_reclassify_replayed = manager._mailbox.replay_reclassify_on_recover()
 
     if manager._policy.startup_adopt_scan:
         drop_report = await manager._scan_adopt_drop()

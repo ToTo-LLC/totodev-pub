@@ -94,9 +94,9 @@ class FleetStatusBoardDisabledError(Exception):
 
     def __init__(self) -> None:
         super().__init__(
-            "The fleet status board is disabled for this deployment. Set "
-            "`enable_fleet_status_board=True` in the CaseManagerPolicy to render "
-            "a summary of cases."
+            "The fleet status board is disabled for this deployment "
+            "(`enable_fleet_status_board=False`). Remove that override or set "
+            "it to `True` to render a summary of cases."
         )
 
 

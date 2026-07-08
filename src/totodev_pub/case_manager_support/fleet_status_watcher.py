@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""FleetBoardWatcher: client-side snapshot-diff change events over the fleet
+"""FleetStatusBoardWatcher: client-side snapshot-diff change events over the fleet
 status board (Fleet Status Board Spec §9.3).
 
 Belongs in a LONG-LIVED observer process (the diff baseline lives in memory) —
@@ -108,7 +108,7 @@ def diff_snapshots(
     return events
 
 
-class FleetBoardWatcher:
+class FleetStatusBoardWatcher:
     """Poll-driven change detector plus a lightweight fleet collection.
 
     ``poll()`` stats the board file and returns ``[]`` untouched-cheap when
