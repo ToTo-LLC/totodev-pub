@@ -205,7 +205,7 @@ The grammar, piece by piece:
 | `A--trigger-->B` | An **automated** edge. The driving machinery may fire it unattended. |
 | `A==trigger-->B` | A **manual** edge. It *never* auto-fires; the case simply waits. Firing it takes an explicit call — from a test, or a UI action relayed by the manager. |
 | `answers_complete#compose_reply` | A **guard**: the edge fires only if `async def guard_answers_complete(self, tctx)` returns truthy. Guards are how an automated edge waits for a *data condition*. |
-| `@DWELL>3d#escalate` | A **factual guard** the framework computes: true once the case has dwelt in the source state more than 3 days. A `>`-dwell edge is a guaranteed **timed escape** — the state can never be permanently stuck. |
+| `@DWELL>3d#escalate` | A **factual guard** the framework computes: true once the case has dwelt in the source state more than 3 days. A `>`-dwell edge allows for a guaranteed **timed escape** — the state can never be permanently stuck. |
 | `@FAIL<3#ocr_attachments` | Another factual guard: true while fewer than 3 transition attempts have failed since entering this state. This is the **retry knob** — pair a `@FAIL<3` retry edge with a `@FAIL>=3` divert edge, as `received` does. |
 | `ocr_attachments~2m` | A **soft timeout** on the trigger's work: past ~2 minutes it is flagged slow (and hard-aborted at a multiple of that). Annotate the steps you know are slow; the rest inherit a snappy default. |
 | `*==cancel-->cancelled^` | A **wildcard**: this edge is injected from every non-terminal state. |
@@ -637,6 +637,10 @@ Then, and only then: point a `CaseManager` at a cache root with your deployment'
 put a `CaseManagerClient` in your web tier.
 
 ### Where to go next
+
+Continue with the second tutorial in this folder, *One Manager, Many Case Types*, which builds
+on this example: how a single manager runs a heterogeneous fleet, and how a generic intake case
+reclassifies itself into specialized lifecycles (spam vs. real inquiries).
 
 The source is deliberately documentation-heavy, organized for exactly this journey:
 
