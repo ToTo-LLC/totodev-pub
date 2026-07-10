@@ -119,3 +119,30 @@ async def test_immediate_mailbox_shutdown_exits_75_and_teaches(tmp_path, hard_ex
     assert excinfo.value.code == EXIT_RESTART_REQUESTED
     assert _stopped_at(manager) is not None      # the one refinement over the hard path
     assert any("Immediate shutdown triggered" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_stop_when_empty_self_completes_exit_zero(tmp_path):
+    manager = provision_manager(tmp_path)
+    # Empty manager: is_idle is True immediately, so serve() should self-stop.
+    await asyncio.wait_for(
+        serve(manager, stop_grace_secs=5.0, stop_when_empty=True), timeout=10.0
+    )
+    assert manager.running is False
+    assert _stopped_at(manager) is not None      # clean stopped_at, like a signal stop
+
+
+@pytest.mark.asyncio
+async def test_stop_when_custom_predicate(tmp_path):
+    manager = provision_manager(tmp_path)
+    polls = {"n": 0}
+
+    def done_after_five():
+        polls["n"] += 1
+        return polls["n"] >= 5
+
+    await asyncio.wait_for(
+        serve(manager, stop_grace_secs=5.0, stop_when=done_after_five), timeout=10.0
+    )
+    assert polls["n"] >= 5
+    assert manager.running is False
