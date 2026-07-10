@@ -18,6 +18,7 @@ from totodev_pub.case_manager_support.constants import (
     DEFAULT_FIRE_MAILBOX_SUBDIR,
     DEFAULT_GROUPING_PATTERN,
     DEFAULT_RECLASSIFY_MAILBOX_SUBDIR,
+    DEFAULT_SHUTDOWN_MAILBOX_SUBDIR,
     DEFAULT_LIVE_BUCKET,
     DEFAULT_MANAGER_NAMESPACE,
     DEFAULT_STAGING_SUBDIR,
@@ -43,6 +44,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     fire_mailbox_subdir: str = DEFAULT_FIRE_MAILBOX_SUBDIR
     adopt_mailbox_subdir: str = DEFAULT_ADOPT_MAILBOX_SUBDIR
     reclassify_mailbox_subdir: str = DEFAULT_RECLASSIFY_MAILBOX_SUBDIR
+    shutdown_mailbox_subdir: str = DEFAULT_SHUTDOWN_MAILBOX_SUBDIR
 
     # Tier 2 — operational tunables
     concurrency_ceiling: int = 50
@@ -66,6 +68,11 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     enable_fleet_status_board: bool = True
     fleet_status_full_flush_interval_secs: float = 1.0
     fleet_status_terminal_retention_secs: float = 120.0
+    watchdog_enabled: bool = True
+    watchdog_action: str = "exit"  # "exit" | "alarm_only"
+    watchdog_pulse_stuck_secs: Optional[float] = None
+    watchdog_mailbox_stale_secs: Optional[float] = None  # None → derived; 0 → disabled
+    watchdog_tick_warn_secs: Optional[float] = None
 
     @classmethod
     def tier1_field_names(cls) -> frozenset[str]:
@@ -82,6 +89,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "fire_mailbox_subdir",
             "adopt_mailbox_subdir",
             "reclassify_mailbox_subdir",
+            "shutdown_mailbox_subdir",
         })
 
     @classmethod
@@ -108,6 +116,11 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "enable_fleet_status_board",
             "fleet_status_full_flush_interval_secs",
             "fleet_status_terminal_retention_secs",
+            "watchdog_enabled",
+            "watchdog_action",
+            "watchdog_pulse_stuck_secs",
+            "watchdog_mailbox_stale_secs",
+            "watchdog_tick_warn_secs",
         })
 
     def apply_tier2_overrides(self, **overrides: Any) -> "CaseManagerPolicy":

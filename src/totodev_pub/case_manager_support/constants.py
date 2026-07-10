@@ -25,6 +25,7 @@ DEFAULT_ADOPT_DROP_SUBDIR = "adopt_drop"
 DEFAULT_FIRE_MAILBOX_SUBDIR = "fire_mailbox"
 DEFAULT_ADOPT_MAILBOX_SUBDIR = "adopt_mailbox"
 DEFAULT_RECLASSIFY_MAILBOX_SUBDIR = "reclassify_mailbox"
+DEFAULT_SHUTDOWN_MAILBOX_SUBDIR = "shutdown_mailbox"
 
 POLICY_FILENAME = "case_manager_policy.yaml"
 MANIFEST_FILENAME = "manifest.yaml"
