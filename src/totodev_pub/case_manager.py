@@ -284,6 +284,7 @@ class CaseManager:
                 self._on_fleet_board_event,
             )
         self._write_manifest(running=True)
+        self._last_heartbeat_write = time.monotonic()
         self._last_pulse = time.monotonic()
         self._run_task = asyncio.create_task(self._manager_loop())
         self._pulse_task = asyncio.create_task(self._pulse_loop())
@@ -376,8 +377,12 @@ class CaseManager:
             now = time.monotonic()
             self._last_pulse = now
             if now - self._last_heartbeat_write >= self._policy.maintenance_interval_secs:
-                self._last_heartbeat_write = now
-                self._write_manifest(running=True)
+                try:
+                    self._write_manifest(running=True)
+                except Exception:
+                    logger.exception("Pulse loop manifest heartbeat write failed")
+                else:
+                    self._last_heartbeat_write = now
             await asyncio.sleep(PULSE_INTERVAL_SECS)
 
     async def _maintenance_tick(self) -> None:
