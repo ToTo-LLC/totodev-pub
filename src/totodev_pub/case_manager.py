@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
 
@@ -22,6 +23,7 @@ from totodev_pub.case_manager_support.constants import (
     FLEET_STATUS_FILENAME,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
+    PULSE_INTERVAL_SECS,
 )
 from totodev_pub.case_manager_support.eject import (
     EjectResult,
@@ -128,7 +130,12 @@ class CaseManager:
         self._loop_failure_cb: Callable[[BaseException], None] | None = None
         self._terminated_handle: Any = None
         self._eject_waiters: dict[str, asyncio.Future[EjectResult]] = {}
-        self._last_maintenance: float = 0.0
+        # §2 liveness stamps (read by the watchdog thread; write-only here).
+        self._last_pulse: float | None = None
+        self._last_tick_started: float | None = None
+        self._last_tick_completed: float | None = None
+        self._last_heartbeat_write: float = 0.0
+        self._pulse_task: asyncio.Task[None] | None = None
         self._recovered = False
         self.last_recover_report: RecoverReport | None = None
         self._fleet_board: FleetStatusBoardWriter | None = None
@@ -277,11 +284,20 @@ class CaseManager:
                 self._on_fleet_board_event,
             )
         self._write_manifest(running=True)
+        self._last_pulse = time.monotonic()
         self._run_task = asyncio.create_task(self._manager_loop())
+        self._pulse_task = asyncio.create_task(self._pulse_loop())
 
     async def stop(self, *, timeout: float | None = None) -> None:
         self._stopping = True
         self._running = False
+        if self._pulse_task is not None:
+            self._pulse_task.cancel()
+            try:
+                await self._pulse_task
+            except asyncio.CancelledError:
+                pass
+            self._pulse_task = None
         if self._terminated_handle is not None:
             try:
                 self._driver.case_event_unsubscribe(self._terminated_handle)
@@ -349,8 +365,23 @@ class CaseManager:
                     raise
             await asyncio.sleep(interval)
 
+    async def _pulse_loop(self) -> None:
+        """Liveness pulse — measures the event loop, not the tick.
+
+        Stamps ``_last_pulse`` every ``PULSE_INTERVAL_SECS`` (the watchdog's
+        kill-authorized signal) and writes the manifest heartbeat on its own
+        cadence, so a healthy manager doing one slow mailbox fire never looks
+        stale to clients."""
+        while self._running:
+            now = time.monotonic()
+            self._last_pulse = now
+            if now - self._last_heartbeat_write >= self._policy.maintenance_interval_secs:
+                self._last_heartbeat_write = now
+                self._write_manifest(running=True)
+            await asyncio.sleep(PULSE_INTERVAL_SECS)
+
     async def _maintenance_tick(self) -> None:
-        import time
+        self._last_tick_started = time.monotonic()
         loop = asyncio.get_running_loop()
         for ticket_file in replay_pending(self._manager_dir):
             ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
@@ -387,8 +418,8 @@ class CaseManager:
         ):
             await loop.run_in_executor(None, lambda: run_redundant_purge(self._cache, self._policy))
         self._publish_fleet_status_board()
-        self._write_manifest(running=True)
         self._detect_escalations()
+        self._last_tick_completed = time.monotonic()
 
     def _fleet_locate(self) -> Callable[[str], Any]:
         return lambda cid: self.locate(case_id=cid)
