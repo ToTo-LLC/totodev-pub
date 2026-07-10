@@ -131,7 +131,7 @@ class FolderBackedCaseReader:
             )
         return self._assets
 
-    def case_load_dataclass(self, alias: str) -> object:
+    def case_load_asset(self, alias: str) -> object:
         """Load alias after persisted state trust check.
 
         Raises ``AssetNotTrustedInStateError`` before disk I/O when not trusted.

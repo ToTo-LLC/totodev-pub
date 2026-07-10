@@ -586,7 +586,7 @@ rows = client.read_fleet_status()        # {case_id: state, dwell, alerts, ...}
 # (c) Granular detail about one case: a lock-free read-only view.
 reader = client.reader(external_key="EMAIL-778812")
 reader.case_state                        # "waiting_for_approval"
-draft = reader.case_load_dataclass("reply_draft")   # trust-checked by state (§5)
+draft = reader.case_load_asset("reply_draft")   # trust-checked by state (§5)
 
 # (d) Fire a human decision: queued via mailbox, executed by the manager.
 handle = client.submit_fire(case_id=cid, trigger="approve",

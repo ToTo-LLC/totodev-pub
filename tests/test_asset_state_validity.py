@@ -1,4 +1,4 @@
-"""End-to-end tests for asset state validity and case_load_dataclass."""
+"""End-to-end tests for asset state validity and case_load_asset."""
 
 import asyncio
 import json
@@ -127,7 +127,7 @@ def test_guarded_load_allowed_in_listed_state(tmp_path):
             b"title: hello\n",
             keep=False,
         )
-        obj = case.case_load_dataclass("ticket")
+        obj = case.case_load_asset("ticket")
         assert isinstance(obj, TicketForm)
         assert obj.title == "hello"
     finally:
@@ -142,7 +142,7 @@ def test_guarded_load_denied_in_unlisted_state(tmp_path):
         asyncio.run(case.close_ticket())
         case.case_assets.write("customer--conversation.json", b"lines: 1\n")
         with pytest.raises(AssetNotTrustedInStateError):
-            case.case_load_dataclass("conversation")
+            case.case_load_asset("conversation")
     finally:
         case.case_detach()
 
@@ -153,7 +153,7 @@ def test_guarded_load_denied_initial_state_for_constrained_alias(tmp_path):
     try:
         case.case_assets.write("customer--conversation.json", b"lines: 1\n")
         with pytest.raises(AssetNotTrustedInStateError):
-            case.case_load_dataclass("conversation")
+            case.case_load_asset("conversation")
     finally:
         case.case_detach()
 
@@ -163,7 +163,7 @@ def test_guarded_load_keyerror_unknown_alias(tmp_path):
     case = TicketCase.create_case_in_folder(folder)
     try:
         with pytest.raises(KeyError):
-            case.case_load_dataclass("missing")
+            case.case_load_asset("missing")
     finally:
         case.case_detach()
 
@@ -173,7 +173,7 @@ def test_guarded_load_file_not_found_when_trusted(tmp_path):
     case = TicketCase.create_case_in_folder(folder)
     try:
         with pytest.raises(FileNotFoundError):
-            case.case_load_dataclass("ticket")
+            case.case_load_asset("ticket")
     finally:
         case.case_detach()
 
@@ -192,14 +192,14 @@ def test_reader_parity_with_live_case(tmp_path):
 
     reader = FolderBackedCaseReader(folder)
     assert reader.case_state == "open"
-    reader.case_load_dataclass("ticket")
-    reader.case_load_dataclass("conversation")
+    reader.case_load_asset("ticket")
+    reader.case_load_asset("conversation")
 
     live = TicketCase(folder)
     try:
         assert live.case_state == "open"
-        live.case_load_dataclass("ticket")
-        live.case_load_dataclass("conversation")
+        live.case_load_asset("ticket")
+        live.case_load_asset("conversation")
 
     finally:
         live.case_detach()
@@ -207,13 +207,13 @@ def test_reader_parity_with_live_case(tmp_path):
     try:
         asyncio.run(live.close_ticket())
         with pytest.raises(AssetNotTrustedInStateError):
-            live.case_load_dataclass("conversation")
+            live.case_load_asset("conversation")
 
     finally:
         live.case_detach()
     reader_closed = FolderBackedCaseReader(folder)
     with pytest.raises(AssetNotTrustedInStateError):
-        reader_closed.case_load_dataclass("conversation")
+        reader_closed.case_load_asset("conversation")
 
 
 def test_flexible_mode_unconstrained_alias_bypasses_guard(tmp_path):
@@ -221,7 +221,7 @@ def test_flexible_mode_unconstrained_alias_bypasses_guard(tmp_path):
     case = FlexibleCase.create_case_in_folder(folder)
     try:
         case.case_assets.write("unguarded.json", json.dumps({"x": 1}).encode())
-        obj = case.case_load_dataclass("unguarded")
+        obj = case.case_load_asset("unguarded")
         assert obj is not None
     finally:
         case.case_detach()
@@ -234,7 +234,7 @@ def test_flexible_mode_declared_states_still_guarded(tmp_path):
         asyncio.run(case.go())
         case.case_assets.write("guarded.json", b"title: x\n")
         with pytest.raises(AssetNotTrustedInStateError):
-            case.case_load_dataclass("guarded")
+            case.case_load_asset("guarded")
     finally:
         case.case_detach()
 

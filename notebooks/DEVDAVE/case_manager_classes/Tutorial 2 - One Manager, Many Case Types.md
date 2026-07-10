@@ -208,7 +208,7 @@ to `traffic_verdict.yaml`, waiting for an owner to decide what it really is.
 case = InboundCase.create_case_in_folder(folder, external_key="MAIL-1")
 await case.case_advance()                     # arrived -> received (verdict written)
 
-verdict = case.case_load_dataclass("traffic_verdict")
+verdict = case.case_load_asset("traffic_verdict")
 target = SpamCase if verdict.verdict == "spam" else InquiryCase
 fresh = case.case_reclassify_to(target)       # 'case' is now a detached husk; use 'fresh'
 ```
@@ -315,7 +315,7 @@ async def reclassify_parked_inbound(manager: CaseManager) -> None:
             continue
         if reader.case_state != "received":
             continue                       # still classifying (or already swapped)
-        verdict = reader.case_load_dataclass("traffic_verdict")
+        verdict = reader.case_load_asset("traffic_verdict")
         target = SpamCase if verdict.verdict == "spam" else InquiryCase
         await manager.reclassify_case(case_id=reader.case_id, target_type=target)
 ```

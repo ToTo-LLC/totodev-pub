@@ -699,11 +699,17 @@ class FolderBackedCase(ABC):
         ``case_assets.write(..., keep=True)``."""
         self._keep_manifest.add_rules(*rules)
 
-    def case_load_dataclass(self, alias: str) -> object:
+    def case_load_asset(self, alias: str) -> object:
         """Load a declared asset alias after checking it is trustworthy in the current
         FSM state. Raises AssetNotTrustedInStateError before any disk I/O when the
-        alias is constrained and the current state is not listed. For unguarded access
-        use case_assets.load_dataclass(alias) instead."""
+        alias is constrained and the current state is not listed.
+
+        Declaring asset_aliases is convenience sugar, not a requirement — a subclass
+        is free to leave it ``[]`` and manage its files by hand. Without a declared
+        alias (or for unguarded access even with one), reach case_assets directly:
+        ``case_assets.asset_path(relative_path)`` for the filepath, or
+        ``case_assets.read(relative_path)``/your own parsing for the in-memory object.
+        It's just a couple more steps than this one-liner."""
         type(self)._resolve_asset_book().assert_trusted(alias, self.case_state)
         return self.case_assets.load_dataclass(alias)
 
@@ -715,14 +721,13 @@ class FolderBackedCase(ABC):
         Returns a detached deep-copy snapshot. Pass ``force=True`` to re-read from disk
         first when another process may have changed the file.
         """
-        if force:
-            self._record.reload_from_file(force=True)
+        self._record.reload_from_file(force=force)
         return self._record.detached_copy()
 
     # ---- operator alert channel (type-agnostic escalation marker) ----
 
     def case_log_alert(self, short_msg: str = "", *, where: str | None = None) -> None:
-        """Record a CASE_ALERTED: the case family's single type-agnostic "this case needs a
+        """Add a CASE_ALERTED entry to the event log: the case family's single type-agnostic "this case needs a
         human to look at it" marker.
 
         Quick use:

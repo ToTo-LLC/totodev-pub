@@ -244,7 +244,7 @@ reader.case_assets.list_assets()   # every file actually on disk right now, for 
 
 ### Reading a named asset, trust-checked
 
-`case_load_dataclass(alias)` is the intended way to read one of the case's declared data
+`case_load_asset(alias)` is the intended way to read one of the case's declared data
 contracts (tutorial #1 §5) — it enforces the state-conditioned trust check *before* touching
 disk:
 
@@ -252,7 +252,7 @@ disk:
 from totodev_pub.folder_backed_case_support.exceptions import AssetNotTrustedInStateError
 
 try:
-    answers = reader.case_load_dataclass("expert_answers")
+    answers = reader.case_load_asset("expert_answers")
 except AssetNotTrustedInStateError:
     ...   # the file may exist, but InquiryCase hasn't promised it's finished yet
 ```
@@ -271,7 +271,7 @@ from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 
 asset_dataclass_registry.register(ExpertAnswers, InquiryAnalysis)   # once, at process startup
 typed_reader = FolderBackedCaseReader(reader.case_folder, resolve_asset_types=True)
-answers = typed_reader.case_load_dataclass("expert_answers")        # a real ExpertAnswers now
+answers = typed_reader.case_load_asset("expert_answers")        # a real ExpertAnswers now
 ```
 
 Same trade-off as `submit_reclassify`'s preflight in tutorial #2: convenience without imports, or
@@ -577,7 +577,7 @@ Note that when using docker-based deployment the built-in filesystem isolation b
 - `totodev_pub/folder_backed_case.py` — `case_ext_status_info()` (§2), the per-case hook that
   populates a row's `ext` dict.
 - `totodev_pub/folder_backed_case_reader.py` — the full read-only surface, including
-  `case_active_trigger` and the asset-trust boundary (`case_load_dataclass`).
+  `case_active_trigger` and the asset-trust boundary (`case_load_asset`).
 - `totodev_pub/folder_backed_case_support/asset_dataclass_registry.py` — the opt-in typed-read
   mechanism from §3.
 - `totodev_pub/case_manager_support/adopt.py` — the adoption airlock's full validation list

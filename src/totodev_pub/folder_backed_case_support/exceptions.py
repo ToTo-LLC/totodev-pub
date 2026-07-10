@@ -301,7 +301,7 @@ class MissingTriggerChokesError(Exception):
 
 
 class AssetNotTrustedInStateError(Exception):
-    """Raised by case_load_dataclass (and assert_trusted) when the case's current FSM
+    """Raised by case_load_asset (and assert_trusted) when the case's current FSM
     state is not among the alias's declared valid states. Checked before any disk I/O."""
 
     def __init__(
