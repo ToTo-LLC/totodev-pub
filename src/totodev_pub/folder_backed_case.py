@@ -14,7 +14,7 @@ bundle to be reviewed, etc.
 Core pieces
 -----------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
-CaseEventLogReader      — read-oriented convention interpreter over PrimitiveEventLog.
+CaseJournalView         — read-only facade over the case event-log protocol.
 CaseAssets              — working-file playground + retention manifest (_keep.txt).
 FolderBackedCase        — ABC you subclass to define a case type.
 FolderBackedCaseReader  — lock-free read-only folder view (no lease, no registry).
@@ -117,8 +117,7 @@ from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_type_spec import CaseTypeSpec
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
-from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
-from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
+from totodev_pub.folder_backed_case_support.case_journal import CaseJournal, CaseJournalView
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.case_keep_manifest import CaseKeepManifest
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
@@ -139,7 +138,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FolderBackedCase", "FolderBackedCaseReader", "CaseReadView",
-    "CaseRecord", "CaseEventLogReader", "CaseAssets", "AdvanceResult",
+    "CaseRecord", "CaseJournalView", "CaseAssets", "AdvanceResult",
     "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
@@ -670,9 +669,9 @@ class FolderBackedCase(ABC):
         return self._as_utc(self._journal.last_activity) or self._record.created
 
     @property
-    def case_events(self) -> CaseEventLogReader:
+    def case_events(self) -> CaseJournalView:
         """Read-only view of this case's event log (writes go through CaseJournal)."""
-        return self._journal.reader
+        return self._journal.view()
 
     # ---- assets (playground + retention), grouped on CaseAssets ----
 
@@ -775,11 +774,11 @@ class FolderBackedCase(ABC):
         return record_cls.open(str(Path(folder) / RECORD_NAME), without_lock=True)
 
     @staticmethod
-    def peek_case_events(folder: Path) -> CaseEventLogReader:
-        """A CaseEventLogReader over the folder's event log — lock-free, no live case,
+    def peek_case_events(folder: Path) -> CaseJournalView:
+        """A CaseJournalView over the folder's event log — lock-free, no live case,
         no registry. Uniform across every case type (the log format is not subclassed).
         Exposes current_state, is_terminal, last_activity, and .primitive for the raw log."""
-        return CaseEventLogReader.for_folder(Path(folder))
+        return CaseJournalView.for_folder(Path(folder))
 
     @staticmethod
     def peek_case_assets(folder: Path, *, resolve_asset_types: bool = False) -> CaseAssets:
@@ -1321,7 +1320,7 @@ class FolderBackedCase(ABC):
 
     def _derive_state(self) -> str | None:
         """Current state = the most recent CASE_STATE_ENTERED entry. Delegates to the
-        journal (over the same CaseEventLogReader the peek path uses) — no-drift
+        journal (over the same CaseJournalView the peek path uses) — no-drift
         guarantee is structural."""
         return self._journal.current_state
 

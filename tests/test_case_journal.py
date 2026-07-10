@@ -11,8 +11,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_ALERTED,
 )
-from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
-from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
+from totodev_pub.folder_backed_case_support.case_journal import CaseJournal, CaseJournalView
 
 
 def _journal(tmp_path) -> CaseJournal:
@@ -191,44 +190,73 @@ def test_last_state_entered_mtime_none_when_empty(tmp_path):
 
 def test_unresolved_trigger_started_detection(tmp_path):
     journal = _journal(tmp_path)
-    reader = journal.reader
-    assert reader.unresolved_trigger_started is None
+    assert journal.unresolved_trigger_started is None
     journal.log_state_entered("new")
-    assert reader.unresolved_trigger_started is None
+    assert journal.unresolved_trigger_started is None
     journal.log_trigger_started("go", state="new", warn=5.0, kill=10.0)
-    ev = reader.unresolved_trigger_started
+    ev = journal.unresolved_trigger_started
     assert ev is not None
     assert ev.value == "go"
     # A non-completion event logged mid-work (e.g. an alert) does not resolve it.
     journal.log_alerted("new", msg="still working")
-    assert reader.unresolved_trigger_started is not None
+    assert journal.unresolved_trigger_started is not None
     # Nor does the slow warning (written after the work, before the commit record).
     journal.log_trigger_slow("go", elapsed=6.0, warn=5.0, state="new")
-    assert reader.unresolved_trigger_started is not None
+    assert journal.unresolved_trigger_started is not None
     # The committed state entry resolves it.
     journal.log_state_entered("open", trigger="go", from_state="new")
-    assert reader.unresolved_trigger_started is None
+    assert journal.unresolved_trigger_started is None
 
 
 def test_unresolved_trigger_started_resolved_by_failure_events(tmp_path):
     journal = _journal(tmp_path)
-    reader = journal.reader
     journal.log_state_entered("open")
     journal.log_trigger_started("go", state="open", warn=5.0, kill=10.0)
     journal.log_transition_failed("go", {"trigger": "go"})
-    assert reader.unresolved_trigger_started is None
+    assert journal.unresolved_trigger_started is None
     journal.log_trigger_started("go", state="open", warn=5.0, kill=10.0)
     journal.log_trigger_timed_out("go", {"trigger": "go"})
-    assert reader.unresolved_trigger_started is None
+    assert journal.unresolved_trigger_started is None
     journal.log_trigger_started("go", state="open", warn=5.0, kill=10.0)
     journal.log_entry_exception("done", {"trigger": "go"})
-    assert reader.unresolved_trigger_started is None
+    assert journal.unresolved_trigger_started is None
 
 
 # ---------------------------------------------------------------------------
-# Reader alignment
+# View facade
 # ---------------------------------------------------------------------------
 
-def test_reader_is_base_event_label_shares_the_prefix():
-    assert CaseEventLogReader.is_base_event_label("CASE_CREATED") is True
-    assert CaseEventLogReader.is_base_event_label("MY_CUSTOM") is False
+def test_view_returns_fresh_instances(tmp_path):
+    journal = _journal(tmp_path)
+    view_a = journal.view()
+    view_b = journal.view()
+    assert isinstance(view_a, CaseJournalView)
+    assert view_a is not view_b
+    assert view_a is not journal
+
+
+def test_view_delegates_reads(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_state_entered("open")
+    view = journal.view()
+    assert view.current_state == "open"
+    assert view.count_fails_this_dwell() == 0
+
+
+def test_view_has_no_write_surface(tmp_path):
+    view = CaseJournalView.for_folder(tmp_path)
+    for name in (
+        "log_created", "log_state_entered", "log_terminated", "log_reclassified",
+        "log_alerted", "log_transition_failed", "log_entry_exception",
+        "log_trigger_timed_out", "log_trigger_started", "log_trigger_slow",
+    ):
+        assert not hasattr(view, name)
+
+
+# ---------------------------------------------------------------------------
+# Protocol alignment
+# ---------------------------------------------------------------------------
+
+def test_is_base_event_label_shares_the_prefix():
+    assert CaseJournal.is_base_event_label("CASE_CREATED") is True
+    assert CaseJournal.is_base_event_label("MY_CUSTOM") is False

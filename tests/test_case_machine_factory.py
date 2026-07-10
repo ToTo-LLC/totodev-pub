@@ -94,9 +94,12 @@ def test_build_produces_async_machine_bound_to_the_case(tmp_path):
 
 def test_built_machine_runs_an_auto_step(tmp_path):
     """End-to-end proof the factory wired a usable machine: firing `go` advances."""
-    with _case(tmp_path) as case:
+    case = _case(tmp_path)
+    try:
         asyncio.run(case.go())
         assert case.case_state == "open"
+    finally:
+        case.case_detach()
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +261,8 @@ def _other_tasks() -> list:
 def test_keepalive_holds_lease_across_a_slow_step(tmp_path, monkeypatch):
     _use_short_ttl(monkeypatch)                       # pulse interval defaults to ~0.1s
     async def scenario():
-        with _case(tmp_path) as case:
+        case = _case(tmp_path)
+        try:
             case.sleep_secs = 0.8                     # work outlives the 0.3s TTL
             lease_path = case.case_folder / LEASE_NAME
             wrapped = _factory(case)._make_perform_wrapper("go", "perform_go")
@@ -269,6 +273,8 @@ def test_keepalive_holds_lease_across_a_slow_step(tmp_path, monkeypatch):
             assert HeartbeatLease.is_expired(lease_path) is False
             await task
             assert HeartbeatLease.is_expired(lease_path) is False
+        finally:
+            case.case_detach()
 
     asyncio.run(scenario())
 
@@ -276,12 +282,15 @@ def test_keepalive_holds_lease_across_a_slow_step(tmp_path, monkeypatch):
 def test_keepalive_reaps_pulse_on_success(tmp_path, monkeypatch):
     _use_short_ttl(monkeypatch)
     async def scenario():
-        with _case(tmp_path) as case:
+        case = _case(tmp_path)
+        try:
             case.sleep_secs = 0.2
             wrapped = _factory(case)._make_perform_wrapper("go", "perform_go")
             await wrapped(None)
             await asyncio.sleep(0)                    # let any cancellation settle
             assert _other_tasks() == []              # no leaked pulse task
+        finally:
+            case.case_detach()
 
     asyncio.run(scenario())
 
@@ -289,13 +298,16 @@ def test_keepalive_reaps_pulse_on_success(tmp_path, monkeypatch):
 def test_keepalive_reaps_pulse_on_exception(tmp_path, monkeypatch):
     _use_short_ttl(monkeypatch)
     async def scenario():
-        with _case(tmp_path) as case:
+        case = _case(tmp_path)
+        try:
             case.raise_in_perform = True             # fails fast inside the keepalive
             wrapped = _factory(case)._make_perform_wrapper("go", "perform_go")
             with pytest.raises(ValueError, match="boom"):
                 await wrapped(None)
             await asyncio.sleep(0)
             assert _other_tasks() == []              # pulse still reaped on the error path
+        finally:
+            case.case_detach()
 
     asyncio.run(scenario())
 
@@ -303,7 +315,8 @@ def test_keepalive_reaps_pulse_on_exception(tmp_path, monkeypatch):
 def test_keepalive_surfaces_ownership_loss_and_cancels_work(tmp_path, monkeypatch):
     _use_short_ttl(monkeypatch)
     async def scenario():
-        with _case(tmp_path) as case:
+        case = _case(tmp_path)
+        try:
             case.sleep_secs = 1.0                     # long; we expect it cancelled early
             lease_path = case.case_folder / LEASE_NAME
             wrapped = _factory(case)._make_perform_wrapper("go", "perform_go")
@@ -322,6 +335,8 @@ def test_keepalive_surfaces_ownership_loss_and_cancels_work(tmp_path, monkeypatc
             assert elapsed < 0.6                     # work was cancelled, not run to 1.0s
             assert _slow_events(case) == []          # an aborted step is not a "slow" step
             assert _other_tasks() == []
+        finally:
+            case.case_detach()
 
     asyncio.run(scenario())
 
@@ -331,7 +346,8 @@ def test_keepalive_survives_transient_beat_errors(tmp_path, monkeypatch):
     logs and keeps beating on the next cadence, so the lease stays held once beats recover."""
     _use_short_ttl(monkeypatch)
     async def scenario():
-        with _case(tmp_path) as case:
+        case = _case(tmp_path)
+        try:
             real_heartbeat = case.case_heartbeat
             calls = {"n": 0}
 
@@ -351,5 +367,7 @@ def test_keepalive_survives_transient_beat_errors(tmp_path, monkeypatch):
             assert calls["n"] >= 3                     # the pulse kept calling after failures
             assert HeartbeatLease.is_expired(lease_path) is False  # recovered beats hold it
             await task
+        finally:
+            case.case_detach()
 
     asyncio.run(scenario())

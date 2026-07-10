@@ -37,8 +37,7 @@ from .exceptions import (
 )
 from .case_record import CaseRecord
 from .case_read_view import CaseReadView
-from .case_event_log_reader import CaseEventLogReader
-from .case_journal import CaseJournal
+from .case_journal import CaseJournal, CaseJournalView
 from .case_assets import CaseAssets
 from .asset_schema import AssetSpec
 from .asset_dataclass_registry import AssetDataclassRegistry, asset_dataclass_registry
@@ -86,8 +85,8 @@ __all__ = [
     "UnconfiguredChokeError",
     "CaseRecord",
     "CaseReadView",
-    "CaseEventLogReader",
     "CaseJournal",
+    "CaseJournalView",
     "CaseAssets",
     "AssetSpec",
     "AssetDataclassRegistry",

@@ -1,10 +1,10 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Domain-aware event-log read/write facade for the FolderBackedCase family.
+"""Domain-aware event-log protocol for the FolderBackedCase family.
 
-`CaseJournal` wraps the generic, read-oriented `CaseEventLogReader` and becomes the
-ONE place that knows how *this* case family reads and writes its event log:
+`CaseJournal` is the ONE place that knows how *this* case family reads and writes
+its event log:
 
   - WRITES funnel through a single chokepoint (`_append_base`) that enforces the
     family invariant — every base-class event label starts with
@@ -12,14 +12,11 @@ ONE place that knows how *this* case family reads and writes its event log:
     events from the lifecycle events the base class generates. The domain-named
     `log_*` methods encode what label / value / payload each lifecycle fact carries.
   - DOMAIN READS (current state, the dwell anchor, the @FAIL count, "has this event
-    fired since we entered the state") are the case-specific *interpretations* of the
-    generic log that previously lived as private methods on FolderBackedCase.
+    fired since we entered the state") are the case-specific *interpretations* of
+    the generic log.
 
-Writes route through `.primitive` underneath: the journal owns the case
-conventions, the PrimitiveEventLog owns storage. For base-class lifecycle writes,
-journal `log_*` methods are the intended surface (they enforce naming policy and
-payload conventions). Direct `.primitive` writes are an escape hatch for truly
-bespoke behavior outside those base conventions.
+`CaseJournalView` is a read-only facade over the same protocol — for observers
+that must not append lifecycle facts (peek paths, fleet scans, FolderBackedCaseReader).
 """
 
 from __future__ import annotations
@@ -30,7 +27,6 @@ from typing import Optional
 
 from totodev_pub.primitive_event_log_support.event_proxy import PrimitiveEventProxy
 from totodev_pub.primitive_event_log import PrimitiveEventLog
-from totodev_pub.folder_backed_case_support.case_event_log_reader import CaseEventLogReader
 from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_STATE_ENTERED,
@@ -43,33 +39,49 @@ from totodev_pub.folder_backed_case_support.constants import (
     EV_TRIGGER_SLOW,
     EV_TRIGGER_TIMED_OUT,
     EV_TRIGGER_STARTED,
+    EVENTS_DIR_NAME,
 )
+
+# Events that RESOLVE a CASE_TRIGGER_STARTED: the attempt committed (STATE_ENTERED) or
+# failed in one of its recorded ways. Anything else logged mid-work (an alert, a slow
+# warning, a subclass's custom event) leaves the START unresolved — still in flight.
+_TRIGGER_START_RESOLUTION_LABELS = frozenset({
+    EV_STATE_ENTERED, EV_TRANSITION_FAILED, EV_TRIGGER_TIMED_OUT, EV_ENTRY_EXCEPTION,
+})
 
 
 class CaseJournal:
-    """The case family's domain-aware view of its event log: convention-aware reads
-    plus the sanctioned write surface, both over one `CaseEventLogReader`."""
+    """The case family's authoritative event-log protocol: convention-aware reads
+    plus the sanctioned write surface, both over one PrimitiveEventLog."""
 
-    def __init__(self, reader: CaseEventLogReader) -> None:
-        self._reader = reader
+    def __init__(self, folder: Path) -> None:
+        self._folder = Path(folder)
+        self._log = PrimitiveEventLog(event_dir=self._folder / EVENTS_DIR_NAME)
 
     @classmethod
     def for_folder(cls, folder: Path) -> "CaseJournal":
         """Build a journal over a case folder's event log."""
-        return cls(CaseEventLogReader.for_folder(Path(folder)))
+        return cls(Path(folder))
 
     # ---- escape hatches ----
-
-    @property
-    def reader(self) -> CaseEventLogReader:
-        """The underlying convention-aware reader (for anything not modeled here)."""
-        return self._reader
 
     @property
     def primitive(self) -> PrimitiveEventLog:
         """The raw, domain-agnostic log — an escape hatch for bespoke behavior not
         covered by journal methods. Prefer `log_*` for base lifecycle writes."""
-        return self._reader.primitive
+        return self._log
+
+    def view(self) -> "CaseJournalView":
+        """A fresh read-only facade over this folder's event log."""
+        return CaseJournalView.for_folder(self._folder)
+
+    @staticmethod
+    def is_base_event_label(label: str) -> bool:
+        """True when `label` belongs to the base-class lifecycle namespace (the
+        CASE_BASE_EVENT_PREFIX family). The read-side companion to write-side prefix
+        enforcement: both share one definition of the reserved prefix, so an observer
+        can split base events from a subclass's custom ones."""
+        return label.startswith(CASE_BASE_EVENT_PREFIX)
 
     # ---- write chokepoint: the naming invariant lives here ----
 
@@ -85,7 +97,7 @@ class CaseJournal:
                 f"{CASE_BASE_EVENT_PREFIX!r}; base-class events are reserved to that "
                 "prefix so subclasses can isolate their own custom events."
             )
-        return self._reader.primitive.create_event(label, value, data)
+        return self._log.create_event(label, value, data)
 
     # ---- domain writes (lifecycle facts) ----
 
@@ -149,7 +161,7 @@ class CaseJournal:
         follows (CASE_STATE_ENTERED on success; CASE_TRANSITION_FAILED / CASE_TRIGGER_TIMED_OUT /
         CASE_ENTRY_EXCEPTION on failure): a dangling START with a live lease means the
         work is in flight NOW; with a dead lease, the owner crashed mid-work. See
-        CaseEventLogReader.unresolved_trigger_started for the read side."""
+        `unresolved_trigger_started` for the read side."""
         return self._append_base(
             EV_TRIGGER_STARTED, trigger,
             {"state": state, "warn_secs": warn, "kill_secs": kill},
@@ -172,18 +184,31 @@ class CaseJournal:
     @property
     def current_state(self) -> Optional[str]:
         """Current state = the most recent CASE_STATE_ENTERED value."""
-        return self._reader.current_state
+        ev = next(self._log.events(label_glob=EV_STATE_ENTERED), None)
+        return ev.value if ev else None
+
+    @property
+    def is_terminal(self) -> bool:
+        """True when a CASE_TERMINATED bookend event is present."""
+        return bool(self._log.has_event(EV_TERMINATED))
+
+    @property
+    def status(self) -> str:
+        """Coarse 'live' / 'terminal'."""
+        return "terminal" if self.is_terminal else "live"
 
     @property
     def last_activity(self) -> Optional[datetime.datetime]:
         """Modification time of the most recent event, or None if the log is empty."""
-        return self._reader.last_activity
+        ev = next(self._log.events(), None)
+        return ev.mtime if ev else None
 
     def last_state_entered_mtime(self) -> Optional[datetime.datetime]:
         """Mtime of the latest CASE_STATE_ENTERED event (the dwell anchor), or None when
         the case has not entered a state yet (brand-new). Naive/local, like all
         event-log mtimes; the caller converts to aware UTC."""
-        return self._reader.last_state_entered_mtime
+        ev = next(self._log.events(label_glob=EV_STATE_ENTERED), None)
+        return ev.mtime if ev is not None else None
 
     def count_fails_this_dwell(self) -> int:
         """Count of failed pre-commit attempts since the current state was entered — the
@@ -193,18 +218,87 @@ class CaseJournal:
         re-firing forever under the implicit `@FAIL<1` cap. STATE-scoped: every failed
         attempt in this dwell counts, regardless of which trigger raised. Derived from the
         event log (no stored counter), so it is correct across process restarts and resets
-        naturally at the next CASE_STATE_ENTERED.
+        naturally at the next CASE_STATE_ENTERED."""
+        n = 0
+        for ev in self._log.events(recent_first=True):
+            if ev.label == EV_STATE_ENTERED:
+                break
+            if ev.label in (EV_TRANSITION_FAILED, EV_TRIGGER_TIMED_OUT):
+                n += 1
+        return n
 
-        The interpretation itself lives on the reader (`transition_fail_count`); this stays
-        as the journal's domain-named read surface, delegating like `last_activity`."""
-        return self._reader.transition_fail_count
+    @property
+    def unresolved_trigger_started(self) -> Optional[PrimitiveEventProxy]:
+        """The latest CASE_TRIGGER_STARTED not yet resolved by a completion event, or None.
+
+        Walks recent-first: the first resolution label hit (CASE_STATE_ENTERED /
+        CASE_TRANSITION_FAILED / CASE_TRIGGER_TIMED_OUT / CASE_ENTRY_EXCEPTION) means the
+        latest attempt concluded — None. Hitting a CASE_TRIGGER_STARTED first means that
+        attempt has no recorded outcome. This is a pure LOG fact: it cannot tell
+        "in flight right now" from "owner crashed mid-work" — cross-check lease
+        liveness for that (see FolderBackedCaseReader.case_active_trigger)."""
+        for ev in self._log.events(recent_first=True):
+            if ev.label == EV_TRIGGER_STARTED:
+                return ev
+            if ev.label in _TRIGGER_START_RESOLUTION_LABELS:
+                return None
+        return None
 
     def has_event_since_enter(self, label: str) -> bool:
         """True if an event with `label` has been logged since the current state was
         entered. Used to keep blocked-state alerts to one per dwell."""
-        for ev in self._reader.primitive.events(recent_first=True):
+        for ev in self._log.events(recent_first=True):
             if ev.label == EV_STATE_ENTERED:
                 return False
             if ev.label == label:
                 return True
         return False
+
+
+class CaseJournalView:
+    """Read-only facade over a case folder's event log.
+
+    Observers use this type; lifecycle writes go through CaseJournal on the owning case.
+    Instances are lightweight handles — create freely via ``for_folder`` or
+    ``CaseJournal.view()``.
+    """
+
+    def __init__(self, folder: Path) -> None:
+        self._folder = Path(folder)
+        self._journal = CaseJournal.for_folder(self._folder)
+
+    @classmethod
+    def for_folder(cls, folder: Path) -> "CaseJournalView":
+        """Build a read-only view over a case folder's event log."""
+        return cls(Path(folder))
+
+    @property
+    def primitive(self) -> PrimitiveEventLog:
+        """The underlying log — escape hatch for bespoke reads the view does not model."""
+        return self._journal.primitive
+
+    @property
+    def current_state(self) -> Optional[str]:
+        return self._journal.current_state
+
+    @property
+    def is_terminal(self) -> bool:
+        return self._journal.is_terminal
+
+    @property
+    def status(self) -> str:
+        return self._journal.status
+
+    @property
+    def last_activity(self) -> Optional[datetime.datetime]:
+        return self._journal.last_activity
+
+    def last_state_entered_mtime(self) -> Optional[datetime.datetime]:
+        return self._journal.last_state_entered_mtime()
+
+    def count_fails_this_dwell(self) -> int:
+        return self._journal.count_fails_this_dwell()
+
+    @property
+    def unresolved_trigger_started(self) -> Optional[PrimitiveEventProxy]:
+        return self._journal.unresolved_trigger_started

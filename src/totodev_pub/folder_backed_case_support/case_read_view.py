@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
-    from totodev_pub.folder_backed_case_support.case_event_log_reader import (
-        CaseEventLogReader,
+    from totodev_pub.folder_backed_case_support.case_journal import (
+        CaseJournalView,
     )
 
 
@@ -77,4 +77,4 @@ class CaseReadView(Protocol):
     def case_load_asset(self, alias: str) -> object: ...
 
     @property
-    def case_events(self) -> CaseEventLogReader: ...
+    def case_events(self) -> CaseJournalView: ...

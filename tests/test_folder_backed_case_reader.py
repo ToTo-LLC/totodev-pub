@@ -11,6 +11,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from totodev_pub.folder_backed_case import FolderBackedCase, FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.case_journal import CaseJournalView
 from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
 from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (
     asset_dataclass_registry,
@@ -243,7 +244,9 @@ def test_live_case_prep_properties(tmp_path):
         assert case.case_object_type == "SimpleCase"
         assert case.case_created == case._record.created
         assert case.case_terminal_at is None
-        assert case.case_events is case._journal.reader
+        assert isinstance(case.case_events, CaseJournalView)
+        assert case.case_events is not case._journal
+        assert case.case_events is not case._journal.view()  # fresh view each access
         assert case.case_last_activity is not None
         asyncio.run(case.begin())
         assert case.case_state == "open"
