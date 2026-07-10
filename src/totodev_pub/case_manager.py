@@ -251,6 +251,34 @@ class CaseManager:
         )
 
     # ------------------------------------------------------------------
+    # Read-only lifecycle introspection (host/observability surface)
+    # ------------------------------------------------------------------
+
+    @property
+    def recovered(self) -> bool:
+        """True once recover() has completed (start() precondition)."""
+        return self._recovered
+
+    @property
+    def running(self) -> bool:
+        """True between start() and stop()."""
+        return self._running
+
+    @property
+    def is_idle(self) -> bool:
+        """No pooled cases and no pending mailbox intake (§8 self-completion)."""
+        if len(self._driver) > 0:
+            return False
+        for intake in (
+            self._mailbox.fire_intake(),
+            self._mailbox.adopt_intake(),
+            self._mailbox.reclassify_intake(),
+        ):
+            if intake.exists() and any(intake.glob("*.yaml")):
+                return False
+        return True
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
