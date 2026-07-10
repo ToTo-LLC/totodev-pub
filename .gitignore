@@ -41,3 +41,6 @@ aws_rootkey_confidential.csv
 src/totodev_pub/.git/
 
 pypi_token
+
+# Git worktrees used for isolated agent-driven implementation work
+.worktrees/
