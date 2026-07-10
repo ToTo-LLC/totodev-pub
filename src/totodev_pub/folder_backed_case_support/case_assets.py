@@ -37,11 +37,11 @@ class CaseAssets:
 
     def __init__(self, case_folder: Path, *,
                  asset_specs: dict[str, AssetSpec] | None = None,
-                 flexible_dataclass_loading: bool = False,
+                 flexible_asset_alias_loading: bool = False,
                  keep_manifest: CaseKeepManifest | None = None):
         self._case_folder = Path(case_folder)
         self._asset_specs: dict[str, AssetSpec] = dict(asset_specs) if asset_specs else {}
-        self._flexible = flexible_dataclass_loading
+        self._flexible = flexible_asset_alias_loading
         self._keep = keep_manifest or CaseKeepManifest(self._case_folder)
 
     @property

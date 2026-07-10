@@ -23,7 +23,9 @@ from totodev_pub.cached_file_folders_support.change_notice import ChangeNotice
 from totodev_pub.cached_file_folders_support.file_proxy_base import (
     LocalRetentionRecommendation,
 )
-from totodev_pub.cached_file_folders_support.file_proxy_dummy import FileProxyDummy
+from totodev_pub.cached_file_folders_support.file_proxy_dummy import (
+    FileProxyDummy as _FileProxyDummyBase,
+)
 from totodev_pub.cached_file_folders_support import truncation_support as ts
 from totodev_pub.cached_file_folders_support.sync_types import ChangeType
 
@@ -31,6 +33,18 @@ from totodev_pub.cached_file_folders_support.sync_types import ChangeType
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+class FileProxyDummy(_FileProxyDummyBase):
+    """Local override: default to fast materialization (real default is 2.5s).
+
+    Every dummy subclass below inherits from this, not the library class, so the
+    whole file gets fast, deterministic proxies unless a test explicitly passes
+    its own materialize_secs.
+    """
+
+    def __init__(self, *args, materialize_secs: float = 0.0, **kwargs):
+        super().__init__(*args, materialize_secs=materialize_secs, **kwargs)
+
 
 class TruncatingDummy(FileProxyDummy):
     """FileProxyDummy variant that always recommends TRUNCATE.

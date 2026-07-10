@@ -29,7 +29,7 @@ class FolderBackedCaseReader:
     on first use; asset file content stays live per ``CaseAssets`` call.
 
     ``case_dwell_secs`` and ``case_lease_secs_left`` grow/shrink between reads
-    (``now()``-relative). ``case_assets`` uses ``flexible_dataclass_loading=True``.
+    (``now()``-relative). ``case_assets`` uses ``flexible_asset_alias_loading=True``.
 
     Pass ``resolve_asset_types=True`` to load aliases via the asset-dataclass registry;
     otherwise ``LazyLoadedFileData`` is used.

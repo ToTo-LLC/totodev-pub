@@ -19,10 +19,10 @@ from totodev_pub.folder_backed_case import (
     FolderBackedCase,
     LogRetention,
     set_case_log_retention,
-    LOGS_DIR_NAME,
 )
 from totodev_pub.folder_backed_case_support import get_case_log_retention
 from totodev_pub.folder_backed_case_support.constants import (
+    LOGS_DIR_NAME,
     LOG_FILE_NAME,
     LOG_PURGE_SENTINEL,
 )

@@ -1047,7 +1047,7 @@ def test_guard_releases_after_failed_transition(tmp_path):
 
 
 class _StampCase(FolderBackedCase):
-    flexible_dataclass_loading = True
+    flexible_asset_alias_loading = True
     asset_aliases = {"receipts/rlist.json": (lambda p: p.read_text())}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--begin-->done^"]
@@ -1071,7 +1071,7 @@ def test_missing_asset_schema_raises_on_create(tmp_path):
 
 def test_resolve_asset_book_projects_strings():
     class DeclCase(FolderBackedCase):
-        flexible_dataclass_loading = True
+        flexible_asset_alias_loading = True
         asset_aliases = {"receipts/Overall--rlist.json": (lambda p: p)}
         fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->done^"]

@@ -3,9 +3,20 @@
 import pytest
 
 from case_manager_test_utils import TicketCase, adopt_into_live, provision_manager, seed_detached_case
+from totodev_pub.pytest_tools import very_lazy_test
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
+@very_lazy_test(
+    [
+        "case_manager_test_utils.py",
+        "totodev_pub.case_manager",
+        "totodev_pub.case_manager_support.recover",
+        "totodev_pub.folder_backed_case_support.pool_membership_journal",
+    ],
+    reverify_days=21,
+)
 async def test_recover_restores_pool(tmp_path):
     manager = provision_manager(tmp_path)
     staging = tmp_path / "staging"

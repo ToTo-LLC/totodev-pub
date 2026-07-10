@@ -83,7 +83,7 @@ class AliasedAssetSpecs:
             if not flexible:
                 raise AssetSchemaError(
                     "asset_aliases simple-dict form is only valid under "
-                    "flexible_dataclass_loading=True or when empty; use a list of dicts "
+                    "flexible_asset_alias_loading=True or when empty; use a list of dicts "
                     "with path, loader, and states."
                 )
             for key, loader in raw.items():
@@ -147,7 +147,7 @@ class AliasedAssetSpecs:
                     if not flexible:
                         raise AssetSchemaError(
                             "asset_aliases list of AssetSpec instances is only valid "
-                            "under flexible_dataclass_loading=True; use list-of-dicts "
+                            "under flexible_asset_alias_loading=True; use list-of-dicts "
                             "with path, loader, and states."
                         )
                     rel = _norm_rel(entry.relative_path)
@@ -272,13 +272,13 @@ class AliasedAssetSpecs:
                     raise AssetSchemaError(
                         f"alias {alias!r} ({spec.relative_path!r}) has no loader. "
                         "Give it a FileMappedPydanticMixin subclass or a "
-                        "Callable[[Path], Any], or enable flexible_dataclass_loading."
+                        "Callable[[Path], Any], or enable flexible_asset_alias_loading."
                     )
                 if spec.states is None:
                     raise AssetSchemaError(
                         f"alias {alias!r} ({spec.relative_path!r}) has no states. "
                         "Declare the FSM states in which this asset is trustworthy, "
-                        "or enable flexible_dataclass_loading."
+                        "or enable flexible_asset_alias_loading."
                     )
             if spec.states is not None:
                 if not spec.states:

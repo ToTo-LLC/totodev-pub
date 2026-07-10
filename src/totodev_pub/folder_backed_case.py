@@ -15,15 +15,13 @@ Core pieces
 -----------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
 CaseEventLogReader      — read-oriented convention interpreter over PrimitiveEventLog.
-CaseJournal             — domain-aware event-log write facade (internal; reads use case_events).
 CaseAssets              — working-file playground + retention manifest (_keep.txt).
 FolderBackedCase        — ABC you subclass to define a case type.
 FolderBackedCaseReader  — lock-free read-only folder view (no lease, no registry).
 CaseReadView            — Protocol shared by live case and reader.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
 CaseTypeSpec            — compiled class-behavior contract (FSM + assets).
-StateChainParser        — authoritative source for the state-chains DSL: parser/compiler and
-                          validation logic used by FolderBackedCase.compile_fsm().
+FsmChainSpec            — compiled state-chains DSL, as returned by compile_fsm().
 
 Terminology
 -----------
@@ -31,17 +29,21 @@ See volatile/tmp/case-docs-glossary.md for standard terms (case, record, rehydra
 bind/detach, journal vs reader, CaseManager).
 
 The tightly-coupled supporting classes live in the folder_backed_case_support
-package and are re-exported here for convenience. This facade exposes only the
-case's OWN surface — what a case is composed of, returns, and raises. Layers that
-sit ABOVE the individual case are NOT re-exported and must be imported from their
-own modules: name-driven resolution lives in CaseTypeRegistry / case_type_registry
-(folder_backed_case_support.case_type_registry), and the case-driving/scheduling
-seam lives in CasePoolDriver (folder_backed_case_support.case_pool_driver).
+package. This facade re-exports only the case's OWN surface — the types actually
+returned by, or raised by, a FolderBackedCase's own public methods. Implementation
+details that never surface through a public method (e.g. CaseJournal, HeartbeatLease,
+StateChainParser, the individual folder-layout name constants) are internal and must
+be imported from their own submodule under folder_backed_case_support if you really
+need them. Layers that sit ABOVE the individual case are likewise NOT re-exported and
+must be imported from their own modules: name-driven resolution lives in
+CaseTypeRegistry / case_type_registry (folder_backed_case_support.case_type_registry),
+and the case-driving/scheduling seam lives in CasePoolDriver
+(folder_backed_case_support.case_pool_driver).
 
 Quick start
 -----------
     class TicketCase(FolderBackedCase):
-        fsm_state_chains = ["^new --open_ticket-->open ==close_ticket-->closed^"
+        fsm_state_chains = ["^new --open_ticket--> open ==close_ticket-->closed^"
                             "*--@DWELL>14d#non_responsive-->auto_closed^", # all state timed-escape edge
                            ]
 
@@ -49,13 +51,15 @@ Quick start
             {"path": "ticket.yaml", "loader": Callable, "states": {"new", "open", "closed"}}, # alias "ticket"
             {"path": "resolution-log/customer--convo.md", "loader": ChatLog, "states": {"open"}}, # alias "convo"
         ]
-        fsm_trigger_chokes = {}  # no capacity-constrained resources for this case type
+        fsm_trigger_chokes = {"open_ticket": {"cpu"}}  # pretend it takes lots of cpu
 
         async def perform_open_ticket(self, tctx) -> None:
             # called by the open_ticket() trigger
+            # when this case is run in a pool, it may wait on other "cpu" choking triggers
 
         async def perform_close_ticket(self, tctx) -> None:
             # called by the close_ticket() trigger
+            # note that the fsm_state_chains say this step isn't auto-triggered (by advance())
 
         async def on_enter_closed(self, tctx) -> None:
             # do something like notify the customer that their ticket has been closed
@@ -92,8 +96,7 @@ from pathlib import Path
 from typing import Any
 
 from totodev_pub.folder_backed_case_support.constants import (
-    RECORD_NAME, LEASE_NAME, EVENTS_DIR_NAME, ASSETS_DIR_NAME, KEEP_LIST_NAME,
-    LOGS_DIR_NAME, LOG_FILE_NAME,
+    RECORD_NAME, LEASE_NAME, LOGS_DIR_NAME, LOG_FILE_NAME,
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
     DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
@@ -131,15 +134,14 @@ from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "FolderBackedCase", "FolderBackedCaseReader", "CaseReadView", "HeartbeatLease",
-    "CaseRecord", "CaseEventLogReader", "CaseJournal", "CaseAssets", "AdvanceResult",
-    "StateChainParser", "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
+    "FolderBackedCase", "FolderBackedCaseReader", "CaseReadView",
+    "CaseRecord", "CaseEventLogReader", "CaseAssets", "AdvanceResult",
+    "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
     "MissingAssetSchemaError", "MissingTriggerChokesError",
-    "RECORD_NAME", "LEASE_NAME", "EVENTS_DIR_NAME", "ASSETS_DIR_NAME", "KEEP_LIST_NAME",
-    "LOGS_DIR_NAME", "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
+    "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
 ]
 
@@ -250,7 +252,7 @@ class FolderBackedCase(ABC):
     # When False (default), every declared alias must specify loader and states.
     # When True, informal declarations are allowed; omitted states/loader make the
     # guard a no-op for that alias.
-    flexible_dataclass_loading: bool = False
+    flexible_asset_alias_loading: bool = False
 
     # ---- Hook & guard naming (see class docstring for full rules) ----
     #
@@ -788,7 +790,7 @@ class FolderBackedCase(ABC):
             record.asset_aliases, resolve_types=resolve_asset_types
         ).spec_map()
         return CaseAssets(
-            Path(folder), asset_specs=specs, flexible_dataclass_loading=True,
+            Path(folder), asset_specs=specs, flexible_asset_alias_loading=True,
         )
 
     @staticmethod
@@ -842,7 +844,7 @@ class FolderBackedCase(ABC):
             raise MissingAssetSchemaError(cls.__name__)
         if cls._asset_book is None:
             cls._asset_book = AliasedAssetSpecs.from_declaration(
-                cls.asset_aliases, flexible=cls.flexible_dataclass_loading,
+                cls.asset_aliases, flexible=cls.flexible_asset_alias_loading,
             )
         return cls._asset_book
 
@@ -1152,7 +1154,7 @@ class FolderBackedCase(ABC):
         cls._fsm = cls.compile_fsm()
         if cls.asset_aliases is not FolderBackedCase._ASSET_ALIASES_NOT_DECLARED:
             cls._asset_book = AliasedAssetSpecs.from_declaration(
-                cls.asset_aliases, flexible=cls.flexible_dataclass_loading,
+                cls.asset_aliases, flexible=cls.flexible_asset_alias_loading,
             )
             if not cls._asset_book.aliases():
                 logger.warning(
@@ -1223,7 +1225,7 @@ class FolderBackedCase(ABC):
                 sealed_owner=FolderBackedCase,
             )
             cls._resolve_asset_book().validate_against_fsm(
-                cls._fsm, flexible=cls.flexible_dataclass_loading,
+                cls._fsm, flexible=cls.flexible_asset_alias_loading,
             )
             cls._fsm_binding_checked = True
         self._folder = Path(case_folder)
@@ -1256,7 +1258,7 @@ class FolderBackedCase(ABC):
         self._assets = CaseAssets(
             self._folder,
             asset_specs=type(self)._resolve_asset_book().spec_map(),
-            flexible_dataclass_loading=cls.flexible_dataclass_loading,
+            flexible_asset_alias_loading=cls.flexible_asset_alias_loading,
             keep_manifest=self._keep_manifest,
         )
         self._listeners: list = []        # fn(case, event_name, info)

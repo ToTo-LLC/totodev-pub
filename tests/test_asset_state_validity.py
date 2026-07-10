@@ -48,7 +48,7 @@ class TicketCase(FolderBackedCase):
 
 
 class FlexibleCase(FolderBackedCase):
-    flexible_dataclass_loading = True
+    flexible_asset_alias_loading = True
     fsm_state_chains = ["^new==go-->done^"]
     asset_aliases = [
         {"path": "unguarded.json"},

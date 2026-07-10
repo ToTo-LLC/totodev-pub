@@ -123,7 +123,7 @@ def test_flexible_loading_returns_lazy(tmp_path):
     assets = CaseAssets(
         tmp_path / "c6",
         asset_specs={"cfg": AssetSpec("cfg", "cfg.json", None)},
-        flexible_dataclass_loading=True,
+        flexible_asset_alias_loading=True,
     )
     _write_json(assets, "cfg.json", {"feature": True})
     lazy = assets.load_dataclass("cfg")
