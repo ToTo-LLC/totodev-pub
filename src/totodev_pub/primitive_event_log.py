@@ -143,16 +143,22 @@ class PrimitiveEventLog:
             raise ValueError(f"file_format must be 'yaml' or 'json', got '{file_format}'")
         
         self._file_extension = self.file_format
-        
+
+        # Lazily-populated shared raw scan: (monotonic timestamp, unfiltered
+        # proxies). Stays None — no memory/behavior cost — until some caller
+        # passes cache_msecs > 0. See `_cached_scan`.
+        self._cache_scan: Optional[tuple[float, list[PrimitiveEventProxy]]] = None
+
         if force:
             self.event_dir.mkdir(parents=True, exist_ok=True)
             self._cleanup_placeholders(self.event_dir)
-    
+
     def events(
         self,
         label_glob: str = '*',
         value_glob: str = '*',
-        recent_first: bool = True
+        recent_first: bool = True,
+        cache_msecs: int = 0,
     ) -> Generator[PrimitiveEventProxy, None, None]:
         """
         Generator yielding PrimitiveEventProxy objects matching glob patterns.
@@ -162,6 +168,17 @@ class PrimitiveEventLog:
             label_glob: Pattern to filter labels (default: '*' for all labels)
             value_glob: Pattern to filter values (default: '*' for all values)
             recent_first: events yielded in recent first order, else oldest first
+            cache_msecs: Tolerate a directory scan up to this many milliseconds
+                old instead of always re-walking the folder. 0 (default)
+                disables caching entirely: every call re-scans, exactly like
+                before this parameter existed. A positive value shares ONE
+                cached scan across every caller on this instance that also
+                passes cache_msecs > 0 — label_glob/value_glob are applied
+                in-memory afterward, so they don't fragment the cache. Any
+                create_event() or purge() on this instance invalidates the
+                cache, so a writer always sees its own writes regardless of
+                cache_msecs. A race between threads just costs a redundant
+                scan, never stale-forever data.
             
         Yields:
             Matching events (newest first by default)
@@ -170,12 +187,31 @@ class PrimitiveEventLog:
             for event in log.events(label_glob='OCR-*', value_glob='COMPLETE*'):
                 print(f"{event.label_value} at {event.mtime}")
         """
+        proxies = self._cached_scan(cache_msecs) if cache_msecs > 0 else self._scan_all()
+
+        matching_proxies = [
+            proxy for proxy in proxies
+            if fnmatch.fnmatch(proxy.label, label_glob) and fnmatch.fnmatch(proxy.value, value_glob)
+        ]
+
+        # Sort by (directory, filename) tuple - proxy's __lt__ handles this
+        matching_proxies.sort(reverse=recent_first)
+
+        # Yield results
+        for proxy in matching_proxies:
+            yield proxy
+
+    def _scan_all(self) -> list[PrimitiveEventProxy]:
+        """Walk the event directory and parse every real event file into a
+        proxy. Unfiltered and unsorted — callers apply glob filtering and
+        ordering themselves. The one place that touches the filesystem to
+        discover events; `events()` calls this directly (cache_msecs <= 0)
+        or via `_cached_scan` (cache_msecs > 0)."""
         if not self.event_dir.exists():
-            return
-        
-        # Collect matching event proxies
-        matching_proxies = []
-        
+            return []
+
+        proxies = []
+
         # NOTE: Could optimize by using self.event_dir.glob() as pre-filter, then fnmatch for exact matching
         for file_path in self.event_dir.iterdir():
             # Skip placeholder, lock, and any temp files
@@ -190,43 +226,42 @@ class PrimitiveEventLog:
             if not match:
                 # Skip silently if invalid format
                 continue
-            
-            seq_num = int(match.group(1))
+
             label = match.group(2)
             value = match.group(3) or ""
-            
-            # Filter by label glob
-            if not fnmatch.fnmatch(label, label_glob):
-                continue
-            
-            # Filter by value glob
-            if not fnmatch.fnmatch(value, value_glob):
-                continue
-            
-            # Create PrimitiveEventProxy with parsed values
-            proxy = PrimitiveEventProxy(
+
+            proxies.append(PrimitiveEventProxy(
                 file_path=file_path,
                 label=label,
                 value=value
-            )
-            matching_proxies.append(proxy)
-        
-        # Sort by (directory, filename) tuple - proxy's __lt__ handles this
-        matching_proxies.sort(reverse=recent_first)
-        
-        # Yield results
-        for proxy in matching_proxies:
-            yield proxy
+            ))
+
+        return proxies
+
+    def _cached_scan(self, cache_msecs: int) -> list[PrimitiveEventProxy]:
+        """Serve the shared raw scan if it's no older than `cache_msecs`,
+        otherwise refresh it. Assumes cache_msecs > 0 — callers check that."""
+        now = time.monotonic()
+        if self._cache_scan is not None:
+            scanned_at, cached_proxies = self._cache_scan
+            if (now - scanned_at) * 1000 <= cache_msecs:
+                return cached_proxies
+
+        fresh = self._scan_all()
+        self._cache_scan = (now, fresh)
+        return fresh
     
     def latest_values(
         self,
-        label_glob: str = '*'
+        label_glob: str = '*',
+        cache_msecs: int = 0,
     ) -> MappingProxyType[str, str]:
         """
         Read-only dict mapping each label to its latest value.
         
         Args:
             label_glob: Pattern to filter labels (default: '*' for all labels)
+            cache_msecs: Forwarded to `events()` — see its docstring.
         
         Returns:
             Read-only dict {label: most_recent_value} for all matching labels
@@ -242,20 +277,23 @@ class PrimitiveEventLog:
         """
         # Build fresh result
         result = {}
-        for event in self.events(label_glob=label_glob, recent_first=False):
+        for event in self.events(label_glob=label_glob, recent_first=False, cache_msecs=cache_msecs):
             result[event.label] = event.value  # Later events overwrite earlier ones
         
         return MappingProxyType(result)
     
-    def has_event(self, label: str) -> str | bool:
-        """Check if event with exact label exists, returning value string, True, or False."""
-        event = next(self.events(label_glob=label), None)
+    def has_event(self, label: str, cache_msecs: int = 0) -> str | bool:
+        """Check if event with exact label exists, returning value string, True, or False.
+
+        cache_msecs is forwarded to `events()` — see its docstring."""
+        event = next(self.events(label_glob=label, cache_msecs=cache_msecs), None)
         return event.value if event and event.value else (True if event else False)
     
     def segment_events(
         self,
         start_label_globs: str | Sequence[str],
         start_value_glob: str = "*",
+        cache_msecs: int = 0,
     ) -> Generator[tuple[PrimitiveEventProxy, ...], None, None]:
         """
         Group the event history into chronological runs, each starting at a matching event.
@@ -270,6 +308,7 @@ class PrimitiveEventLog:
         Args:
             start_label_globs: Glob pattern or sequence of patterns for label matching.
             start_value_glob: Glob pattern applied to event values (default '*').
+            cache_msecs: Forwarded to `events()` — see its docstring.
 
         Yields:
             Tuples of PrimitiveEventProxy, oldest segment first. Each tuple starts
@@ -300,7 +339,7 @@ class PrimitiveEventLog:
             return
 
         current_segment: list[PrimitiveEventProxy] = []
-        for event in self.events(recent_first=False):
+        for event in self.events(recent_first=False, cache_msecs=cache_msecs):
             if any(fnmatch.fnmatch(event.label, pattern) for pattern in label_patterns) and fnmatch.fnmatch(event.value, start_value_glob):
                 if current_segment:
                     yield tuple(current_segment)
@@ -394,7 +433,12 @@ class PrimitiveEventLog:
                     # Atomic rename: placeholder → final event file
                     # Readers never see the placeholder because events() filters them out
                     placeholder_path.rename(file_path)
-                    
+
+                    # Invalidate any cached scan: a caller that both writes and
+                    # reads through this same instance must always see its own
+                    # write, regardless of a positive cache_msecs on the read.
+                    self._cache_scan = None
+
                     # Create and return PrimitiveEventProxy
                     proxy = PrimitiveEventProxy(
                         file_path=file_path,
@@ -431,6 +475,8 @@ class PrimitiveEventLog:
         """
         if self.event_dir.exists():
             shutil.rmtree(self.event_dir)
+        # A stale cached scan would hold proxies pointing at now-deleted files.
+        self._cache_scan = None
     
     @staticmethod
     def _cleanup_placeholders(event_dir: Path, age_seconds: float = 60) -> int:
