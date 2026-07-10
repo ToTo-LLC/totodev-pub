@@ -93,6 +93,10 @@ logger = logging.getLogger(__name__)
 _TIER1_KWARGS = frozenset(CaseManagerPolicy.tier1_field_names())
 _TIER2_KWARGS = frozenset(CaseManagerPolicy.tier2_field_names())
 
+# §1 loop hardening: consecutive failed loop iterations before the manager
+# gives up retrying and hands the failure to the host (or re-raises).
+_LOOP_FAILURE_LIMIT = 3
+
 
 class CaseManager:
     """Fleet coordinator composing cache, driver, registry, and protocol dirs."""
@@ -121,6 +125,7 @@ class CaseManager:
         self._running = False
         self._stopping = False
         self._run_task: asyncio.Task[None] | None = None
+        self._loop_failure_cb: Callable[[BaseException], None] | None = None
         self._terminated_handle: Any = None
         self._eject_waiters: dict[str, asyncio.Future[EjectResult]] = {}
         self._last_maintenance: float = 0.0
@@ -295,6 +300,10 @@ class CaseManager:
                 await self._run_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                # The loop already logged its own failure before dying; a dead
+                # loop task must not abort a deliberate stop().
+                logger.exception("Manager loop task had already died; continuing stop()")
             self._run_task = None
         await self._driver.stop()
         if timeout is not None:
@@ -312,10 +321,32 @@ class CaseManager:
 
     async def _manager_loop(self) -> None:
         interval = self._policy.maintenance_interval_secs
+        consecutive_failures = 0
         while self._running and not self._stopping:
-            await self._driver.advance(suggested_interval_secs=interval)
-            self._reconcile_terminal_in_pool()
-            await self._maintenance_tick()
+            try:
+                await self._driver.advance(suggested_interval_secs=interval)
+                self._reconcile_terminal_in_pool()
+                await self._maintenance_tick()
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                logger.exception(
+                    "Manager loop iteration failed (%d consecutive of %d allowed)",
+                    consecutive_failures,
+                    _LOOP_FAILURE_LIMIT,
+                )
+                if consecutive_failures >= _LOOP_FAILURE_LIMIT:
+                    if self._loop_failure_cb is not None:
+                        logger.error(
+                            "Manager loop giving up after %d consecutive failures; "
+                            "invoking on_loop_failure",
+                            consecutive_failures,
+                        )
+                        self._loop_failure_cb(exc)
+                        return
+                    raise
             await asyncio.sleep(interval)
 
     async def _maintenance_tick(self) -> None:
@@ -710,6 +741,13 @@ class CaseManager:
 
     def off_escalation(self, handle: int) -> None:
         self._escalations.unregister(handle)
+
+    def on_loop_failure(self, callback: Callable[[BaseException], None]) -> None:
+        """Register the single host callback invoked when the manager loop gives
+        up after repeated consecutive failures. A host (``serve()``) wires this
+        to the watchdog's kill ladder; with no callback registered the loop
+        re-raises instead (embedded usage — logged loudly, task dies)."""
+        self._loop_failure_cb = callback
 
     # ------------------------------------------------------------------
     # Internal helpers
