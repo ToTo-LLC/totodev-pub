@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
 
@@ -22,6 +23,7 @@ from totodev_pub.case_manager_support.constants import (
     FLEET_STATUS_FILENAME,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
+    PULSE_INTERVAL_SECS,
 )
 from totodev_pub.case_manager_support.eject import (
     EjectResult,
@@ -63,6 +65,7 @@ from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor
 from totodev_pub.case_manager_support.purge import PurgeReport, run_redundant_purge
 from totodev_pub.case_manager_support.reap import ReapReport, reap as run_reap
 from totodev_pub.case_manager_support.recover import RecoverReport, recover_manager
+from totodev_pub.case_manager_support.shutdown import ShutdownDirective
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager_support.termination import (
     TerminationTicket,
@@ -93,6 +96,10 @@ logger = logging.getLogger(__name__)
 _TIER1_KWARGS = frozenset(CaseManagerPolicy.tier1_field_names())
 _TIER2_KWARGS = frozenset(CaseManagerPolicy.tier2_field_names())
 
+# §1 loop hardening: consecutive failed loop iterations before the manager
+# gives up retrying and hands the failure to the host (or re-raises).
+_LOOP_FAILURE_LIMIT = 3
+
 
 class CaseManager:
     """Fleet coordinator composing cache, driver, registry, and protocol dirs."""
@@ -121,9 +128,16 @@ class CaseManager:
         self._running = False
         self._stopping = False
         self._run_task: asyncio.Task[None] | None = None
+        self._loop_failure_cb: Callable[[BaseException], None] | None = None
+        self._shutdown_request_cb: Callable[[ShutdownDirective], None] | None = None
         self._terminated_handle: Any = None
         self._eject_waiters: dict[str, asyncio.Future[EjectResult]] = {}
-        self._last_maintenance: float = 0.0
+        # §2 liveness stamps (read by the watchdog thread; write-only here).
+        self._last_pulse: float | None = None
+        self._last_tick_started: float | None = None
+        self._last_tick_completed: float | None = None
+        self._last_heartbeat_write: float = 0.0
+        self._pulse_task: asyncio.Task[None] | None = None
         self._recovered = False
         self.last_recover_report: RecoverReport | None = None
         self._fleet_board: FleetStatusBoardWriter | None = None
@@ -239,6 +253,34 @@ class CaseManager:
         )
 
     # ------------------------------------------------------------------
+    # Read-only lifecycle introspection (host/observability surface)
+    # ------------------------------------------------------------------
+
+    @property
+    def recovered(self) -> bool:
+        """True once recover() has completed (start() precondition)."""
+        return self._recovered
+
+    @property
+    def running(self) -> bool:
+        """True between start() and stop()."""
+        return self._running
+
+    @property
+    def is_idle(self) -> bool:
+        """No pooled cases and no pending mailbox intake (§8 self-completion)."""
+        if len(self._driver) > 0:
+            return False
+        for intake in (
+            self._mailbox.fire_intake(),
+            self._mailbox.adopt_intake(),
+            self._mailbox.reclassify_intake(),
+        ):
+            if intake.exists() and any(intake.glob("*.yaml")):
+                return False
+        return True
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -272,11 +314,21 @@ class CaseManager:
                 self._on_fleet_board_event,
             )
         self._write_manifest(running=True)
+        self._last_heartbeat_write = time.monotonic()
+        self._last_pulse = time.monotonic()
         self._run_task = asyncio.create_task(self._manager_loop())
+        self._pulse_task = asyncio.create_task(self._pulse_loop())
 
     async def stop(self, *, timeout: float | None = None) -> None:
         self._stopping = True
         self._running = False
+        if self._pulse_task is not None:
+            self._pulse_task.cancel()
+            try:
+                await self._pulse_task
+            except asyncio.CancelledError:
+                pass
+            self._pulse_task = None
         if self._terminated_handle is not None:
             try:
                 self._driver.case_event_unsubscribe(self._terminated_handle)
@@ -295,6 +347,10 @@ class CaseManager:
                 await self._run_task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                # The loop already logged its own failure before dying; a dead
+                # loop task must not abort a deliberate stop().
+                logger.exception("Manager loop task had already died; continuing stop()")
             self._run_task = None
         await self._driver.stop()
         if timeout is not None:
@@ -312,14 +368,55 @@ class CaseManager:
 
     async def _manager_loop(self) -> None:
         interval = self._policy.maintenance_interval_secs
+        consecutive_failures = 0
         while self._running and not self._stopping:
-            await self._driver.advance(suggested_interval_secs=interval)
-            self._reconcile_terminal_in_pool()
-            await self._maintenance_tick()
+            try:
+                await self._driver.advance(suggested_interval_secs=interval)
+                self._reconcile_terminal_in_pool()
+                await self._maintenance_tick()
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                logger.exception(
+                    "Manager loop iteration failed (%d consecutive of %d allowed)",
+                    consecutive_failures,
+                    _LOOP_FAILURE_LIMIT,
+                )
+                if consecutive_failures >= _LOOP_FAILURE_LIMIT:
+                    if self._loop_failure_cb is not None:
+                        logger.error(
+                            "Manager loop giving up after %d consecutive failures; "
+                            "invoking on_loop_failure",
+                            consecutive_failures,
+                        )
+                        self._loop_failure_cb(exc)
+                        return
+                    raise
             await asyncio.sleep(interval)
 
+    async def _pulse_loop(self) -> None:
+        """Liveness pulse — measures the event loop, not the tick.
+
+        Stamps ``_last_pulse`` every ``PULSE_INTERVAL_SECS`` (the watchdog's
+        kill-authorized signal) and writes the manifest heartbeat on its own
+        cadence, so a healthy manager doing one slow mailbox fire never looks
+        stale to clients."""
+        while self._running:
+            now = time.monotonic()
+            self._last_pulse = now
+            if now - self._last_heartbeat_write >= self._policy.maintenance_interval_secs:
+                try:
+                    self._write_manifest(running=True)
+                except Exception:
+                    logger.exception("Pulse loop manifest heartbeat write failed")
+                else:
+                    self._last_heartbeat_write = now
+            await asyncio.sleep(PULSE_INTERVAL_SECS)
+
     async def _maintenance_tick(self) -> None:
-        import time
+        self._last_tick_started = time.monotonic()
         loop = asyncio.get_running_loop()
         for ticket_file in replay_pending(self._manager_dir):
             ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
@@ -356,8 +453,8 @@ class CaseManager:
         ):
             await loop.run_in_executor(None, lambda: run_redundant_purge(self._cache, self._policy))
         self._publish_fleet_status_board()
-        self._write_manifest(running=True)
         self._detect_escalations()
+        self._last_tick_completed = time.monotonic()
 
     def _fleet_locate(self) -> Callable[[str], Any]:
         return lambda cid: self.locate(case_id=cid)
@@ -711,6 +808,30 @@ class CaseManager:
     def off_escalation(self, handle: int) -> None:
         self._escalations.unregister(handle)
 
+    def on_loop_failure(self, callback: Callable[[BaseException], None]) -> None:
+        """Register the single host callback invoked when the manager loop gives
+        up after repeated consecutive failures. A host (``serve()``) wires this
+        to the watchdog's kill ladder; with no callback registered the loop
+        re-raises instead (embedded usage — logged loudly, task dies)."""
+        self._loop_failure_cb = callback
+
+    def on_shutdown_request(self, callback: Callable[[ShutdownDirective], None]) -> None:
+        """Register the single host callback invoked when a shutdown-mailbox
+        request is picked up cooperatively (the watchdog has its own pickup
+        path). serve() wires this to the §6 shutdown protocol."""
+        self._shutdown_request_cb = callback
+
+    def _notify_shutdown_request(self, directive: ShutdownDirective) -> None:
+        if self._shutdown_request_cb is None:
+            logger.warning(
+                "Shutdown request %s received but no host is registered "
+                "(embedded start() usage?); discarded — a manager that nobody "
+                "hosts cannot promise process exit semantics.",
+                directive.source_path.name,
+            )
+            return
+        self._shutdown_request_cb(directive)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -821,6 +942,7 @@ class CaseManager:
             (mgr_dir / policy.reclassify_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
+        (mgr_dir / policy.shutdown_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         ensure_board_file(mgr_dir, enabled=policy.enable_fleet_status_board)
         live = mgr_dir.parent / policy.live_bucket
         live.mkdir(parents=True, exist_ok=True)
@@ -836,6 +958,9 @@ class CaseManager:
             ),
             reclassify_mailbox_intake=rel(
                 self._manager_dir / self._policy.reclassify_mailbox_subdir / "intake"
+            ),
+            shutdown_mailbox_intake=rel(
+                self._manager_dir / self._policy.shutdown_mailbox_subdir / "intake"
             ),
             results=rel(self._manager_dir / "results"),
             adopt_drop=rel(self._manager_dir / self._policy.adopt_drop_subdir),

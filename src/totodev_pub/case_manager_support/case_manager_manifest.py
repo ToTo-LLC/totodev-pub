@@ -26,6 +26,9 @@ class ManifestPaths(BaseModel):
     # Optional for manifest back-compat: absent in manifests written before the
     # reclassify mailbox existed.
     reclassify_mailbox_intake: Optional[str] = None
+    # Optional for manifest back-compat: absent in manifests written before the
+    # shutdown mailbox existed.
+    shutdown_mailbox_intake: Optional[str] = None
 
 
 class CaseManagerManifest(BaseModel, FileMappedPydanticMixin):

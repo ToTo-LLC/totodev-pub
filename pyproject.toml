@@ -89,6 +89,9 @@ dev = [
   "ruff",
 ]
 
+[project.scripts]
+totodev-manager-health = "totodev_pub.cli.manager_health:main"
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

@@ -52,3 +52,26 @@ def test_tier1_override_mismatch(tmp_path):
     CaseManager.provision(tmp_path / "cache", live_bucket="live")
     with pytest.raises(PolicyMismatchError):
         CaseManager.attach(tmp_path / "cache", live_bucket="other")
+
+
+def test_watchdog_and_shutdown_policy_fields():
+    from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
+
+    policy = CaseManagerPolicy()
+    assert policy.shutdown_mailbox_subdir == "shutdown_mailbox"
+    assert policy.watchdog_enabled is True
+    assert policy.watchdog_action == "exit"
+    assert policy.watchdog_pulse_stuck_secs is None
+    assert policy.watchdog_mailbox_stale_secs is None
+    assert policy.watchdog_tick_warn_secs is None
+    assert "shutdown_mailbox_subdir" in CaseManagerPolicy.tier1_field_names()
+    for name in (
+        "watchdog_enabled",
+        "watchdog_action",
+        "watchdog_pulse_stuck_secs",
+        "watchdog_mailbox_stale_secs",
+        "watchdog_tick_warn_secs",
+    ):
+        assert name in CaseManagerPolicy.tier2_field_names()
+    tuned = policy.apply_tier2_overrides(watchdog_pulse_stuck_secs=2.5)
+    assert tuned.watchdog_pulse_stuck_secs == 2.5
