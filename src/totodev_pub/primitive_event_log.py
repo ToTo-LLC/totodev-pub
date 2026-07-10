@@ -258,20 +258,38 @@ class PrimitiveEventLog:
         start_value_glob: str = "*",
     ) -> Generator[tuple[PrimitiveEventProxy, ...], None, None]:
         """
-        Yield chronological event segments partitioned by marker events.
+        Group the event history into chronological runs, each starting at a matching event.
 
-        Each time an event matches any of the provided label globs in combination
-        with the value glob, a new segment begins that includes the matching event.
-        Events prior to the first marker are ignored.
+        Use this to break a log into repeated "episodes"—e.g. every time a state
+        machine re-enters a state, or every retry attempt—so you can inspect each
+        episode's events on their own. Every event that matches start_label_globs
+        (by label) and start_value_glob (by value) begins a new segment; that
+        matching event is included, followed by all subsequent events up to
+        (but not including) the next matching event.
 
         Args:
             start_label_globs: Glob pattern or sequence of patterns for label matching.
             start_value_glob: Glob pattern applied to event values (default '*').
 
         Yields:
-            Tuples of PrimitiveEventProxy instances, each representing one segment.
-            Each yielded tuple begins with an event that matches the start_label_globs and start_value_glob,
-            and is followed by the sequential events that occur before the next marker event.
+            Tuples of PrimitiveEventProxy, oldest segment first. Each tuple starts
+            with a matching event and contains the events that follow it, up to
+            the next match.
+
+        Edge cases:
+            - Events before the first match are dropped entirely (no leading partial segment).
+            - The final segment runs to the end of the log; it doesn't need a closing match.
+            - No matches at all yields nothing (an empty iterator).
+
+        Example:
+            log.create_event('STATE', 'IDLE')      # dropped: before first match
+            log.create_event('STATE', 'ENTER')      # starts segment 1
+            log.create_event('ACTION', 'RUNNING')   # in segment 1
+            log.create_event('STATE', 'ENTER')      # starts segment 2
+            log.create_event('ACTION', 'DONE')      # in segment 2
+
+            segments = list(log.segment_events('STATE', start_value_glob='ENTER'))
+            # [(STATE@ENTER, ACTION@RUNNING), (STATE@ENTER, ACTION@DONE)]
         """
         if isinstance(start_label_globs, str):
             label_patterns: Sequence[str] = (start_label_globs,)
