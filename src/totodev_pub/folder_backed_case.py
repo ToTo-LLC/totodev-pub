@@ -11,14 +11,13 @@ moved atomically. Objects descended from this class represent things like
 a support trouble ticket, an inbound document for processing, a contract
 bundle to be reviewed, etc.
 
-Core pieces
------------
+Core pieces (case authors)
+--------------------------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
 CaseJournalView         — read-only facade over the case event-log protocol.
 CaseAssets              — working-file playground + retention manifest (_keep.txt).
 FolderBackedCase        — ABC you subclass to define a case type.
-FolderBackedCaseReader  — lock-free read-only folder view (no lease, no registry).
-CaseReadView            — Protocol shared by live case and reader.
+CaseReadView            — Protocol shared by live case and read-only views.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
 CaseTypeSpec            — compiled class-behavior contract (FSM + assets).
 FsmChainSpec            — compiled state-chains DSL, as returned by compile_fsm().
@@ -29,16 +28,17 @@ See volatile/tmp/case-docs-glossary.md for standard terms (case, record, rehydra
 bind/detach, journal vs reader, CaseManager).
 
 The tightly-coupled supporting classes live in the folder_backed_case_support
-package. This facade re-exports only the case's OWN surface — the types actually
+package. This facade re-exports only the case author's surface — the types actually
 returned by, or raised by, a FolderBackedCase's own public methods. Implementation
 details that never surface through a public method (e.g. CaseJournal, HeartbeatLease,
 StateChainParser, the individual folder-layout name constants) are internal and must
 be imported from their own submodule under folder_backed_case_support if you really
-need them. Layers that sit ABOVE the individual case are likewise NOT re-exported and
-must be imported from their own modules: name-driven resolution lives in
-CaseTypeRegistry / case_type_registry (folder_backed_case_support.case_type_registry),
-and the case-driving/scheduling seam lives in CasePoolDriver
-(folder_backed_case_support.case_pool_driver).
+need them. Read-only folder introspection (no lease, no registry) lives in
+folder_backed_case_reader (``FolderBackedCaseReader``). Layers that sit ABOVE the
+individual case are likewise NOT re-exported and must be imported from their own
+modules: name-driven resolution lives in CaseTypeRegistry / case_type_registry
+(folder_backed_case_support.case_type_registry), and the case-driving/scheduling
+seam lives in CasePoolDriver (folder_backed_case_support.case_pool_driver).
 
 Quick start
 -----------
@@ -131,13 +131,12 @@ from totodev_pub.folder_backed_case_support.case_logging import (
     build_case_logger, write_attach_banner, purge_case_log,
 )
 from totodev_pub.folder_backed_case_support.case_read_view import CaseReadView
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "FolderBackedCase", "FolderBackedCaseReader", "CaseReadView",
+    "FolderBackedCase", "CaseReadView",
     "CaseRecord", "CaseJournalView", "CaseAssets", "AdvanceResult",
     "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
