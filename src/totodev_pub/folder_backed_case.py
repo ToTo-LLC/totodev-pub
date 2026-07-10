@@ -72,14 +72,18 @@ Quick start
     case_type_registry.register_case_types(TicketCase)
 
     case = TicketCase.create_case_in_folder(Path("/data/cases/t-001"), case_id="t-001")
-    with case:
+    try:
         await case.open_ticket()
         await case.close_ticket()
-    # detached by the context manager on exit (lease cleared); folder is self-contained
+    finally:
+        case.case_detach()   # release the lease when done; folder is self-contained on disk
 
     # Reopen later without knowing the concrete class:
-    with case_type_registry.rehydrate(Path("/data/cases/t-001")) as case:
+    case = case_type_registry.rehydrate(Path("/data/cases/t-001"))
+    try:
         ...
+    finally:
+        case.case_detach()
 """
 
 from __future__ import annotations
@@ -144,6 +148,16 @@ __all__ = [
     "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
 ]
+
+
+def _raises_when_detached(fn):
+    """Documentary marker (no behavior change): tags a PUBLIC method that raises
+    ``DetachedCaseError`` when called on a detached husk (see ``case_is_detached`` /
+    ``_check_active()``). Purely metadata — the actual guard is the method's own
+    ``self._check_active()`` call; this decorator does not add, remove, or reorder it.
+    Only apply to public ``case_*`` methods; private/internal methods don't need it."""
+    fn.__raises_when_detached__ = True
+    return fn
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +300,7 @@ class FolderBackedCase(ABC):
         Creates a fresh case folder, writes the record, binds a live lease-held
         instance, and logs CASE_CREATED + initial CASE_STATE_ENTERED. For reopening an
         existing folder use ``MyCase(folder)`` or ``case_type_registry.rehydrate(folder)``.
+        Call ``case_detach()`` on the returned instance when you are done with it.
 
         Planned ``CaseManager`` (draft: notebooks/DEVDAVE/case_manager_classes/CaseManager
         Model.md) will also call this for fleet inception.
@@ -357,23 +372,22 @@ class FolderBackedCase(ABC):
     # re-opening WITHOUT knowing the class is case_type_registry.rehydrate(folder). Both
     # are documented in SECTION 4 (__init__) and the CaseTypeRegistry, respectively.
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.case_detach()
-
     def case_detach(self) -> None:
         """Unbind this object from its folder: release the lease and mark detached.
 
-        Prefer ``with case:`` which calls this on exit. After detach, mutating use
+        Call this when you are done acting on a live case (scripts, tests, handoff to
+        ``CaseManager``, after harvesting a terminated case). After detach, mutating use
         raises ``DetachedCaseError``. Does not move or archive the folder — a planned
         ``CaseManager`` (draft: notebooks/DEVDAVE/case_manager_classes/CaseManager
         Model.md) owns lifecycle actions once the lease is cleared.
+
+        If you forget, the lease self-expires after ``DEFAULT_LEASE_TTL_SECS`` (crash-
+        recovery window); explicit detach is still preferred so other owners need not wait.
         """
         if self._lease is not None:
             self._lease.release()
 
+    @_raises_when_detached
     async def case_advance(
         self, trigger: str | None = None, trigger_kwargs: dict | None = None,
     ) -> AdvanceResult:
@@ -391,6 +405,15 @@ class FolderBackedCase(ABC):
           a MANUAL (`==`) edge through the reporter instead of via `await case.<trigger>()`
           (which DOES raise). A pinned manual edge needs `trigger_kwargs` (see Args); the
           same AdvanceResult / non-throwing contract then covers both auto and manual.
+
+          There is deliberately NO run_to_completion()/drive loop on the case itself: this
+          method knows how to take ONE step; deciding WHICH case to drive, in what order,
+          with what fairness/concurrency/backpressure, is a SCHEDULER concern that belongs
+          to a driver layer (see CasePoolDriver), not to the domain object. A built-in
+          single-case loop would quietly endorse a one-case-at-a-time fleet model, which is
+          the opposite of the intended round-robin-over-many-cases deployment. Tests that
+          genuinely want to run a single case to its end use the `drive_to_completion()`
+          helper in the test utilities.
 
         Args:
             trigger: optional name of a single edge (auto OR manual) leaving the current
@@ -422,6 +445,13 @@ class FolderBackedCase(ABC):
               state has no timed escape, a synthetic AutoAdvanceBlocked is carried in
               result.exceptions (one CASE_ALERTED logged on first detection per dwell).
               Deterministic. NOT synthesized for a pinned `trigger=...` call.
+          Stall handling has NO self-pulse: a case cannot watchdog its own case_advance()
+          from inside a single suspended coroutine, so stalls are split by failure mode
+          instead: a stalled external job rides a `@DWELL>...` timed-escape edge that
+          ripens and case_advance() fires it (in-band, declarative, self-healing); a
+          genuinely stuck state surfaces as the BLOCKED outcome above; and a hung
+          case_advance() call itself is an out-of-band concern for the driver (e.g.
+          wrapping the call in asyncio.wait_for) — the case cannot observe that itself.
           Misuse guards that RAISE (programming errors, not flow conditions): DetachedCaseError
           (acting on a detached husk); ValueError (unknown trigger name, a manual edge fired
           without trigger_kwargs, or trigger_kwargs given with no trigger). Also RAISES
@@ -452,33 +482,15 @@ class FolderBackedCase(ABC):
                 "no edge to flow into. Name the trigger to fire, or drop trigger_kwargs."
             )
         initial = self.case_state
-        if self.case_is_terminal:       # terminal short-circuits first (a terminal case stays
-            return AdvanceResult(initial, self.case_state)   # bound; lease cleared only by case_detach())
-        # Non-reentrancy: fail fast BEFORE touching _advance_collecting_alerts' shared
-        # case_log_alert override (see that method) — a second overlapping case_advance()
-        # envelope must never partially set up its own alert-collection state only to be
-        # rejected deeper inside by _on_prepare_fsm_event, which would leave the FIRST
-        # call's override clobbered by the second call's own finally block. This is a
-        # PEEK, not a set: the actual flag is owned solely by _on_prepare_fsm_event /
-        # _on_finalize_fsm_event, which fire for this same call's own trigger attempt a
-        # few lines below — setting it here too would make case_advance() misreport
-        # itself as reentrant against its OWN inner trigger call.
+        if self.case_is_terminal:
+            return AdvanceResult(initial, self.case_state)
+        # Peek _transition_in_flight before _advance_collecting_alerts installs its alert
+        # override — a rejected overlapping call would restore in finally and clobber the
+        # in-flight call's override. The flag is set only in _on_prepare_fsm_event.
         if self._transition_in_flight:
             raise CaseTransitionInFlightError(self.case_id, self._folder, self._active_trigger_name)
-        self._check_active()            # else refuse to drive a detached husk
-        # Every poll is proof of active ownership, so beat the lease here (throttled — a
-        # no-op if < min_update_secs since our last beat). This covers the long-dwelling
-        # case that keeps no-opping and never transitions, which _on_state_changed's
-        # per-transition beat would otherwise leave to expire. Done BEFORE the step so the
-        # lease is fresh going in; the in-flight keepalive (the _LeaseKeepalive pulse in the
-        # perform wrapper) then keeps beating for the duration of a slow, awaited step.
-        self.case_heartbeat()
-        # Two driving modes, each its own focused helper: pin ONE edge (auto OR manual), or
-        # sweep the auto edges in declared order. Both shape outcomes via _attempt_one_trigger.
-        # Wrap the single dedicated alert-logging method for the duration of the step so any
-        # CASE_ALERTED logged (from a hook, or the auto-block detector) is harvested into the
-        # AdvanceResult — otherwise an alert that neither changed state nor raised would be
-        # invisible to a blind driver. Restore in finally and fold the messages in.
+        self._check_active()
+        self.case_heartbeat()  # pre-step beat for long-dwelling no-op polls; see docstring
         return await self._advance_collecting_alerts(initial, trigger, trigger_kwargs)
 
     async def _advance_collecting_alerts(
@@ -561,14 +573,7 @@ class FolderBackedCase(ABC):
             return AdvanceResult(initial, self.case_state, trigger=trigger,
                                  exceptions=(err,))
 
-    # Note: there is deliberately NO run_to_completion()/drive loop on the case itself.
-    # A case knows how to take ONE step (case_advance()); deciding WHICH case to drive, in what
-    # order, with what fairness/concurrency/backpressure is a SCHEDULER concern that belongs
-    # to a driver layer (see CasePoolDriver), not to the domain object. A built-in single-case
-    # loop would quietly endorse a one-case-at-a-time fleet model, which is the opposite of
-    # the intended round-robin-over-many-cases deployment. Tests that genuinely want to run a
-    # single case to its end use the drive_to_completion() helper in the test utilities.
-
+    # Why no run_to_completion()/drive loop lives here: see case_advance()'s docstring.
 
     # ---- Identity & status (read-only snapshots; case_state is a plain attribute) ----
 
@@ -620,7 +625,7 @@ class FolderBackedCase(ABC):
     @property
     def case_is_detached(self) -> bool:
         """True when this object is no longer bound to its folder: the lease was
-        released (`case_detach()` / context-manager exit) or has expired.
+        released via ``case_detach()`` or has expired.
 
         A detached object is a husk — any mutating use (`case_advance()`,
         `case_heartbeat()`, manual triggers) raises `DetachedCaseError`. Re-open via
@@ -638,12 +643,7 @@ class FolderBackedCase(ABC):
         state (no auto exits — accelerate demotion) apart from a state whose guards merely
         declined this pass (auto exits exist — normal cadence). See AutoAdvanceBlocked for
         the runtime "declined now and can't ripen" signal."""
-        return bool(self._forward_candidates(self.case_state))
-
-    @property
-    def advanceable(self) -> bool:
-        """Alias of `case_advanceable` matching the CasePoolDriver design vocabulary."""
-        return self.case_advanceable
+        return self._fsm.has_auto_exits(self.case_state)
 
     @property
     def case_transition_fail_count(self) -> int:
@@ -1012,6 +1012,7 @@ class FolderBackedCase(ABC):
     # See "single-owner protection" in SECTION 4 for the crash-recovery-window rationale and
     # the idle-ownership contract.
 
+    @_raises_when_detached
     def case_heartbeat(
         self,
         *,
@@ -1184,7 +1185,8 @@ class FolderBackedCase(ABC):
         This constructor is intentionally the load/bind path, not inception:
         it expects `case_record.yaml` (and any existing event-log history) to
         already exist on disk, then loads them, acquires the lease, and builds
-        the in-memory FSM carrier. Two ways it fails fast and points elsewhere:
+        the in-memory FSM carrier. Call ``case_detach()`` when you are done with
+        this live object. Two ways it fails fast and points elsewhere:
           * The folder is not an initialized case (no record) -> FileNotFoundError
             naming ``create_case_in_folder()`` and ``case_type_registry.rehydrate(folder)``.
           * The record names a DIFFERENT case type than this class -> the
@@ -1565,13 +1567,4 @@ class FolderBackedCase(ABC):
             self.case_id, self.case_state, candidates=[t for t, _ in candidates]
         )
 
-    # ---- stall handling ----
-    # There is deliberately NO self-pulse: a case cannot watchdog its own case_advance() from
-    # inside a single suspended coroutine. Stall handling is split by failure mode instead:
-    #   * a stalled external job   -> a `@DWELL>...` timed-escape edge ripens and case_advance()
-    #                                 fires it (in-band, declarative, self-healing);
-    #   * a genuinely stuck state  -> AutoAdvanceBlocked, carried in AdvanceResult + one
-    #                                 CASE_ALERTED per dwell;
-    #   * a hung case_advance() call -> an out-of-band concern for the driver (e.g. wrapping
-    #                                 case_advance() in asyncio.wait_for); the case cannot observe
-    #                                 it itself.
+    # ---- stall handling (why there's no self-pulse: see case_advance()'s docstring) ----
