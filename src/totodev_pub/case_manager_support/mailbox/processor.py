@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.advance_result_serializable import AdvanceResultSerializable
 from totodev_pub.case_manager_support.adopt import AdoptResult
+from totodev_pub.case_manager_support.shutdown import (
+    ShutdownAck,
+    scan_shutdown_intake,
+    write_shutdown_request,
+)
 
 if TYPE_CHECKING:
     from totodev_pub.case_manager import CaseManager
@@ -109,6 +114,9 @@ class MailboxProcessor:
     def reclassify_intake(self) -> Path:
         return self._mgr_dir / self._policy.reclassify_mailbox_subdir / "intake"
 
+    def shutdown_intake(self) -> Path:
+        return self._mgr_dir / self._policy.shutdown_mailbox_subdir / "intake"
+
     def _ensure_dirs(self) -> None:
         for p in (
             self.fire_intake(),
@@ -118,6 +126,7 @@ class MailboxProcessor:
             self.reclassify_intake(),
             self._mgr_dir / self._policy.reclassify_mailbox_subdir / "malformed",
             self._mgr_dir / self._policy.reclassify_mailbox_subdir / "executing",
+            self.shutdown_intake(),
             self.results_dir(),
         ):
             p.mkdir(parents=True, exist_ok=True)
@@ -191,11 +200,32 @@ class MailboxProcessor:
         os.replace(tmp, final)
         return RequestHandle(corr, self.results_dir() / f"{corr}.yaml")
 
+    def submit_shutdown(
+        self,
+        *,
+        graceful: bool = False,
+        reason: str | None = None,
+        correlation_id: str | None = None,
+    ) -> RequestHandle:
+        self._ensure_dirs()
+        corr, _path = write_shutdown_request(
+            self.shutdown_intake(),
+            graceful=graceful,
+            reason=reason,
+            correlation_id=correlation_id,
+        )
+        return RequestHandle(corr, self.results_dir() / f"{corr}.yaml")
+
     def poll_result(
         self, handle: RequestHandle
-    ) -> AdvanceResultSerializable | AdoptResult | ReclassifyResult | None:
+    ) -> AdvanceResultSerializable | AdoptResult | ReclassifyResult | ShutdownAck | None:
         if not handle.result_path.exists():
             return None
+        try:
+            if "kind: shutdown" in handle.result_path.read_text():
+                return ShutdownAck.load(str(handle.result_path), acquire_lock=False)
+        except Exception:
+            pass
         try:
             if "kind: reclassify" in handle.result_path.read_text():
                 return ReclassifyResult.load(str(handle.result_path), acquire_lock=False)
@@ -233,10 +263,18 @@ class MailboxProcessor:
         if not self._policy.enable_mailbox:
             return
         self._ensure_dirs()
+        self._check_shutdown_intake()
         await self._process_fire_intake()
         await self._process_reclassify_intake()
         await self._process_adopt_intake()
         self._sweep_old_results()
+
+    def _check_shutdown_intake(self) -> None:
+        directive = scan_shutdown_intake(self.shutdown_intake())
+        if directive is None:
+            return
+        directive.source_path.unlink(missing_ok=True)
+        self._manager._notify_shutdown_request(directive)
 
     async def _process_fire_intake(self) -> None:
         intake = self.fire_intake()

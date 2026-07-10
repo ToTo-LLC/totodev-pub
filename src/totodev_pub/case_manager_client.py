@@ -234,5 +234,37 @@ class CaseManagerClient:
             correlation_id=correlation_id,
         )
 
+    def submit_shutdown(
+        self,
+        *,
+        graceful: bool = False,
+        reason: str | None = None,
+        only_if_fresh: bool = True,
+    ) -> RequestHandle:
+        """Ask the manager process to shut down via the shutdown mailbox.
+
+        ``graceful=True`` requests a drain (in-flight case steps settle first);
+        the default is an immediate exit (leases lapse, recover() reconciles —
+        the same hard path the system already tolerates, requested on purpose).
+
+        This always exits nonzero — the case-manager process cannot be told
+        through this API to stay down. Under a supervisor configured to restart
+        on nonzero exit (e.g. Docker with ``restart: on-failure``, this process
+        as PID 1 via an exec-form entrypoint), it will come back. To
+        decommission permanently, stop it by other means (an orchestrator
+        scale-down, an OS signal from something with process reach, or — if the
+        manager itself should decide when it's done —
+        ``serve(..., stop_when_empty=True)``). Kubernetes caveat: Deployments
+        default to ``restartPolicy: Always``, which restarts exit 0 too — on
+        k8s, decommission means scaling the workload down; the exit code alone
+        cannot express "stay down" there.
+
+        Result semantics: on the graceful path an "acknowledged, shutting down"
+        result is written before the drain, so poll_result/wait_result resolve.
+        On the immediate path the handle may never resolve — the manifest's
+        ``stopped_at`` is the real confirmation either way."""
+        self._check_fresh(only_if_fresh)
+        return self._mailbox.submit_shutdown(graceful=graceful, reason=reason)
+
     async def wait_adopt(self, handle: RequestHandle, *, timeout: float = 60.0):
         return await self._mailbox.wait_result(handle, timeout=timeout)

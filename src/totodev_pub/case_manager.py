@@ -65,6 +65,7 @@ from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor
 from totodev_pub.case_manager_support.purge import PurgeReport, run_redundant_purge
 from totodev_pub.case_manager_support.reap import ReapReport, reap as run_reap
 from totodev_pub.case_manager_support.recover import RecoverReport, recover_manager
+from totodev_pub.case_manager_support.shutdown import ShutdownDirective
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager_support.termination import (
     TerminationTicket,
@@ -128,6 +129,7 @@ class CaseManager:
         self._stopping = False
         self._run_task: asyncio.Task[None] | None = None
         self._loop_failure_cb: Callable[[BaseException], None] | None = None
+        self._shutdown_request_cb: Callable[[ShutdownDirective], None] | None = None
         self._terminated_handle: Any = None
         self._eject_waiters: dict[str, asyncio.Future[EjectResult]] = {}
         # §2 liveness stamps (read by the watchdog thread; write-only here).
@@ -813,6 +815,23 @@ class CaseManager:
         re-raises instead (embedded usage — logged loudly, task dies)."""
         self._loop_failure_cb = callback
 
+    def on_shutdown_request(self, callback: Callable[[ShutdownDirective], None]) -> None:
+        """Register the single host callback invoked when a shutdown-mailbox
+        request is picked up cooperatively (the watchdog has its own pickup
+        path). serve() wires this to the §6 shutdown protocol."""
+        self._shutdown_request_cb = callback
+
+    def _notify_shutdown_request(self, directive: ShutdownDirective) -> None:
+        if self._shutdown_request_cb is None:
+            logger.warning(
+                "Shutdown request %s received but no host is registered "
+                "(embedded start() usage?); discarded — a manager that nobody "
+                "hosts cannot promise process exit semantics.",
+                directive.source_path.name,
+            )
+            return
+        self._shutdown_request_cb(directive)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -923,6 +942,7 @@ class CaseManager:
             (mgr_dir / policy.reclassify_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
+        (mgr_dir / policy.shutdown_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         ensure_board_file(mgr_dir, enabled=policy.enable_fleet_status_board)
         live = mgr_dir.parent / policy.live_bucket
         live.mkdir(parents=True, exist_ok=True)
@@ -938,6 +958,9 @@ class CaseManager:
             ),
             reclassify_mailbox_intake=rel(
                 self._manager_dir / self._policy.reclassify_mailbox_subdir / "intake"
+            ),
+            shutdown_mailbox_intake=rel(
+                self._manager_dir / self._policy.shutdown_mailbox_subdir / "intake"
             ),
             results=rel(self._manager_dir / "results"),
             adopt_drop=rel(self._manager_dir / self._policy.adopt_drop_subdir),
