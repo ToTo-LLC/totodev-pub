@@ -85,6 +85,7 @@ class CaseTypeRegistry:
     ) -> FolderBackedCase:
         """Resolve class from disk and construct a live, lease-holding case.
 
+        Call ``case_detach()`` on the returned instance when you are done with it.
         Raises ``UnregisteredCaseTypeError`` when the sniffed type is not registered.
         """
         case_cls = self.peek_class(folder, return_class_object=True, registry=registry)

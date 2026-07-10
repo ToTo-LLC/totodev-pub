@@ -63,7 +63,12 @@ class FlexibleCase(FolderBackedCase):
 class ReclassSource(FolderBackedCase):
     fsm_state_chains = ["^new==go-->shared^"]
     asset_aliases = [
-        {"path": "old.yaml", "loader": TicketForm, "states": {"new", "shared"}, "keep": True},
+        {
+            "path": "old.yaml",
+            "loader": TicketForm,
+            "states": {"new", "shared"},
+            "keep": True,
+        },
     ]
     fsm_trigger_chokes = {}
 
@@ -118,7 +123,9 @@ def test_guarded_load_allowed_in_listed_state(tmp_path):
     case = TicketCase.create_case_in_folder(folder)
     try:
         case.case_assets.write(
-            "ticket.yaml", b"title: hello\n", keep=False,
+            "ticket.yaml",
+            b"title: hello\n",
+            keep=False,
         )
         obj = case.case_load_dataclass("ticket")
         assert isinstance(obj, TicketForm)
@@ -177,7 +184,9 @@ def test_reader_parity_with_live_case(tmp_path):
     try:
         case.case_assets.write("ticket.yaml", b"title: from-disk\n")
         asyncio.run(case.open_ticket())
-        case.case_assets.write("customer--conversation.json", json.dumps({"lines": 2}).encode())
+        case.case_assets.write(
+            "customer--conversation.json", json.dumps({"lines": 2}).encode()
+        )
     finally:
         case.case_detach()
 
@@ -186,16 +195,22 @@ def test_reader_parity_with_live_case(tmp_path):
     reader.case_load_dataclass("ticket")
     reader.case_load_dataclass("conversation")
 
-    with TicketCase(folder) as live:
+    live = TicketCase(folder)
+    try:
         assert live.case_state == "open"
         live.case_load_dataclass("ticket")
         live.case_load_dataclass("conversation")
 
-    with TicketCase(folder) as live:
+    finally:
+        live.case_detach()
+    live = TicketCase(folder)
+    try:
         asyncio.run(live.close_ticket())
         with pytest.raises(AssetNotTrustedInStateError):
             live.case_load_dataclass("conversation")
 
+    finally:
+        live.case_detach()
     reader_closed = FolderBackedCaseReader(folder)
     with pytest.raises(AssetNotTrustedInStateError):
         reader_closed.case_load_dataclass("conversation")
@@ -241,19 +256,25 @@ def test_keep_true_seeds_manifest_at_create(tmp_path):
 
 def test_reclassify_restamps_states_and_keep(tmp_path):
     folder = tmp_path / "reclass"
-    with ReclassSource.create_case_in_folder(folder) as case:
+    case = ReclassSource.create_case_in_folder(folder)
+    try:
         asyncio.run(case.go())
         assert "old.yaml" in case.case_assets.keep_list()
         fresh = case.case_reclassify_to(ReclassTarget)
         assert fresh._record.asset_aliases["new"]["states"] == ["shared"]
         assert "new.yaml" in fresh.case_assets.keep_list()
 
+    finally:
+        case.case_detach()
+
 
 def test_bypass_via_case_assets_ignores_gate(tmp_path):
     folder = tmp_path / "bypass"
     case = TicketCase.create_case_in_folder(folder)
     try:
-        case.case_assets.write("customer--conversation.json", json.dumps({"lines": 9}).encode())
+        case.case_assets.write(
+            "customer--conversation.json", json.dumps({"lines": 9}).encode()
+        )
         obj = case.case_assets.load_dataclass("conversation")
         assert isinstance(obj, ChatLog)
         assert obj.lines == 9
@@ -280,12 +301,15 @@ def test_case_add_keep_rules_retains_custom_file(tmp_path):
 
 def test_close_purge_retains_framework_and_kept_assets(tmp_path):
     folder = tmp_path / "close-purge"
-    with TicketCase.create_case_in_folder(folder, case_id="t-close") as case:
+    case = TicketCase.create_case_in_folder(folder, case_id="t-close")
+    try:
         case.case_assets.write("ticket.yaml", b"title: kept\n")
         case.case_assets.write("ephemeral.txt", b"gone")
         asyncio.run(case.open_ticket())
         asyncio.run(case.close_ticket())
         assert case.case_is_terminal
+    finally:
+        case.case_detach()
     assert (folder / "case_record.yaml").exists()
     assert list((folder / "events").rglob("*"))  # event log present
     assert (folder / "assets" / "ticket.yaml").exists()

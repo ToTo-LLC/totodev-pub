@@ -389,7 +389,7 @@ the two calling channels explains the whole runtime model:
 
 ```python
 case = InquiryCase.create_case_in_folder(folder, external_key="EMAIL-778812")
-with case:
+try:
     # Channel 1 — the sweep. Attempt ONE automated step; report, never raise.
     result = await case.case_advance()
     # result.progressed, result.trigger, result.final_state, result.exceptions
@@ -397,6 +397,8 @@ with case:
     # Channel 2 — a direct trigger call. This is how MANUAL edges fire
     # (and it raises on failure — fail-fast for the calling human's benefit).
     await case.approve(reviewer="dave")
+finally:
+    case.case_detach()   # release the lease when done with this live object
 ```
 
 `case_advance()` is the non-throwing reporter a scheduler loops over thousands of times: it tries
@@ -464,7 +466,7 @@ from tests.case_test_utils import drive_to_completion
 
 async def test_inquiry_reaches_approval_gate(tmp_path):
     case = InquiryCase.create_case_in_folder(tmp_path / "inq-1")
-    with case:
+    try:
         await drive_to_completion(case)          # sweeps auto edges until parked
         assert case.case_state == "waiting_for_answers"
 
@@ -475,6 +477,8 @@ async def test_inquiry_reaches_approval_gate(tmp_path):
         await case.approve(reviewer="test")
         await drive_to_completion(case)
         assert case.case_is_terminal and case.case_state == "sent"
+    finally:
+        case.case_detach()
 ```
 
 Guards and hooks are plain methods, so unit-test them directly. Time-based behavior doesn't need
