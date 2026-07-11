@@ -283,14 +283,14 @@ def test_bypass_via_case_assets_ignores_gate(tmp_path):
         case.case_detach()
 
 
-def test_case_add_keep_rules_retains_custom_file(tmp_path):
+def test_case_keep_assets_retains_custom_file(tmp_path):
     folder = tmp_path / "custom-keep"
     case = TicketCase.create_case_in_folder(folder)
     try:
         export = folder / "exports" / "summary.pdf"
         export.parent.mkdir(parents=True)
         export.write_bytes(b"%PDF-summary")
-        case.case_add_keep_rules("exports/summary.pdf")
+        case.case_keep_assets("exports/summary.pdf")
         case.case_assets.write("scratch.txt", b"ephemeral")
         purged = case._keep_manifest.purge()
         assert "assets/scratch.txt" in purged

@@ -346,7 +346,7 @@ class InquiryCase(FolderBackedCase):
 
     def on_terminating(self):
         # Last chance before the confidentiality purge: name what survives.
-        self.case_add_keep_rules("assets/reply_draft.md")
+        self.case_keep_assets("assets/reply_draft.md")
 ```
 
 What to notice:
@@ -448,10 +448,10 @@ This folder *is* the runtime answer to the unwritten-requirements list from §1:
   this" marker, which observers can surface without knowing anything about your case type. Here
   the framework raised it itself (a naive sweep found `waiting_for_approval` had no automated way
   forward); your hooks raise their own via `case_log_alert()`, as `perform_refer_out` does.
-- **Confidentiality.** Termination is two-phase: your `on_terminating()` hook names the final
-  artifacts to retain, then everything not matched in `_keep.txt` is **purged**. Customer
-  attachments and intermediate scratch die with the live case, by default rather than by
-  diligence.
+- **Confidentiality.** Termination is two-phase: your `on_terminating()` hook calls
+  `case_keep_assets()` to name the final artifacts to retain, then everything not matched in
+  `_keep.txt` is **purged**. Customer attachments and intermediate scratch die with the live
+  case, by default rather than by diligence.
 
 ---
 

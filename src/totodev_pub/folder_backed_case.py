@@ -11,6 +11,44 @@ moved atomically. Objects descended from this class represent things like
 a support trouble ticket, an inbound document for processing, a contract
 bundle to be reviewed, etc.
 
+Case objeccts represent the idea of a work item that passes through a
+structured lifecycle, going through clearly defined stages to move from
+live to terminal states.  They persist their necessary data in files
+(called "assets") in a folder on disk.  Cases are most useful for items
+that are partly automated processing (e.g. document transformation)
+and partly manual intervention (e.g. human review and adjustment).
+
+Key Concepts:
+- The FSM language consists of linear "stateA--trigger-->stateB" segments.
+  - They can be defined as an array of linear segments (see fsm_state_chains)
+  - Triggers may be preceded by "gates"
+- Case objects have two kinds of states:  Live or Terminal.
+  - Automatic cleanup is performed after entering terminal states.
+- Case objects have two kinds of triggers: automated or manual.
+  - Automated cases can be driven repeated calls to advance() which chooses
+    the next trigger to fire based on the FSM.  Manual cases are never
+    fired by advance().
+- Case objects have two kinds of: automated or manual.
+  - Automated cases can be driven repeated calls to advance() which chooses
+the next trigger to fire based on the FSM.  Manual cases are never
+fired by advance().
+- Case object should keep ALL state info in their assets folder.
+  - Asset files get auto-purged unless they have been added to a keep list
+    ( see case_keep_assets() )
+  - Use FileMappedPydanticMixin derived classes to persist objects to files.
+    (see case_load_asset() and case_keep_assets())
+- Case objects maintain a journal of events such as state entry
+  - The journal is the authorititative source of truth about the case's state
+  - Do not manually alter state after creation (very unpredictable results)
+- Cases can be rehydrated from disk by mapping the correct class to the
+  case folder and calling rehydrate() on it.
+- Cases keep a very simple identity file called the "case record" with a 
+  handful of very stable fields
+- You don't use the FolderBackedCase class directly, you create subclasses
+
+
+
+
 Core pieces (case authors)
 --------------------------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
@@ -26,19 +64,6 @@ Terminology
 -----------
 See volatile/tmp/case-docs-glossary.md for standard terms (case, record, rehydrate,
 bind/detach, journal vs reader, CaseManager).
-
-The tightly-coupled supporting classes live in the folder_backed_case_support
-package. This facade re-exports only the case author's surface — the types actually
-returned by, or raised by, a FolderBackedCase's own public methods. Implementation
-details that never surface through a public method (e.g. CaseJournal, HeartbeatLease,
-StateChainParser, the individual folder-layout name constants) are internal and must
-be imported from their own submodule under folder_backed_case_support if you really
-need them. Read-only folder introspection (no lease, no registry) lives in
-folder_backed_case_reader (``FolderBackedCaseReader``). Layers that sit ABOVE the
-individual case are likewise NOT re-exported and must be imported from their own
-modules: name-driven resolution lives in CaseTypeRegistry / case_type_registry
-(folder_backed_case_support.case_type_registry), and the case-driving/scheduling
-seam lives in CasePoolDriver (folder_backed_case_support.case_pool_driver).
 
 Quick start
 -----------
@@ -163,7 +188,9 @@ def _raises_when_detached(fn):
 # ---------------------------------------------------------------------------
 
 class FolderBackedCase(ABC):
-    """Base class for all folder-backed case types.
+    """Base class for all folder-backed case types.  Implementation
+    is based substantially on the `transitions` library.  This class
+    commits to ongoing use of that library.
 
     Subclass this ABC, set ``fsm_state_chains``, and declare the hook methods
     the chains name. Provides: case folder (record + event log + assets), async
@@ -686,16 +713,25 @@ class FolderBackedCase(ABC):
 
         Maintainer notes:
           Kept off this class's own namespace so asset concerns stay grouped in one place.
-          For non-asset files, use ``case_add_keep_rules()`` instead."""
+          For non-asset files, use ``case_keep_assets()`` instead."""
         return self._assets
 
-    def case_add_keep_rules(self, *rules: str | Path) -> None:
-        """Append case-relative keep rules to ``_keep.txt`` (exact path or glob).
+    def case_keep_assets(self, *patterns: str | Path) -> None:
+        """Register case files to survive the post-termination purge.
 
-        Use this from subclass hooks (especially ``on_terminating()``) to retain files
-        outside ``assets/``. For assets, prefer ``case_assets.add_keep_rules()`` or
-        ``case_assets.write(..., keep=True)``."""
-        self._keep_manifest.add_rules(*rules)
+        Closing a case deletes everything under its folder except paths listed in
+        ``_keep.txt``. Call this to add retention patterns — case-relative exact
+        paths or globs (e.g. ``exports/summary.pdf``, ``reports/*.csv``).
+
+        Typical use: override ``on_terminating()`` and name the deliverables you want
+        preserved after the case winds down. Patterns are append-only and
+        idempotent; duplicates are ignored. Absolute paths inside the case folder are
+        normalized to case-relative form.
+
+        For files under ``assets/``, prefer ``case_assets.add_keep_rules()`` or
+        ``case_assets.write(..., keep=True)`` — those helpers manage the
+        ``assets/`` prefix for you."""
+        self._keep_manifest.add_rules(*patterns)
 
     def case_load_asset(self, alias: str) -> object:
         """Load a declared asset alias after checking it is trustworthy in the current
@@ -955,20 +991,26 @@ class FolderBackedCase(ABC):
     def on_terminating(self) -> None:
         """Overridable hook fired in phase 1 (pre-finalization): assets still exist,
         record not yet stamped. Override to retain/extract final artifacts before the
-        ephemeral purge — call ``case_add_keep_rules()`` for non-asset paths or
+        ephemeral purge — call ``case_keep_assets()`` for non-asset paths or
         ``case_assets.add_keep_rules()`` for assets. Default: no-op. Heavy async work
         belongs in an async ``before_`` hook on the terminating transition; this hook is
         synchronous."""
 
     def case_ext_status_info(self) -> dict[str, Any]:
-        """Overridable hook: extra fields this case wants attached to its fleet-board
-        row's "ext". Default: no-op (empty dict).
+        """Overridable hook for extended status when a case runs under ``CaseManager``.
+
+        The manager periodically publishes a fleet-status board — a shared snapshot of
+        all in-pool cases for operators and clients. On each row build it calls this
+        method and merges the returned dict into that row's ``ext`` field. Override to
+        supply case-specific extended status (e.g. ``percent_complete`` while a long,
+        slow ``perform_*`` step runs) without persisting transient progress to disk.
+        Default: no-op (empty dict).
 
         Quick use:
-          Override to surface transient, in-memory progress from inside a running step —
-          e.g. read an attribute a perform_* trigger updates as it works, and return it
-          here. Typically only meaningful while the case is sitting in one particular
-          state; return {} the rest of the time.
+          Surface transient, in-memory progress from inside a running step — e.g. read
+          an attribute a perform_* trigger updates as it works, and return it here.
+          Typically only meaningful while the case is sitting in one particular state;
+          return {} the rest of the time.
 
           Must return a JSON-serializable dict[str, Any]. Any exception, non-dict
           return, or unserializable value is logged (throttled per case) and treated
@@ -1202,7 +1244,7 @@ class FolderBackedCase(ABC):
 
         Retention at close is manifest-driven: ``_keep.txt`` at the case root lists
         every file that survives purge. Framework artifacts are seeded automatically;
-        subclasses must call ``case_add_keep_rules()`` (or ``case_assets.add_keep_rules()``
+        subclasses must call ``case_keep_assets()`` (or ``case_assets.add_keep_rules()``
         for assets) for any custom files they want retained."""
         self._bind_existing_case_dir(case_folder, check_type=True)
 
