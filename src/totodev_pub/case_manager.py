@@ -373,7 +373,12 @@ class CaseManager:
         Maintenance runs at the HEAD of the tick deliberately: externally submitted
         fire requests are executed before the sweep spends its beat-quantized choke
         budget, and the post-fire ``boost()`` lands before the sweep so the boosted
-        case is stepped in this same tick rather than the next one."""
+        case is stepped in this same tick rather than the next one.
+
+        Pacing lives inside ``driver.advance()``: the advisory interval is its
+        fixed-rate target period, and maintenance time between beats counts against
+        that period. The loop itself only sleeps on the failure path, where
+        ``advance()`` may have raised before pacing."""
         interval = self._policy.maintenance_interval_secs
         consecutive_failures = 0
         while self._running and not self._stopping:
@@ -401,7 +406,7 @@ class CaseManager:
                         self._loop_failure_cb(exc)
                         return
                     raise
-            await asyncio.sleep(interval)
+                await asyncio.sleep(interval)
 
     async def _pulse_loop(self) -> None:
         """Liveness pulse — measures the event loop, not the tick.
@@ -894,6 +899,15 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     def _build_default_driver(self) -> CasePoolDriver:
+        """Construct the driver from ``self._config`` (driver_class/driver_kwargs).
+
+        Beat-tempo tunables (``I0``, ``EAGER_BEAT_FRACTION``, ``BEAT_YIELD_FLOOR``,
+        tier multiples, ...) live on the driver's ``_TierPolicy`` and are NOT part of
+        ``CaseManagerPolicy``. To override them, set ``driver_kwargs={"policy":
+        _TierPolicy(...)}`` on the ``CaseManagerConfig`` — see that class's
+        ``driver_kwargs`` field for details. Left unset, both concrete drivers run
+        with ``_TierPolicy()`` defaults, including the eager beat tempo enabled
+        (``EAGER_BEAT_FRACTION = 0.25``)."""
         cls = self._config.driver_class or BalancedCasePoolDriver
         kwargs = dict(self._config.driver_kwargs)
         if cls in (BalancedCasePoolDriver, SeniorityCasePoolDriver):

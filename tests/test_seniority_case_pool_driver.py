@@ -6,6 +6,10 @@ import pytest
 
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
+from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import (
+    Tier,
+    _TierPolicy,
+)
 from totodev_pub.folder_backed_case_support.seniority_case_pool_driver import (
     SeniorityCasePoolDriver,
 )
@@ -76,6 +80,37 @@ class PlainAutoCase(FolderBackedCase):
     fsm_state_chains = ["^s0--step-->s1^"]
 
     async def perform_step(self, tctx):
+        pass
+
+
+class GuardedNoopCase(FolderBackedCase):
+    """Advanceable auto exit whose guard always declines — normal HOT demotion ladder."""
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^hold--blockit#go-->done^"]
+
+    async def guard_blockit(self, tctx):
+        return False
+
+    async def perform_go(self, tctx):
+        pass
+
+
+class LongAutoCase(FolderBackedCase):
+    """Several auto steps so post-step cadence can be inspected while still HOT."""
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^s0--a-->s1--b-->s2--c-->s3^"]
+
+    async def perform_a(self, tctx):
+        pass
+
+    async def perform_b(self, tctx):
+        pass
+
+    async def perform_c(self, tctx):
         pass
 
 
@@ -236,5 +271,133 @@ def test_fire_priority_wakes_on_release(tmp_path):
         result = await fire_task
         assert result.progressed
         assert waiter_case.case_state == "active"
+
+    _run(body())
+
+
+# ---------------------------------------------------------------------------
+# Senior-hot acceleration
+# ---------------------------------------------------------------------------
+
+def test_senior_hot_faster_than_junior_hot(tmp_path):
+    """Front-N HOT slots get senior_hot_multiple; the rest keep policy.M_HOT."""
+    async def body():
+        policy = _TierPolicy(M_HOT=5)
+        driver = SeniorityCasePoolDriver(
+            policy=policy,
+            choke_limits={},
+            senior_count=1,
+            senior_hot_multiple=1,
+        )
+        front = _make(LongAutoCase, tmp_path, "front")
+        back = _make(LongAutoCase, tmp_path, "back")
+        driver.add(front)
+        driver.add(back)
+
+        await driver.fire(front.case_folder, None)
+        await driver.fire(back.case_folder, None)
+
+        front_slot = driver._by_folder[front.case_folder]
+        back_slot = driver._by_folder[back.case_folder]
+        assert front_slot.tier is Tier.HOT
+        assert back_slot.tier is Tier.HOT
+        assert front_slot.reset_multiple == 1
+        assert front_slot.skip_countdown == 1
+        assert back_slot.reset_multiple == 5
+        assert back_slot.skip_countdown == 5
+        assert driver.peek(front.case_folder).is_senior is True
+        assert driver.peek(back.case_folder).is_senior is False
+
+    _run(body())
+
+
+def test_warm_ignores_seniority(tmp_path):
+    """A front-of-queue WARM case keeps M_WARM — seniority never overrides WARM/COLD."""
+    async def body():
+        policy = _TierPolicy(M_HOT=5, M_WARM=10)
+        driver = SeniorityCasePoolDriver(
+            policy=policy,
+            choke_limits={},
+            senior_count=3,
+            senior_hot_multiple=1,
+        )
+        case = _make(GuardedNoopCase, tmp_path, "guarded")
+        driver.add(case)
+        assert driver.peek(case.case_folder).is_senior is True
+        assert driver.peek(case.case_folder).tier is Tier.HOT
+
+        for _ in range(policy.K_HOT_TO_WARM):
+            await driver.fire(case.case_folder, None)
+
+        peek = driver.peek(case.case_folder)
+        slot = driver._by_folder[case.case_folder]
+        assert peek.tier is Tier.WARM
+        assert peek.is_senior is True
+        assert slot.reset_multiple == policy.M_WARM
+
+    _run(body())
+
+
+def test_demotion_drops_senior_hot_acceleration(tmp_path):
+    """Demoting past K_HOT_TO_WARM automatically drops senior-hot override."""
+    async def body():
+        policy = _TierPolicy(M_HOT=5, M_WARM=10)
+        driver = SeniorityCasePoolDriver(
+            policy=policy,
+            choke_limits={},
+            senior_count=3,
+            senior_hot_multiple=1,
+        )
+        case = _make(GuardedNoopCase, tmp_path, "demote")
+        driver.add(case)
+        assert driver._by_folder[case.case_folder].reset_multiple == 1
+
+        for _ in range(policy.K_HOT_TO_WARM):
+            await driver.fire(case.case_folder, None)
+
+        slot = driver._by_folder[case.case_folder]
+        assert slot.tier is Tier.WARM
+        assert slot.reset_multiple == policy.M_WARM
+
+    _run(body())
+
+
+def test_admission_time_senior_hotty(tmp_path):
+    """Empty/small pools admit HOT cases as senior-hotty when len(pool) < N."""
+    async def body():
+        policy = _TierPolicy(M_HOT=5)
+        driver = SeniorityCasePoolDriver(
+            policy=policy,
+            choke_limits={},
+            senior_count=3,
+            senior_hot_multiple=1,
+        )
+        case = _make(PlainAutoCase, tmp_path, "solo")
+        driver.add(case)
+        slot = driver._by_folder[case.case_folder]
+        assert slot.tier is Tier.HOT
+        assert slot.reset_multiple == 1
+        assert slot.skip_countdown == 1
+        assert driver.peek(case.case_folder).is_senior is True
+
+    _run(body())
+
+
+def test_default_construction_is_noop_for_hot_cadence(tmp_path):
+    """Stock defaults: senior_hot_multiple matches M_HOT, so seniority does not change cadence."""
+    async def body():
+        driver = SeniorityCasePoolDriver(choke_limits={})
+        cases = [_make(LongAutoCase, tmp_path, f"c{i}") for i in range(4)]
+        for c in cases:
+            driver.add(c)
+
+        for c in cases:
+            await driver.fire(c.case_folder, None)
+
+        for c in cases:
+            slot = driver._by_folder[c.case_folder]
+            assert slot.tier is Tier.HOT
+            assert slot.reset_multiple == driver._policy.M_HOT
+            assert slot.skip_countdown == driver._policy.M_HOT
 
     _run(body())

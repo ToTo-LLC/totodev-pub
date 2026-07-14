@@ -102,7 +102,9 @@ Each beat (``advance()``) has three scheduling obligations with **no promised or
 3. Pace work with an async-friendly smoothing strategy (``asyncio.sleep`` is one
    valid choice, not guaranteed).
 
-``suggested_interval_secs`` is advisory (pass ``0.0`` in tests for no delay).
+``suggested_interval_secs`` is advisory. When honored it is a *target period*
+between beats (time already spent working counts against it), not a flat sleep
+appended to each beat. Pass ``0.0`` in tests for no delay.
 
 Event extensibility: ``CasePoolEventNames`` covers standard events. Derived drivers
 may define a separate ``str, enum.Enum`` for additional event names; ``CasePoolEvent.event``

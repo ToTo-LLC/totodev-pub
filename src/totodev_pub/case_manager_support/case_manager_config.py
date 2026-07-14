@@ -28,6 +28,11 @@ class CaseManagerConfig:
     tier2_overrides: dict[str, Any] = field(default_factory=dict)
     driver: "CasePoolDriver | None" = None
     driver_class: type | None = None
+    # Passed as-is to driver_class(**driver_kwargs) by _build_default_driver(). For
+    # BalancedCasePoolDriver / SeniorityCasePoolDriver this is the only way to override
+    # beat-tempo tunables (I0, EAGER_BEAT_FRACTION, BEAT_YIELD_FLOOR, ...): pass
+    # {"policy": _TierPolicy(...)} — concurrency_ceiling/choke_limits are defaulted
+    # from CaseManagerPolicy automatically and need not be repeated here.
     driver_kwargs: dict[str, Any] = field(default_factory=dict)
     registry: "CaseTypeRegistry | None" = None
     register_types: Sequence[type["FolderBackedCase"]] = ()

@@ -58,6 +58,28 @@ class AutoCase(FolderBackedCase):
         pass
 
 
+class LongAutoCase(FolderBackedCase):
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Four auto edges to a terminal: progresses on every step, then closes.
+    Long enough to observe several consecutive eager-paced beats before the
+    tempo relaxes back to the full period."""
+    fsm_state_chains = ["^s0--step1-->s1--step2-->s2--step3-->s3--step4-->s4^"]
+
+    async def perform_step1(self, tctx):
+        pass
+
+    async def perform_step2(self, tctx):
+        pass
+
+    async def perform_step3(self, tctx):
+        pass
+
+    async def perform_step4(self, tctx):
+        pass
+
+
 class ManualCase(FolderBackedCase):
 
 
@@ -881,5 +903,203 @@ def test_choke_contention_favors_longest_waiting_streak_over_dict_order(tmp_path
         assert early.case_state == "s0"
         assert driver._by_folder[late.case_folder].choke_wait_streak == 0
         assert driver._by_folder[early.case_folder].choke_wait_streak == 1
+
+    _run(body())
+
+
+# ---------------------------------------------------------------------------
+# Beat pacing (fixed-rate with a yield floor)
+# ---------------------------------------------------------------------------
+
+class _FakeTime:
+    """Stand-in for the driver module's ``time`` with a controllable clock."""
+
+    def __init__(self, now: float = 1000.0):
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class _SleepRecorder:
+    """Stand-in for the driver module's ``asyncio``: records ``sleep`` delays
+    (returning immediately) and delegates everything else to the real module."""
+
+    def __init__(self):
+        self.calls: list[float] = []
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay: float) -> None:
+        self.calls.append(delay)
+
+
+def _patch_pacing(monkeypatch):
+    from totodev_pub.folder_backed_case_support import balanced_case_pool_driver as mod
+    fake_time = _FakeTime()
+    recorder = _SleepRecorder()
+    monkeypatch.setattr(mod, "time", fake_time)
+    monkeypatch.setattr(mod, "asyncio", recorder)
+    return fake_time, recorder
+
+
+def test_paced_beat_targets_period_and_subtracts_elapsed(monkeypatch):
+    """The period is a target between beats: work time since the previous beat
+    (including caller work between ``advance()`` calls) shrinks the sleep."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver()             # I0 = 0.5
+        await driver.advance()                        # first paced beat: full period
+        assert recorder.calls == [pytest.approx(0.5)]
+        fake_time.now += 0.3                          # 0.3s consumed since last beat
+        await driver.advance()
+        assert recorder.calls[-1] == pytest.approx(0.2)
+
+    _run(body())
+
+
+def test_paced_beat_overrun_sleeps_yield_floor(monkeypatch):
+    """A beat that overruns its period still sleeps BEAT_YIELD_FLOOR — the loop
+    always yields to in-flight tasks, never spins back-to-back sweeps."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver()
+        await driver.advance()
+        fake_time.now += 2.0                          # way past the 0.5s period
+        await driver.advance()
+        assert recorder.calls[-1] == pytest.approx(driver._policy.BEAT_YIELD_FLOOR)
+
+    _run(body())
+
+
+def test_yield_floor_clamped_to_small_periods(monkeypatch):
+    """A deliberately fast tempo (period below the floor) is not inflated: the
+    effective floor is min(BEAT_YIELD_FLOOR, period)."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver(policy=_TierPolicy(I0=0.01))
+        await driver.advance()
+        fake_time.now += 5.0
+        await driver.advance()
+        assert recorder.calls[-1] == pytest.approx(0.01)
+
+    _run(body())
+
+
+def test_suggested_interval_is_the_target_period(monkeypatch):
+    """An advisory interval replaces I0 as the fixed-rate target, with the same
+    elapsed-time subtraction."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver()
+        await driver.advance(suggested_interval_secs=2.0)
+        assert recorder.calls == [pytest.approx(2.0)]
+        fake_time.now += 0.5
+        await driver.advance(suggested_interval_secs=2.0)
+        assert recorder.calls[-1] == pytest.approx(1.5)
+
+    _run(body())
+
+
+def test_eager_beat_after_a_sweep_that_launched(tmp_path, monkeypatch):
+    """A sweep that launched at least one step paces at period * EAGER_BEAT_FRACTION;
+    once nothing launches (pool gone quiet), pacing returns to the full period."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver()             # I0=0.5, fraction=0.25
+        case = _make(AutoCase, tmp_path, "eager")
+        driver.add(case)
+        driver.boost(case.case_folder)
+        await driver.advance()                        # launches step 1 → eager
+        assert recorder.calls[-1] == pytest.approx(0.125)
+        await driver.settle()                         # s0 → s1, reloads HOT countdown
+        await driver.advance()                        # launches step 2 → still eager
+        assert recorder.calls[-1] == pytest.approx(0.125)
+        await driver.settle()                         # s1 → s2 (terminal)
+        await driver.advance()                        # quiet sweep → full period
+        assert recorder.calls[-1] == pytest.approx(0.5)
+        case.case_detach()
+
+    _run(body())
+
+
+def test_eager_beat_fits_three_or_more_beats_in_one_nominal_interval(tmp_path, monkeypatch):
+    """The concrete point of the mechanic: on a lightly loaded pool with a case
+    that keeps progressing, 3+ beats land within the wall-clock span that a
+    single non-eager I0 beat would have consumed, instead of just 1."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver()             # I0=0.5, fraction=0.25
+        case = _make(LongAutoCase, tmp_path, "eager_burst")
+        driver.add(case)
+        driver.boost(case.case_folder)
+
+        launching_sleeps: list[float] = []
+        while case.case_state != "s4":                # 4 auto edges to terminal
+            await driver.advance()
+            await driver.settle()
+            launching_sleeps.append(recorder.calls[-1])
+
+        assert len(launching_sleeps) >= 3              # 3+ beats actually launched
+        assert all(s == pytest.approx(0.125) for s in launching_sleeps)
+        # The first 3 of them alone already fit inside one nominal (non-eager) I0
+        # beat — confirming the mechanic delivers 3+ beats per interval, not just 1.
+        assert sum(launching_sleeps[:3]) < driver._policy.I0
+
+        case.case_detach()
+
+    _run(body())
+
+
+def test_eager_beat_skipped_when_outside_eager_window(tmp_path, monkeypatch):
+    """A launching sweep whose beat already consumed more than the eager window
+    falls back to full-period pacing (congestion means no speed-up)."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver()
+        case = _make(AutoCase, tmp_path, "eager_window")
+        driver.add(case)
+        driver._by_folder[case.case_folder].skip_countdown = 1000  # park until boosted
+        await driver.advance()                        # quiet paced beat: sets anchor
+        fake_time.now += 0.3                          # past the 0.125s eager window
+        driver.boost(case.case_folder)
+        await driver.advance()                        # launches, but window exceeded
+        assert recorder.calls[-1] == pytest.approx(0.2)   # full-period pacing: 0.5 - 0.3
+        await driver.settle()
+        case.case_detach()
+
+    _run(body())
+
+
+def test_eager_beat_disabled_by_policy(tmp_path, monkeypatch):
+    """EAGER_BEAT_FRACTION=1.0 disables the eager tempo even for launching sweeps."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver(policy=_TierPolicy(EAGER_BEAT_FRACTION=1.0))
+        case = _make(AutoCase, tmp_path, "eager_off")
+        driver.add(case)
+        driver.boost(case.case_folder)
+        await driver.advance()                        # launches, but eager disabled
+        assert recorder.calls[-1] == pytest.approx(0.5)
+        await driver.settle()
+        case.case_detach()
+
+    _run(body())
+
+
+def test_unpaced_beat_skips_sleep_and_resets_anchor(monkeypatch):
+    """``suggested_interval_secs=0.0`` never sleeps, and clears the pacing anchor
+    so a later paced beat sleeps its full period instead of seeing a huge stale
+    elapsed window (which would wrongly collapse it to the floor)."""
+    async def body():
+        fake_time, recorder = _patch_pacing(monkeypatch)
+        driver = BalancedCasePoolDriver()
+        await driver.advance()                        # paced: sets the anchor
+        fake_time.now += 60.0
+        await driver.advance(suggested_interval_secs=0.0)
+        assert len(recorder.calls) == 1               # no sleep for the unpaced beat
+        await driver.advance()                        # paced again: fresh anchor
+        assert recorder.calls[-1] == pytest.approx(0.5)
 
     _run(body())

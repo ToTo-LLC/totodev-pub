@@ -25,7 +25,10 @@ permit budgeting, and ``_order_chokeables`` for the ordering hook
 Implements ``CasePoolDriver`` with extensions: ``peek``, ``by_tier``, ``snapshot``,
 ``find_by_external_key``, ``settle``. Each case has a ``_Slot`` (tier +
 ``skip_countdown``); ``_DORMANT`` (-1) marks terminal or in-flight slots. Beat loop:
-sweep → heartbeat slice → ``asyncio.sleep(I0)``. No disk management —
+sweep → heartbeat slice → fixed-rate sleep (target period ``I0``, minus time already
+spent since the last beat, floored at ``BEAT_YIELD_FLOOR``; a sweep that launched
+work targets the shorter ``I0 * EAGER_BEAT_FRACTION`` while the system keeps up —
+see ``_TierPolicy``). No disk management —
 ``PoolMembershipJournal`` handles crash recovery separately.
 """
 
@@ -86,6 +89,13 @@ class _TierPolicy:
     """
     # Cadence
     I0: float = 0.5                       # base beat / hot period (seconds)
+    BEAT_YIELD_FLOOR: float = 0.05        # min sleep per beat: an overrunning beat still yields
+    # Eager tempo: after a sweep that launched at least one step, target
+    # period*EAGER_BEAT_FRACTION instead of the full period — but only while the
+    # beat is still inside that eager window (a slow/congested beat falls back to
+    # full-period pacing). A sweep that launches nothing always paces at the full
+    # period, so an idle pool never speeds up. 1.0 disables.
+    EAGER_BEAT_FRACTION: float = 0.25
     M_HOT: int = 1
     M_WARM: int = 10                      # 5 s at I0=0.5
     M_COLD: int = 120                     # 60 s at I0=0.5
@@ -241,6 +251,8 @@ class BalancedCasePoolDriver(CasePoolDriver):
         self._in_flight_count = 0
         self._stagger_counter = 0          # scatters same-tier items across phases
         self._hb_cursor = 0                # heartbeat walk cursor
+        self._beat_anchor: Optional[float] = None  # monotonic time the last advance() returned
+        self._last_sweep_launches = 0      # steps launched by the most recent sweep
 
         # handle -> (frozenset of event-name strings, callback)
         self._subs: dict[Hashable, tuple[frozenset[str], Callable[[CasePoolEvent], None]]] = {}
@@ -329,14 +341,42 @@ class BalancedCasePoolDriver(CasePoolDriver):
     # -- Driving (the beat) ------------------------------------------------
 
     async def advance(self, suggested_interval_secs: float | None = None) -> None:
+        """One beat, paced at a fixed rate: the period (``I0``, or the advisory
+        ``suggested_interval_secs``) is the *target* time between beats, not a dead
+        sleep appended to each one. Work done since the previous beat — this sweep,
+        the heartbeat slice, and any caller work between ``advance()`` calls — is
+        subtracted from the sleep. An overrunning beat still sleeps at least
+        ``BEAT_YIELD_FLOOR`` (clamped to the period) so in-flight case-step tasks
+        always get event-loop time; back-to-back sweeps never spin the loop.
+
+        Eager tempo: when the sweep just launched work AND the beat is still inside
+        the eager window (elapsed < period * ``EAGER_BEAT_FRACTION``), the target
+        period shrinks to that fraction — active work is picked up sooner while a
+        quiet or congested system stays at the relaxed tempo.
+
+        A zero/negative advisory interval disables pacing entirely (deterministic
+        tests)."""
         self._sweep_once()
         self._heartbeat_slice()
-        delay = self._policy.I0 if suggested_interval_secs is None else suggested_interval_secs
-        if delay and delay > 0:
-            await asyncio.sleep(delay)
+        period = self._policy.I0 if suggested_interval_secs is None else suggested_interval_secs
+        if not period or period <= 0:
+            self._beat_anchor = None      # unpaced beat: don't let a stale anchor
+            return                        # swallow a later paced beat's sleep
+        elapsed = 0.0
+        if self._beat_anchor is not None:
+            elapsed = time.monotonic() - self._beat_anchor
+        fraction = self._policy.EAGER_BEAT_FRACTION
+        if 0.0 < fraction < 1.0 and self._last_sweep_launches > 0:
+            eager_period = period * fraction
+            if elapsed < eager_period:
+                period = eager_period
+        floor = min(self._policy.BEAT_YIELD_FLOOR, period)
+        await asyncio.sleep(max(floor, period - elapsed))
+        self._beat_anchor = time.monotonic()
 
     def _sweep_once(self) -> None:
         self._sweep_preamble()
+        launched = 0
         try:
             chokeables: list[tuple[_Slot, frozenset[str]]] = []
             for slot in list(self._by_folder.values()):
@@ -355,10 +395,13 @@ class BalancedCasePoolDriver(CasePoolDriver):
                     # not incidental sweep order.
                     chokeables.append((slot, needed))
                     continue
-                self._attempt_launch(slot, needed)
+                if self._attempt_launch(slot, needed):
+                    launched += 1
             for slot, needed in self._order_chokeables(chokeables):
-                self._attempt_launch(slot, needed)
+                if self._attempt_launch(slot, needed):
+                    launched += 1
         finally:
+            self._last_sweep_launches = launched
             self._sweep_end()
 
     def _slot_choke_need(self, slot: _Slot) -> frozenset[str]:
