@@ -488,10 +488,12 @@ class FolderBackedCase(ABC):
           invocation may be executing on a given live case at a time, checked and enforced
           fail-fast (not queued) via _on_prepare_fsm_event. A direct `await case.<trigger>()`
           call is guarded the same way. A driver's fire() does not hit this for its own
-          beats — it detects an in-flight slot and awaits the existing task's result instead
-          of calling fire() again; this exception is for callers that bypass that coalescing
-          (e.g. a caller that obtained a live reference via CaseManager.get() and calls a
-          trigger directly while a beat is already advancing the same case).
+          beats — it detects an in-flight slot and waits for the existing task to finish
+          (coalescing with it for a trigger-less fire, or queueing a pinned trigger behind
+          it) rather than launching a second concurrent step; this exception is for callers
+          that bypass that serialization (e.g. a caller that obtained a live reference via
+          CaseManager.get() and calls a trigger directly while a beat is already advancing
+          the same case).
 
         Contract (well-behaved async hooks):
           The lease keepalive — and cooperative scheduling generally — depends on a trigger's

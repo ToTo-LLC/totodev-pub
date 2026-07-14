@@ -1,4 +1,4 @@
-"""Tests for QueuedCasePoolDriver — queue-ordered seniority and requeue-on-wake."""
+"""Tests for SeniorityCasePoolDriver — queue-ordered seniority and requeue-on-wake."""
 
 import asyncio
 
@@ -6,8 +6,8 @@ import pytest
 
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
-from totodev_pub.folder_backed_case_support.queued_case_pool_driver import (
-    QueuedCasePoolDriver,
+from totodev_pub.folder_backed_case_support.seniority_case_pool_driver import (
+    SeniorityCasePoolDriver,
 )
 
 
@@ -93,7 +93,7 @@ def _folders(driver):
 
 def test_seniority_front_case_gets_choke_permit(tmp_path):
     async def body():
-        driver = QueuedCasePoolDriver(choke_limits={"cpu": 1})
+        driver = SeniorityCasePoolDriver(choke_limits={"cpu": 1})
         front = _make(ChokedStepCase, tmp_path, "front")
         back = _make(FastChokedCase, tmp_path, "back")
         front._gate = asyncio.Event()
@@ -113,7 +113,7 @@ def test_seniority_front_case_gets_choke_permit(tmp_path):
 
 def test_requeue_on_wake_moves_to_tail(tmp_path):
     async def body():
-        driver = QueuedCasePoolDriver(choke_limits={"cpu": 1})
+        driver = SeniorityCasePoolDriver(choke_limits={"cpu": 1})
         stall = _make(WakeCase, tmp_path, "stall")
         peer = _make(FastChokedCase, tmp_path, "peer")
         driver.add(stall)
@@ -134,7 +134,7 @@ def test_requeue_on_wake_moves_to_tail(tmp_path):
 
 def test_ceiling_backpressure_favors_senior(tmp_path):
     async def body():
-        driver = QueuedCasePoolDriver(concurrency_ceiling=1, choke_limits={})
+        driver = SeniorityCasePoolDriver(concurrency_ceiling=1, choke_limits={})
         cases = [_make(PlainAutoCase, tmp_path, f"c{i}") for i in range(3)]
         for c in cases:
             driver.add(c)
@@ -155,7 +155,7 @@ def test_ceiling_backpressure_favors_senior(tmp_path):
 
 def test_burst_fifo_case_one_reaches_manual_before_case_two(tmp_path):
     async def body():
-        driver = QueuedCasePoolDriver(choke_limits={"cpu": 1})
+        driver = SeniorityCasePoolDriver(choke_limits={"cpu": 1})
         one = _make(BurstCase, tmp_path, "one")
         two = _make(BurstCase, tmp_path, "two")
         driver.add(one)
@@ -177,7 +177,7 @@ def test_burst_fifo_case_one_reaches_manual_before_case_two(tmp_path):
 
 def test_fire_priority_wakes_on_release(tmp_path):
     async def body():
-        driver = QueuedCasePoolDriver(choke_limits={"cpu": 1})
+        driver = SeniorityCasePoolDriver(choke_limits={"cpu": 1})
         holder = _make(ChokedStepCase, tmp_path, "holder")
         waiter_case = _make(WakeCase, tmp_path, "waiter")
         holder._gate = asyncio.Event()

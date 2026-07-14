@@ -12,7 +12,7 @@ from totodev_pub.case_manager_support.mailbox.processor import RequestHandle, Re
 from totodev_pub.folder_backed_case import FolderBackedCase, IncompatibleReclassError
 from totodev_pub.folder_backed_case_support.case_type_registry import CaseTypeRegistry
 from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
-from totodev_pub.folder_backed_case_support.tiered_case_pool_driver import Tier
+from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import Tier
 
 
 class IntakeCase(FolderBackedCase):
@@ -63,7 +63,8 @@ async def seed_parked_intake(manager: CaseManager, tmp_path):
     staging.mkdir(exist_ok=True)
     seed_detached_case(IntakeCase, staging / "c1")
     case = await adopt_into_live(manager, staging / "c1")
-    result = await manager.fire(case_id=case.case_id)     # start --sort--> sorted
+    # Immediate driver primitive — manager.fire() requires a running loop.
+    result = await manager._driver.fire(case.case_folder, None)
     assert result.progressed and result.final_state == "sorted"
     return manager.get_live(case.case_id)
 
@@ -86,7 +87,7 @@ async def test_reclassify_case_swaps_type_and_admits_hot(tmp_path):
     assert slot.skip_countdown == 1                      # boosted: fires next beat
 
     # The newly available auto path is actually taken.
-    result = await manager.fire(case_id=case_id)
+    result = await manager._driver.fire(folder, None)
     assert result.progressed and result.final_state == "done"
 
 

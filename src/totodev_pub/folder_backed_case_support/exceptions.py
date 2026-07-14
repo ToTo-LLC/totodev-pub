@@ -56,6 +56,17 @@ class CaseInFlightError(Exception):
         self.folder = folder
 
 
+class FireRejectedError(Exception):
+    """Raised by ``attach_fire()`` when the case cannot accept a queued fire
+    (halted or terminal). Also used as the ``on_complete`` error when a pending
+    fire is cancelled before launch (halt, remove, eviction, driver stop)."""
+
+    def __init__(self, folder: Path, *, reason: str):
+        super().__init__(f"Cannot attach fire for {folder}: {reason}.")
+        self.folder = folder
+        self.reason = reason
+
+
 class CaseTransitionInFlightError(Exception):
     """FolderBackedCase enforces at most ONE FSM trigger invocation in flight per live
     object at a time. Raised immediately (fail-fast, not queued) when a second trigger
@@ -73,8 +84,10 @@ class CaseTransitionInFlightError(Exception):
     Typically means: a driver-external caller obtained this case (e.g. via
     CaseManager.get()) and called a trigger directly while a driver beat (or another
     caller) was already advancing it. CasePoolDriver.fire() does not hit this path for
-    its own beats — it detects an in-flight slot and awaits the existing task instead of
-    calling fire() again; this error is for callers that bypass that coalescing.
+    its own beats — it detects an in-flight slot and waits for the existing task
+    (coalescing for a trigger-less fire; queueing a pinned trigger behind it) instead
+    of launching a second concurrent step; this error is for callers that bypass that
+    serialization.
 
     There is deliberately no public "is a transition in flight?" predicate: guards are
     expected to be quick, so the exposure window is small, and a check-then-act boolean

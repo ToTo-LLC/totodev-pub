@@ -5,7 +5,7 @@ Two layers are exercised:
 1. Journal mechanics in isolation — record shape, replay-to-membership, torn-final-line
    tolerance, and the removal-triggered compaction — driven through synthetic pool events and
    raw file fixtures (no live cases needed).
-2. End-to-end recovery against a real ``TieredCasePoolDriver`` — admit / remove / evict drive
+2. End-to-end recovery against a real ``BalancedCasePoolDriver`` — admit / remove / evict drive
    the journal through the live event stream, and ``restore_pool_from_journal`` rebuilds a
    fresh driver from the journal, reconciling each path against the folder on disk.
 """
@@ -24,7 +24,7 @@ from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.folder_backed_case_support.case_pool_driver import CasePoolEvent, CasePoolEventNames
 from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
-from totodev_pub.folder_backed_case_support.tiered_case_pool_driver import TieredCasePoolDriver
+from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import BalancedCasePoolDriver
 from totodev_pub.folder_backed_case_support.pool_membership_journal import (
     DroppedMember,
     LeaseReclaimTimings,
@@ -324,7 +324,7 @@ def test_rebuild_compacts_to_readded_set(tmp_path):
 
 def test_attach_records_driver_membership(tmp_path):
     case_type_registry.register_case_types(AutoCase)
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     journal = PoolMembershipJournal(tmp_path / "journal.jsonl")
     journal.attach(driver)
     a = _make(AutoCase, tmp_path, "a")
@@ -342,7 +342,7 @@ def test_attach_records_driver_membership(tmp_path):
 
 def test_detach_stops_recording(tmp_path):
     case_type_registry.register_case_types(AutoCase)
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     journal = PoolMembershipJournal(tmp_path / "journal.jsonl")
     journal.attach(driver)
     journal.detach(driver)
@@ -357,7 +357,7 @@ def test_detach_stops_recording(tmp_path):
 def test_evicted_case_recorded_as_remove(tmp_path):
     async def body():
         case_type_registry.register_case_types(AutoCase)
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         journal = PoolMembershipJournal(tmp_path / "journal.jsonl")
         journal.attach(driver)
         case = _make(AutoCase, tmp_path, "evict")
@@ -381,7 +381,7 @@ def test_full_recovery_into_fresh_driver(tmp_path):
         case_type_registry.register_case_types(AutoCase)
 
         # --- original driver run (the process that later "crashes") ---
-        driver1 = TieredCasePoolDriver()
+        driver1 = BalancedCasePoolDriver()
         journal_path = tmp_path / "journal.jsonl"
         journal1 = PoolMembershipJournal(journal_path)
         journal1.attach(driver1)
@@ -395,7 +395,7 @@ def test_full_recovery_into_fresh_driver(tmp_path):
         a.case_detach()
 
         # --- fresh process restarts and recovers from the journal ---
-        driver2 = TieredCasePoolDriver()
+        driver2 = BalancedCasePoolDriver()
         journal2 = PoolMembershipJournal(journal_path)
         report = await restore_pool_from_journal(driver2, journal2)
 
@@ -437,7 +437,7 @@ def test_restore_waits_for_frozen_lease_then_acquires(tmp_path):
                 past = time.time() - 1.0
                 os.utime(lease_file, (past, past))
 
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         report = await restore_pool_from_journal(
             driver, journal, sleep=fake_sleep, timings=_INSTANT,
         )
@@ -462,7 +462,7 @@ def test_restore_aborts_on_live_competitor(tmp_path):
         async def fake_sleep(_secs):
             case.case_heartbeat(min_update_secs=0.0)   # the live owner beats its lease
 
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         with pytest.raises(PoolRestartConflictError) as excinfo:
             await restore_pool_from_journal(
                 driver, journal, sleep=fake_sleep, timings=_INSTANT,
@@ -493,7 +493,7 @@ def test_restore_reports_lease_resurrected_during_phase2(tmp_path):
             if calls["n"] >= 2:                          # after the gate, the owner resurrects
                 case.case_heartbeat(min_update_secs=0.0)
 
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         with pytest.raises(PoolRestartConflictError) as excinfo:
             await restore_pool_from_journal(
                 driver, journal, sleep=fake_sleep, timings=_INSTANT,
@@ -516,7 +516,7 @@ def test_restore_records_benign_drops_without_conflict(tmp_path):
         gone.case_detach()
         shutil.rmtree(folder)
 
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         report = await restore_pool_from_journal(driver, journal, timings=_INSTANT)
         assert report.dropped_missing == [folder]
         assert report.readded == []

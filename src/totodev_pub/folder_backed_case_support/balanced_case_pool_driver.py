@@ -1,13 +1,13 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""TieredCasePoolDriver — MLFQ load-balancing driver for a case fleet.
+"""BalancedCasePoolDriver — MLFQ load-balancing driver for a case fleet.
 
 **When to use:** Default choice when many cases should each make steady,
 incremental progress. Suited to large pools where no single case should monopolize
 in-flight slots or scarce choke permits — the driver spreads attention by cadence
 (HOT/WARM/COLD) rather than finishing cases strictly one-by-one. For
-queue-ordered, seniority-first bursting, see ``QueuedCasePoolDriver``.
+queue-ordered, seniority-first bursting, see ``SeniorityCasePoolDriver``.
 
 **Strategy:** Multi-level feedback queue (MLFQ) tiers driven by ``AdvanceResult``
 observations. Every live case is polled on its tier schedule; promotion/demotion
@@ -32,6 +32,7 @@ import logging
 import math
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Hashable, Iterator, Optional
@@ -50,7 +51,7 @@ from totodev_pub.folder_backed_case_support.choke_permit_governor import (
 )
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, CaseInFlightError, CaseTypeMismatchError,
-    DetachedCaseError, OwnershipLostError, UnconfiguredChokeError,
+    DetachedCaseError, FireRejectedError, OwnershipLostError, UnconfiguredChokeError,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,15 @@ class _TierPolicy:
 # Slot + read-only peek view
 
 @dataclass
+class _PendingFire:
+    """One tick-paced fire attached to a slot via ``attach_fire``."""
+    trigger: str | None
+    trigger_kwargs: dict[str, Any]
+    on_launch: Callable[[], None] | None = None
+    on_complete: Callable[[AdvanceResult | None, BaseException | None], None] | None = None
+
+
+@dataclass
 class _Slot:
     """Per-case scheduling state. Slots never move: inserted once, removed once;
     promote/demote is in-place mutation of ``tier`` / ``reset_multiple``."""
@@ -170,6 +180,8 @@ class _Slot:
     task: Optional[asyncio.Task] = None  # the in-flight case-step task, if any
     choked: Optional[frozenset[str]] = None
     pending_grant: Optional[ChokeGrant] = None
+    pending_fires: deque[_PendingFire] = field(default_factory=deque)
+    active_fire: Optional[_PendingFire] = None
 
 
 @dataclass(frozen=True)
@@ -187,13 +199,14 @@ class CasePeek:
     skip_countdown: int
     last_result: Optional[AdvanceResult]
     choked: Optional[frozenset[str]] = None
+    pending_fire_count: int = 0
 
 
 # ---------------------------------------------------------------------------
 # The driver
 # ---------------------------------------------------------------------------
 
-class TieredCasePoolDriver(CasePoolDriver):
+class BalancedCasePoolDriver(CasePoolDriver):
     """Concrete MLFQ scheduling driver over a pool of FolderBackedCase objects.
 
     Identity is the case folder path. ``_by_folder`` is the authoritative slot store;
@@ -298,6 +311,9 @@ class TieredCasePoolDriver(CasePoolDriver):
         slot = self._by_folder[case_folder]
         if slot.in_flight:
             raise CaseInFlightError(case_folder)
+        self._fail_slot_fires(
+            slot, FireRejectedError(case_folder, reason="case removed from pool"),
+        )
         self._index_remove(slot)
         del self._by_folder[case_folder]
         self._emit(CasePoolEventNames.REMOVED, slot.case)
@@ -328,6 +344,10 @@ class TieredCasePoolDriver(CasePoolDriver):
                     slot.skip_countdown = 1           # backpressure: retry next beat
                     continue
                 self._slot_prelaunch(slot)
+                if slot.pending_fires:
+                    if not self._try_launch_pending_fire(slot):
+                        continue
+                    continue
                 grant = self._choke_try_acquire(slot)
                 if grant is None:
                     slot.skip_countdown = 1
@@ -338,6 +358,34 @@ class TieredCasePoolDriver(CasePoolDriver):
                     self._choke_release(grant)
         finally:
             self._sweep_end()
+
+    def _try_launch_pending_fire(self, slot: _Slot) -> bool:
+        """Try to launch the head pending fire. Returns False if denied / deferred."""
+        record = slot.pending_fires[0]
+        needed = self._needed_chokes_for_fire(slot, record.trigger)
+        grant = self._governor.try_acquire(needed)
+        if grant is None:
+            slot.choked = needed
+            slot.skip_countdown = 1
+            return False
+        slot.choked = None
+        if not self._live_or_evict(slot):
+            self._choke_release(grant)
+            return False
+        slot.pending_fires.popleft()
+        slot.active_fire = record
+        self._invoke_fire_callback(record.on_launch)
+        pass_kwargs = record.trigger_kwargs if record.trigger is not None else None
+        try:
+            self._launch_case_step(slot, record.trigger, pass_kwargs, grant=grant)
+        except BaseException as err:
+            self._choke_release(grant)
+            slot.active_fire = None
+            self._invoke_fire_callback(record.on_complete, None, err)
+            if not slot.halt_requested and not slot.terminal:
+                slot.skip_countdown = 1 if slot.pending_fires else max(1, slot.reset_multiple)
+            raise
+        return True
 
     def _sweep_preamble(self) -> None:
         self._governor.begin_sweep()
@@ -384,10 +432,31 @@ class TieredCasePoolDriver(CasePoolDriver):
     async def fire(
         self, case_folder: Path, trigger: str | None, **trigger_kwargs: Any
     ) -> AdvanceResult:
+        """See ``CasePoolDriver.fire`` for the portable contract. In-flight behavior:
+
+        - ``trigger=None`` while a step is in flight COALESCES — "advance it" is
+          already being satisfied, so the in-progress step's result is returned.
+        - A pinned ``trigger`` while a step is in flight QUEUES — the in-flight step
+          is awaited (its outcome belongs to its own awaiter and is discarded here),
+          then the requested trigger launches as its own step. Concurrent pinned
+          fires thus apply sequentially, never dropped, never overlapping.
+
+        Choke permits come from ``ChokePermitGovernor.acquire_priority`` — this call
+        may wait for live capacity, and waiters are served FIFO ahead of the next
+        sweep's beat budget."""
         slot = self._by_folder[case_folder]
-        if slot.in_flight and slot.task is not None:
-            # Already mid-transition: hand back the in-progress result, don't launch anew.
-            return await slot.task
+        while slot.in_flight and slot.task is not None:
+            if trigger is None:
+                # Already mid-transition: hand back the in-progress result, don't launch anew.
+                return await slot.task
+            # Pinned trigger: wait out the current step, then fire ours below. The
+            # awaited step's exception (if any) is its own awaiter's business.
+            try:
+                await slot.task
+            except Exception:
+                pass
+            if self._by_folder.get(case_folder) is not slot:
+                raise KeyError(case_folder)       # evicted/removed while waiting
         if not self._live_or_evict(slot):
             raise KeyError(case_folder)           # evicted during rehydrate
         needed = self._needed_chokes_for_fire(slot, trigger)
@@ -402,6 +471,34 @@ class TieredCasePoolDriver(CasePoolDriver):
             self._choke_release(grant)
             raise
         return await task
+
+    def attach_fire(
+        self,
+        case_folder: Path,
+        trigger: str | None,
+        trigger_kwargs: dict[str, Any] | None = None,
+        *,
+        on_launch: Callable[[], None] | None = None,
+        on_complete: Callable[
+            [AdvanceResult | None, BaseException | None], None
+        ] | None = None,
+    ) -> None:
+        """Queue a tick-paced fire — see ``CasePoolDriver.attach_fire``."""
+        slot = self._by_folder[case_folder]
+        if slot.halt_requested or slot.halt_settled:
+            raise FireRejectedError(case_folder, reason="case is halted")
+        if slot.terminal or slot.case.case_is_terminal:
+            raise FireRejectedError(case_folder, reason="case is terminal")
+        slot.pending_fires.append(
+            _PendingFire(
+                trigger=trigger,
+                trigger_kwargs=dict(trigger_kwargs or {}),
+                on_launch=on_launch,
+                on_complete=on_complete,
+            )
+        )
+        if not slot.in_flight and not slot.halt_requested and not slot.terminal:
+            slot.skip_countdown = 1
 
     def boost(self, case_folder: Path) -> None:
         slot = self._by_folder[case_folder]
@@ -445,14 +542,20 @@ class TieredCasePoolDriver(CasePoolDriver):
             self._finish_in_flight(slot)
             self._evict(slot, reason=err)
             return result
-        except BaseException:
+        except BaseException as err:
             # Misuse (e.g. ValueError for a bad trigger via fire()) or an unexpected error:
             # never wedge the slot. Clear in-flight, give it a normal reload, and re-raise to
             # any awaiter (fire()); beat-launched tasks have their exception consumed.
             self._release_slot_grant(slot)
             self._finish_in_flight(slot)
-            if not slot.halt_requested and not slot.terminal:
-                slot.skip_countdown = max(1, slot.reset_multiple)
+            self._complete_active_fire(slot, None, err)
+            if slot.halt_requested:
+                slot.skip_countdown = _DORMANT
+                self._settle_halt(slot)
+            elif not slot.terminal:
+                slot.skip_countdown = (
+                    1 if slot.pending_fires else max(1, slot.reset_multiple)
+                )
             raise
         self._complete_step(slot, result)
         return result
@@ -478,6 +581,11 @@ class TieredCasePoolDriver(CasePoolDriver):
                 slot.skip_countdown = max(1, slot.reset_multiple)
 
         self._slot_post_step(slot, result)
+        # Resolve the active attach_fire BEFORE emitting events: TERMINATED handlers
+        # (e.g. CaseManager.begin_termination → remove) run synchronously and would
+        # otherwise cancel the active fire with "removed from pool" before its
+        # awaiter sees the successful AdvanceResult.
+        self._complete_active_fire(slot, result, None)
         self._emit_advance_events(slot, result)
 
         if slot.halt_requested:
@@ -485,6 +593,17 @@ class TieredCasePoolDriver(CasePoolDriver):
             self._settle_halt(slot)
         elif terminal_now:
             slot.skip_countdown = _DORMANT
+            # Terminal after a fire: fail any leftover queued fires.
+            if slot.pending_fires:
+                self._fail_slot_fires(
+                    slot,
+                    FireRejectedError(
+                        slot.case.case_folder, reason="case became terminal",
+                    ),
+                )
+        elif slot.pending_fires:
+            # More attached fires wait: don't wait a full tier interval.
+            slot.skip_countdown = 1
 
     def _slot_post_step(self, slot: _Slot, result: AdvanceResult) -> None:
         """Hook for subclasses (e.g. requeue-on-wake). No-op on tiered."""
@@ -505,9 +624,49 @@ class TieredCasePoolDriver(CasePoolDriver):
             logger.debug("case-step task ended with exception: %r", exc)
 
     def _settle_halt(self, slot: _Slot) -> None:
+        self._fail_slot_fires(
+            slot,
+            FireRejectedError(slot.case.case_folder, reason="case is halted"),
+        )
         if not slot.halt_settled:
             slot.halt_settled = True
             self._emit(CasePoolEventNames.HALTED, slot.case)
+
+    @staticmethod
+    def _invoke_fire_callback(cb: Callable[..., Any] | None, *args: Any) -> None:
+        if cb is None:
+            return
+        try:
+            cb(*args)
+        except Exception:
+            logger.exception("attach_fire callback raised")
+
+    def _complete_active_fire(
+        self,
+        slot: _Slot,
+        result: AdvanceResult | None,
+        error: BaseException | None,
+    ) -> None:
+        rec = slot.active_fire
+        if rec is None:
+            return
+        slot.active_fire = None
+        self._invoke_fire_callback(rec.on_complete, result, error)
+
+    def _fail_slot_fires(self, slot: _Slot, error: BaseException) -> None:
+        """Fail the in-flight attached fire (if any) and every pending record."""
+        if slot.active_fire is not None:
+            rec = slot.active_fire
+            slot.active_fire = None
+            self._invoke_fire_callback(rec.on_complete, None, error)
+        while slot.pending_fires:
+            rec = slot.pending_fires.popleft()
+            self._invoke_fire_callback(rec.on_complete, None, error)
+
+    def _fail_all_pending_fires(self, error: BaseException) -> None:
+        for slot in list(self._by_folder.values()):
+            if slot.active_fire is not None or slot.pending_fires:
+                self._fail_slot_fires(slot, error)
 
     def _emit_advance_events(self, slot: _Slot, result: AdvanceResult) -> None:
         # Order: ALERTED → ADVANCED → FAILED → TERMINATED
@@ -548,7 +707,11 @@ class TieredCasePoolDriver(CasePoolDriver):
     def _evict(self, slot: _Slot, *, reason: BaseException) -> None:
         self._release_slot_grant(slot)
         folder = slot.case.case_folder
-        logger.warning("TieredCasePoolDriver evicting case %s: %r", folder, reason)
+        self._fail_slot_fires(
+            slot,
+            FireRejectedError(folder, reason=f"case evicted ({reason!r})"),
+        )
+        logger.warning("BalancedCasePoolDriver evicting case %s: %r", folder, reason)
         self._index_remove(slot)
         self._by_folder.pop(folder, None)
         self._emit(CasePoolEventNames.EVICTED, slot.case)
@@ -670,6 +833,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             skip_countdown=slot.skip_countdown,
             last_result=slot.last_result,
             choked=slot.choked,
+            pending_fire_count=len(slot.pending_fires) + (1 if slot.active_fire else 0),
         )
 
     def by_tier(self) -> dict[str, int]:
@@ -684,6 +848,10 @@ class TieredCasePoolDriver(CasePoolDriver):
         in_flight = sum(1 for s in self._by_folder.values() if s.in_flight)
         terminal = sum(1 for s in self._by_folder.values() if s.terminal)
         blocked = len(self.blocked_cases())
+        pending_fires = sum(
+            len(s.pending_fires) + (1 if s.active_fire else 0)
+            for s in self._by_folder.values()
+        )
         oldest_dwell_secs = 0.0
         oldest_case: Optional[Path] = None
         for slot in self._by_folder.values():
@@ -697,6 +865,7 @@ class TieredCasePoolDriver(CasePoolDriver):
             "in_flight": in_flight,
             "terminal": terminal,
             "blocked": blocked,
+            "pending_fires": pending_fires,
             "lease_ttl_secs": DEFAULT_LEASE_TTL_SECS,
             "oldest_dwell_secs": oldest_dwell_secs,
             "oldest_dwell_case": oldest_case,
@@ -708,9 +877,12 @@ class TieredCasePoolDriver(CasePoolDriver):
 
     async def stop(self) -> None:
         """Stop the beat loop, then drain any in-flight steps so completions reclassify
-        out cleanly before returning."""
+        out cleanly before returning. Fail any still-queued attach_fire records."""
         await super().stop()
         await self.settle()
+        self._fail_all_pending_fires(
+            RuntimeError("driver stopped with pending fire(s)"),
+        )
 
     async def settle(self) -> None:
         """Await all currently in-flight case steps to a quiescent point. Useful for a

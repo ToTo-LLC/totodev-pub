@@ -1,4 +1,4 @@
-"""Tests for TieredCasePoolDriver — the concrete MLFQ scheduling driver.
+"""Tests for BalancedCasePoolDriver — the concrete MLFQ scheduling driver.
 
 Driven deterministically: tier-reclassification tests use ``fire(folder, None)`` (which
 routes one step through the same completion path the beat uses, bypassing the countdown),
@@ -18,8 +18,8 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     DetachedCaseError,
     UnconfiguredChokeError,
 )
-from totodev_pub.folder_backed_case_support.tiered_case_pool_driver import (
-    TieredCasePoolDriver,
+from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import (
+    BalancedCasePoolDriver,
     Tier,
     _TierPolicy,
 )
@@ -118,6 +118,18 @@ class BlockingCase(FolderBackedCase):
         await self._gate.wait()
 
 
+class BlockingThenManualCase(FolderBackedCase):
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Blocking auto step into a state with a manual exit: lets a test queue a pinned
+    trigger behind an in-flight step."""
+    fsm_state_chains = ["^s0--step-->s1==push-->done^"]
+
+    async def perform_step(self, tctx):
+        await self._gate.wait()
+
+
 class ChokedBlockingCase(FolderBackedCase):
 
     asset_aliases = {}
@@ -155,7 +167,7 @@ def _make(case_cls, tmp_path, name, **kw):
 # ---------------------------------------------------------------------------
 
 def test_add_contains_len_get_find(tmp_path):
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     case = _make(AutoCase, tmp_path, "c1", case_id="c1")
     try:
         driver.add(case)
@@ -169,7 +181,7 @@ def test_add_contains_len_get_find(tmp_path):
 
 
 def test_add_rejects_duplicate(tmp_path):
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     case = _make(AutoCase, tmp_path, "dup")
     try:
         driver.add(case)
@@ -180,7 +192,7 @@ def test_add_rejects_duplicate(tmp_path):
 
 
 def test_add_rejects_detached(tmp_path):
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     case = _make(AutoCase, tmp_path, "det")
     case.case_detach()
     with pytest.raises(DetachedCaseError):
@@ -188,7 +200,7 @@ def test_add_rejects_detached(tmp_path):
 
 
 def test_admission_tiers(tmp_path):
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     auto = _make(AutoCase, tmp_path, "auto")
     manual = _make(ManualCase, tmp_path, "manual")
     try:
@@ -203,7 +215,7 @@ def test_admission_tiers(tmp_path):
 
 def test_admission_terminal_case_is_dormant(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(AutoCase, tmp_path, "terminal")
         # Drive it to its terminal state first (still bound), then admit it.
         await case.case_advance()
@@ -225,7 +237,7 @@ def test_admission_terminal_case_is_dormant(tmp_path):
 
 def test_progress_sets_hot(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(AutoCase, tmp_path, "prog")
         driver.add(case)
         result = await driver.fire(case.case_folder, None)
@@ -241,7 +253,7 @@ def test_progress_sets_hot(tmp_path):
 
 def test_noop_streak_demotes_hot_to_warm(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(GuardedCase, tmp_path, "guarded")
         driver.add(case)
         assert driver.peek(case.case_folder).tier is Tier.HOT
@@ -256,7 +268,7 @@ def test_noop_streak_demotes_hot_to_warm(tmp_path):
 
 def test_structural_deadend_accelerated_demotion(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(ManualCase, tmp_path, "accel")
         driver.add(case)
         assert driver.peek(case.case_folder).tier is Tier.WARM   # admitted warm (not advanceable)
@@ -271,7 +283,7 @@ def test_structural_deadend_accelerated_demotion(tmp_path):
 
 def test_failure_holds_warm_with_backoff(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(FailCase, tmp_path, "fail")
         driver.add(case)
         for n in range(1, 4):
@@ -292,7 +304,7 @@ def test_failure_holds_warm_with_backoff(tmp_path):
 
 def test_advance_event_order_alerted_advanced_terminated(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(AlertProgressCase, tmp_path, "order")
         driver.add(case)
         seen = []
@@ -310,7 +322,7 @@ def test_advance_event_order_alerted_advanced_terminated(tmp_path):
 
 def test_failed_event_fires(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(FailCase, tmp_path, "failev")
         driver.add(case)
         seen = []
@@ -327,7 +339,7 @@ def test_failed_event_fires(tmp_path):
 
 
 def test_admitted_and_removed_events_and_unsubscribe(tmp_path):
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     case = _make(AutoCase, tmp_path, "evmember")
     try:
         seen = []
@@ -347,7 +359,7 @@ def test_admitted_and_removed_events_and_unsubscribe(tmp_path):
 
 
 def test_duplicate_subscription_handle_rejected(tmp_path):
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     driver.case_event_subscribe(CasePoolEventNames.ADMITTED, lambda ev: None, handle="h")
     with pytest.raises(ValueError):
         driver.case_event_subscribe(CasePoolEventNames.REMOVED, lambda ev: None, handle="h")
@@ -359,7 +371,7 @@ def test_duplicate_subscription_handle_rejected(tmp_path):
 
 def test_fire_manual_trigger(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(ManualCase, tmp_path, "firem")
         driver.add(case)
         result = await driver.fire(case.case_folder, "push")
@@ -372,7 +384,7 @@ def test_fire_manual_trigger(tmp_path):
 
 def test_fire_inflight_returns_in_progress_result(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(BlockingCase, tmp_path, "inflight")
         case._gate = asyncio.Event()
         driver.add(case)
@@ -380,7 +392,8 @@ def test_fire_inflight_returns_in_progress_result(tmp_path):
         await driver.advance(suggested_interval_secs=0.0)   # launches the step; blocks on gate
         slot = driver._by_folder[case.case_folder]
         assert slot.in_flight is True
-        # A fire while in-flight must hand back the in-progress result, not launch anew.
+        # A trigger-less fire while in-flight must hand back the in-progress result,
+        # not launch anew.
         case._gate.set()
         result = await driver.fire(case.case_folder, None)
         assert result.progressed
@@ -390,9 +403,207 @@ def test_fire_inflight_returns_in_progress_result(tmp_path):
     _run(body())
 
 
+def test_fire_pinned_trigger_queues_behind_inflight(tmp_path):
+    async def body():
+        driver = BalancedCasePoolDriver()
+        case = _make(BlockingThenManualCase, tmp_path, "queued")
+        case._gate = asyncio.Event()
+        driver.add(case)
+        driver.boost(case.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)   # launches step; blocks on gate
+        assert driver._by_folder[case.case_folder].in_flight is True
+        # A pinned trigger must NOT coalesce (which would drop it): it waits for the
+        # in-flight step to finish, then fires as its own step.
+        fire_task = asyncio.create_task(driver.fire(case.case_folder, "push"))
+        await asyncio.sleep(0.01)
+        assert not fire_task.done()
+        assert case.case_state == "s0"                      # push not applied yet
+        case._gate.set()
+        result = await fire_task
+        assert result.progressed
+        assert result.initial_state == "s1"                 # ran AFTER the blocked step
+        assert case.case_state == "done"
+        await driver.settle()
+
+    _run(body())
+
+
+# ---------------------------------------------------------------------------
+# attach_fire (tick-paced queue)
+# ---------------------------------------------------------------------------
+
+def test_attach_fire_runs_pinned_trigger_on_sweep(tmp_path):
+    async def body():
+        driver = BalancedCasePoolDriver()
+        case = _make(ManualCase, tmp_path, "attach1")
+        driver.add(case)
+        seen: list[str] = []
+        driver.attach_fire(
+            case.case_folder, "push", {},
+            on_launch=lambda: seen.append("launch"),
+            on_complete=lambda r, e: seen.append("complete" if e is None and r and r.progressed else f"err:{e}"),
+        )
+        assert driver.peek(case.case_folder).pending_fire_count == 1
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+        assert case.case_state == "done"
+        assert seen == ["launch", "complete"]
+        assert driver.peek(case.case_folder).pending_fire_count == 0
+
+    _run(body())
+
+
+def test_attach_fire_multiple_apply_one_per_beat(tmp_path):
+    async def body():
+        class ChainManual(FolderBackedCase):
+            asset_aliases = {}
+            fsm_trigger_chokes = {}
+            fsm_state_chains = ["^s0==a-->s1==b-->s2^"]
+
+        driver = BalancedCasePoolDriver()
+        case = _make(ChainManual, tmp_path, "multi")
+        driver.add(case)
+        completed: list[str] = []
+        driver.attach_fire(
+            case.case_folder, "a", {},
+            on_complete=lambda r, e: completed.append(r.final_state if r else "err"),
+        )
+        driver.attach_fire(
+            case.case_folder, "b", {},
+            on_complete=lambda r, e: completed.append(r.final_state if r else "err"),
+        )
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+        assert case.case_state == "s1"
+        assert completed == ["s1"]
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+        assert case.case_state == "s2"
+        assert completed == ["s1", "s2"]
+
+    _run(body())
+
+
+def test_attach_fire_choke_denied_stays_queued(tmp_path):
+    async def body():
+        driver = BalancedCasePoolDriver(choke_limits={"cpu": 1})
+        holder = _make(ChokedBlockingCase, tmp_path, "ch_hold")
+        waiter = _make(CpuChokedCase, tmp_path, "ch_wait")
+        holder._gate = asyncio.Event()
+        driver.add(holder)
+        driver.add(waiter)
+        driver.boost(holder.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+        assert driver._by_folder[holder.case_folder].in_flight
+
+        done: list[bool] = []
+        driver.attach_fire(
+            waiter.case_folder, None, None,
+            on_complete=lambda r, e: done.append(bool(r and r.progressed)),
+        )
+        await driver.advance(suggested_interval_secs=0.0)
+        assert not done
+        assert driver.peek(waiter.case_folder).pending_fire_count == 1
+        assert driver.peek(waiter.case_folder).choked == frozenset({"cpu"})
+
+        holder._gate.set()
+        await driver.settle()
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+        assert done == [True]
+        assert waiter.case_state == "s1"
+
+    _run(body())
+
+
+def test_attach_fire_callback_exception_does_not_wedge(tmp_path):
+    async def body():
+        driver = BalancedCasePoolDriver()
+        case = _make(ManualCase, tmp_path, "cb_boom")
+        driver.add(case)
+
+        def bad_launch():
+            raise RuntimeError("launch boom")
+
+        driver.attach_fire(case.case_folder, "push", {}, on_launch=bad_launch)
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+        assert case.case_state == "done"   # step still ran
+
+    _run(body())
+
+
+def test_attach_fire_rejects_halted_and_terminal(tmp_path):
+    from totodev_pub.folder_backed_case_support.exceptions import FireRejectedError
+
+    async def body():
+        driver = BalancedCasePoolDriver()
+        case = _make(ManualCase, tmp_path, "rej")
+        driver.add(case)
+        driver.request_halt(case.case_folder)
+        with pytest.raises(FireRejectedError):
+            driver.attach_fire(case.case_folder, "push", {})
+
+        term = _make(AutoCase, tmp_path, "term")
+        await term.case_advance()
+        await term.case_advance()
+        assert term.case_is_terminal
+        driver.add(term)
+        with pytest.raises(FireRejectedError):
+            driver.attach_fire(term.case_folder, None, None)
+
+    _run(body())
+
+
+def test_attach_fire_remove_fails_pending(tmp_path):
+    from totodev_pub.folder_backed_case_support.exceptions import FireRejectedError
+
+    async def body():
+        driver = BalancedCasePoolDriver()
+        case = _make(ManualCase, tmp_path, "rmq")
+        driver.add(case)
+        errs: list[BaseException] = []
+        driver.attach_fire(
+            case.case_folder, "push", {},
+            on_complete=lambda r, e: errs.append(e) if e else None,
+        )
+        driver.remove(case.case_folder)
+        assert len(errs) == 1
+        assert isinstance(errs[0], FireRejectedError)
+
+    _run(body())
+
+
+def test_attach_fire_while_inflight_queues(tmp_path):
+    async def body():
+        driver = BalancedCasePoolDriver()
+        case = _make(BlockingThenManualCase, tmp_path, "infl_q")
+        case._gate = asyncio.Event()
+        driver.add(case)
+        driver.boost(case.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+        assert driver._by_folder[case.case_folder].in_flight
+
+        done: list[str] = []
+        driver.attach_fire(
+            case.case_folder, "push", {},
+            on_complete=lambda r, e: done.append(r.final_state if r else "err"),
+        )
+        assert driver.peek(case.case_folder).pending_fire_count == 1
+        case._gate.set()
+        await driver.settle()
+        # After the blocking step finishes, pending fire should be due next beat.
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+        assert done == ["done"]
+        assert case.case_state == "done"
+
+    _run(body())
+
+
 def test_boost_schedules_next_beat(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(GuardedCase, tmp_path, "boost")
         driver.add(case)
         driver.boost(case.case_folder)
@@ -410,7 +621,7 @@ def test_boost_schedules_next_beat(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_request_halt_fires_halted_then_remove(tmp_path):
-    driver = TieredCasePoolDriver()
+    driver = BalancedCasePoolDriver()
     case = _make(GuardedCase, tmp_path, "halt")
     try:
         seen = []
@@ -430,7 +641,7 @@ def test_request_halt_fires_halted_then_remove(tmp_path):
 
 def test_remove_inflight_raises(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(BlockingCase, tmp_path, "rmflight")
         case._gate = asyncio.Event()
         driver.add(case)
@@ -452,7 +663,7 @@ def test_remove_inflight_raises(tmp_path):
 def test_rehydrate_on_detach(tmp_path):
     async def body():
         case_type_registry.register_case_types(AutoCase)
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(AutoCase, tmp_path, "rehy")
         folder = case.case_folder
         driver.add(case)
@@ -474,7 +685,7 @@ def test_rehydrate_on_detach(tmp_path):
 def test_evict_on_missing_folder(tmp_path):
     async def body():
         case_type_registry.register_case_types(AutoCase)
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(AutoCase, tmp_path, "evict")
         folder = case.case_folder
         seen = []
@@ -499,7 +710,7 @@ def test_evict_on_missing_folder(tmp_path):
 
 def test_heartbeat_walk_touches_cases(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver()
+        driver = BalancedCasePoolDriver()
         case = _make(GuardedCase, tmp_path, "hb")
         driver.add(case)
         await driver.advance(suggested_interval_secs=0.0)
@@ -512,7 +723,7 @@ def test_heartbeat_walk_touches_cases(tmp_path):
 
 def test_concurrency_ceiling_defers_launches(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver(concurrency_ceiling=1)
+        driver = BalancedCasePoolDriver(concurrency_ceiling=1)
         a = _make(BlockingCase, tmp_path, "cap_a")
         b = _make(BlockingCase, tmp_path, "cap_b")
         a._gate = asyncio.Event()
@@ -539,7 +750,7 @@ def test_concurrency_ceiling_defers_launches(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_add_rejects_unconfigured_choke_resource(tmp_path):
-    driver = TieredCasePoolDriver(choke_limits={})
+    driver = BalancedCasePoolDriver(choke_limits={})
     case = _make(CpuChokedCase, tmp_path, "choked")
     try:
         with pytest.raises(UnconfiguredChokeError) as excinfo:
@@ -553,7 +764,7 @@ def test_add_rejects_unconfigured_choke_resource(tmp_path):
 
 def test_choke_throttle_limits_concurrent_cpu_steps(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver(choke_limits={"cpu": 1})
+        driver = BalancedCasePoolDriver(choke_limits={"cpu": 1})
         cases = []
         for i in range(3):
             c = _make(ChokedBlockingCase, tmp_path, f"thr_{i}")
@@ -574,7 +785,7 @@ def test_choke_throttle_limits_concurrent_cpu_steps(tmp_path):
 
 def test_choke_beat_quantization_retries_next_beat(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver(choke_limits={"cpu": 1})
+        driver = BalancedCasePoolDriver(choke_limits={"cpu": 1})
         holder = _make(ChokedBlockingCase, tmp_path, "holder")
         waiter = _make(CpuChokedCase, tmp_path, "waiter")
         holder._gate = asyncio.Event()
@@ -603,7 +814,7 @@ def test_choke_beat_quantization_retries_next_beat(tmp_path):
 
 def test_fire_awaits_choke_permit(tmp_path):
     async def body():
-        driver = TieredCasePoolDriver(choke_limits={"cpu": 1})
+        driver = BalancedCasePoolDriver(choke_limits={"cpu": 1})
         holder = _make(ChokedBlockingCase, tmp_path, "hold")
         waiter = _make(CpuChokedCase, tmp_path, "wait")
         holder._gate = asyncio.Event()

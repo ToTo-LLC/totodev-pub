@@ -13,18 +13,18 @@ Typical lifecycle: ``start()`` → ``add(case)`` → autonomous ``advance()`` be
 
 Concrete implementations
 ------------------------
-``TieredCasePoolDriver`` — default MLFQ load-balancer. Use when many cases should
+``BalancedCasePoolDriver`` — default MLFQ load-balancer. Use when many cases should
 each make steady, incremental progress; contested capacity (in-flight ceiling,
 choke permits) is throttled but not seniority-ranked.
 
-``QueuedCasePoolDriver`` — same tier cadence with a queue contract. Use when
+``SeniorityCasePoolDriver`` — same tier cadence with a queue contract. Use when
 cases should burst through automatic work one-at-a-time (or front-of-line first)
 and the head of the queue should win scarce capacity over cases behind it.
 
 Contract for implementers
 --------------------------
-Everything below is a MUST unless noted otherwise. ``TieredCasePoolDriver`` and its
-subclass ``QueuedCasePoolDriver`` are the reference for what honoring it looks like.
+Everything below is a MUST unless noted otherwise. ``BalancedCasePoolDriver`` and its
+subclass ``SeniorityCasePoolDriver`` are the reference for what honoring it looks like.
 
 1. Identity. A case's folder path is the sole key across container access
    (``__contains__``, ``__getitem__``, ``find``), membership (``add``, ``remove``,
@@ -53,15 +53,25 @@ subclass ``QueuedCasePoolDriver`` are the reference for what honoring it looks l
 
 5. No overlapping steps on one case. ``FolderBackedCase`` forbids more than one FSM
    trigger in flight on a single live object (``CaseTransitionInFlightError``). A
-   driver's own concurrency must not violate this: if a step is already in flight for a
-   case, ``fire()`` must coalesce with it (await the existing task) rather than
-   launching a second ``case_advance()``.
+   driver's own concurrency must not violate this: ``fire()`` must never launch a
+   second concurrent ``case_advance()``. When a step is already in flight, a
+   trigger-less ``fire(folder, None)`` coalesces (awaits the existing task and returns
+   its result); a ``fire()`` with a pinned trigger queues behind it (awaits the
+   existing task, then launches the requested trigger as its own step) so an explicit
+   trigger is never silently dropped.
+
+   Tick-paced fires use ``attach_fire()`` instead: records append to a per-slot deque
+   and execute one per sweep turn (preempting auto-advance), under the same concurrency
+   ceiling and sweep choke budget as ordinary steps. Concurrent ``attach_fire`` calls
+   never overlap; they simply queue.
 
 6. Halt is terminal for scheduling. Once ``HALTED`` has fired for a case, the driver
    must not schedule further advances for it. ``request_halt()`` returns immediately;
    ``HALTED`` fires exactly once, when the case is no longer in-flight or scheduled.
    There is no in-place undo: to drive the case again, ``remove()`` it and ``add()`` it
    back (re-admission builds a fresh scheduling slot; tier/streaks/queue position reset).
+   Pending ``attach_fire`` records on a halted (or removed/evicted) slot must be failed
+   via their ``on_complete`` callbacks.
 
 7. Event discipline.
    - Membership events fire exactly once per transition: ``ADMITTED`` on a successful
@@ -77,7 +87,7 @@ subclass ``QueuedCasePoolDriver`` are the reference for what honoring it looks l
 8. Query defaults are a floor. ``stalled_cases()``, ``terminal_cases()``,
    ``cases_in_state()``, ``failed_cases()`` have default O(N) implementations. A
    subclass may override any of them with a cached/indexed version (as
-   ``TieredCasePoolDriver.terminal_cases()`` does), but an override must return the
+   ``BalancedCasePoolDriver.terminal_cases()`` does), but an override must return the
    same set the default would — faster, never different.
 
 9. The ABC is the portable surface. Diagnostics/extension APIs (``peek``, ``snapshot``,
@@ -156,7 +166,7 @@ class CasePoolDriver(ABC):
     """Scheduling seam over a pool of FolderBackedCase objects.
 
     Container-like access by folder path; concrete subclasses are named for their
-    policy (e.g. ``TieredCasePoolDriver``). The full derived-class contract lives in
+    policy (e.g. ``BalancedCasePoolDriver``). The full derived-class contract lives in
     the module docstring above — the load-bearing invariants are:
 
     - Folder path is the sole identity key and must not change while a case is in the
@@ -255,14 +265,60 @@ class CasePoolDriver(ABC):
 
     @abstractmethod
     async def fire(self, case_folder: Path, trigger: str | None, **trigger_kwargs: Any) -> AdvanceResult:
-        """Route one ``case_advance()`` through the driver for standard pool events.
+        """Immediate one-step primitive: route ``case_advance()`` through the driver now.
 
         With no ``trigger``, sweeps auto edges in declared order (first guard that
         permits). With ``trigger``, pins that edge. Rehydrates detached cases like
         ``advance()``.
 
-        Prefer ``fire()`` over direct ``await case.<trigger>()`` when pool lifecycle
-        events should fire; direct calls skip driver processing but remain safe.
+        If a step is already in flight for the case: trigger-less fire coalesces
+        with it (returns the in-progress result); a pinned trigger waits for the
+        in-flight step to finish and then fires — sequential, never dropped, never
+        overlapping (contract #5).
+
+        Choke permits are acquired on the priority path (may await live capacity;
+        served FIFO, ahead of the next sweep's beat budget) rather than the sweep's
+        non-blocking beat-quantized budget. This path deliberately bypasses the
+        concurrency ceiling — use ``attach_fire()`` for tick-paced, uniform-capacity
+        fires (the CaseManager / mailbox path).
+
+        Prefer ``fire()`` / ``attach_fire()`` over direct ``await case.<trigger>()``
+        when pool lifecycle events should fire; direct calls skip driver processing
+        but remain safe.
+        """
+
+    @abstractmethod
+    def attach_fire(
+        self,
+        case_folder: Path,
+        trigger: str | None,
+        trigger_kwargs: dict[str, Any] | None = None,
+        *,
+        on_launch: Callable[[], None] | None = None,
+        on_complete: Callable[
+            [AdvanceResult | None, BaseException | None], None
+        ] | None = None,
+    ) -> None:
+        """Queue a tick-paced fire on the case's scheduling slot (contract #5).
+
+        Appends a record to the slot's pending-fire deque and nudges the slot due
+        next beat (when not already in flight). The next sweep that reaches this
+        slot launches the head fire *instead of* auto ``case_advance()``, under the
+        same concurrency ceiling and sweep choke budget as ordinary steps. One fire
+        per turn; remaining records stay queued and reload ``skip_countdown = 1``.
+
+        Opaque callbacks (invoked sandboxed — exceptions are logged, never wedge
+        the slot):
+
+        - ``on_launch``: just before the step launches (e.g. mailbox moves
+          ``pending/ → firing/`` for crash-recovery attribution).
+        - ``on_complete(result, error)``: exactly once per record. On success
+          ``error`` is None and ``result`` is the ``AdvanceResult``; on failure /
+          cancellation ``result`` is None and ``error`` is set.
+
+        Raises:
+            KeyError: folder not in the pool.
+            FireRejectedError: slot is halted or terminal.
         """
 
     # -- Scheduling hints --------------------------------------------------

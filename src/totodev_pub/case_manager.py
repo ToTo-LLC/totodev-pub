@@ -44,6 +44,7 @@ from totodev_pub.case_manager_support.exceptions import (
     EjectTimeoutError,
     InvalidAddressingError,
     LiveCaseNotFoundError,
+    ManagerNotRunningError,
     PolicyFileMissingError,
     PolicyMismatchError,
     RecoverRequiredError,
@@ -88,8 +89,8 @@ from totodev_pub.folder_backed_case_support.case_type_registry import (
     CaseTypeRegistry,
     case_type_registry,
 )
-from totodev_pub.folder_backed_case_support.queued_case_pool_driver import QueuedCasePoolDriver
-from totodev_pub.folder_backed_case_support.tiered_case_pool_driver import TieredCasePoolDriver
+from totodev_pub.folder_backed_case_support.seniority_case_pool_driver import SeniorityCasePoolDriver
+from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import BalancedCasePoolDriver
 
 logger = logging.getLogger(__name__)
 
@@ -235,8 +236,8 @@ class CaseManager:
         return cls.open(cache_root, **overrides)
 
     @classmethod
-    def open_queued(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
-        return cls.open(cache_root, driver_class=QueuedCasePoolDriver, **overrides)
+    def open_seniority(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
+        return cls.open(cache_root, driver_class=SeniorityCasePoolDriver, **overrides)
 
     @classmethod
     def open_inprocess(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
@@ -367,13 +368,19 @@ class CaseManager:
         self._write_manifest(running=False, stopped=True)
 
     async def _manager_loop(self) -> None:
+        """One tick = maintenance (mailbox intake first), then the pool sweep.
+
+        Maintenance runs at the HEAD of the tick deliberately: externally submitted
+        fire requests are executed before the sweep spends its beat-quantized choke
+        budget, and the post-fire ``boost()`` lands before the sweep so the boosted
+        case is stepped in this same tick rather than the next one."""
         interval = self._policy.maintenance_interval_secs
         consecutive_failures = 0
         while self._running and not self._stopping:
             try:
+                await self._maintenance_tick()
                 await self._driver.advance(suggested_interval_secs=interval)
                 self._reconcile_terminal_in_pool()
-                await self._maintenance_tick()
                 consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
@@ -648,10 +655,60 @@ class CaseManager:
         trigger: str | None = None,
         **trigger_kwargs: Any,
     ) -> AdvanceResult:
+        """Queue one case step on the slot and await its sweep-time result.
+
+        Addressing: exactly one of ``case_id`` / ``case_folder``. With
+        ``trigger=None`` the case's auto edges are swept; with a pinned
+        ``trigger`` that edge fires.
+
+        Timing and resource promises:
+
+        - **Requires a running manager.** Raises ``ManagerNotRunningError`` if
+          the loop is not running. Mailbox files and this API share one queue:
+          attach to the case's scheduling slot, execute at the slot's turn in
+          the normal sweep (maintenance drains intake at the head of each tick,
+          then the sweep launches due slots).
+        - **Uniform capacity.** Queued fires use the same concurrency ceiling and
+          beat-quantized choke budget as ordinary advances — they do **not** take
+          the priority ``acquire_priority`` path used by the driver's immediate
+          ``fire()`` primitive.
+        - **One fire per turn, sequential per case.** Multiple fires on the same
+          case queue on the slot and apply one sweep at a time; they preempt
+          auto-advance while pending.
+        - **Do not await this from inside a case step's own hook** for the same
+          case — that deadlocks (the fire cannot run until the step finishes).
+        - **Escape hatch:** for an immediate out-of-band step, ``get_live()`` and
+          call a trigger directly on the case object. That skips pool events and
+          scheduling bookkeeping (and is guarded by
+          ``CaseTransitionInFlightError`` if a step is already running).
+        """
+        if not self._running:
+            raise ManagerNotRunningError()
         loc = self._resolve_single(case_id=case_id, case_folder=case_folder)
         if loc is None:
             raise LiveCaseNotFoundError(case_id or str(case_folder))
-        return await self._driver.fire(loc.case_folder, trigger, **trigger_kwargs)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[AdvanceResult] = loop.create_future()
+
+        def on_complete(
+            result: AdvanceResult | None, error: BaseException | None,
+        ) -> None:
+            if fut.done():
+                return
+            if error is not None:
+                fut.set_exception(error)
+            elif result is not None:
+                fut.set_result(result)
+            else:
+                fut.set_exception(RuntimeError("fire completed with no result or error"))
+
+        self._driver.attach_fire(
+            loc.case_folder,
+            trigger,
+            trigger_kwargs,
+            on_complete=on_complete,
+        )
+        return await fut
 
     async def reclassify_case(
         self,
@@ -837,9 +894,9 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     def _build_default_driver(self) -> CasePoolDriver:
-        cls = self._config.driver_class or TieredCasePoolDriver
+        cls = self._config.driver_class or BalancedCasePoolDriver
         kwargs = dict(self._config.driver_kwargs)
-        if cls in (TieredCasePoolDriver, QueuedCasePoolDriver):
+        if cls in (BalancedCasePoolDriver, SeniorityCasePoolDriver):
             kwargs.setdefault("concurrency_ceiling", self._policy.concurrency_ceiling)
             kwargs.setdefault("choke_limits", self._policy.choke_limits)
         return cls(**kwargs)

@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""QueuedCasePoolDriver — queue-ordered, seniority-first driver for bursty workflows.
+"""SeniorityCasePoolDriver — queue-ordered, seniority-first driver for bursty workflows.
 
 **When to use:** When cases should behave more like a work queue than a load
 balancer — finish (or burst through) one case at a time, with the front of the
@@ -9,9 +9,9 @@ line holding top claim on pool capacity. Fits workflows that rush through
 automatic transitions then idle at manual gates for long periods: the actively
 bursting case at the head should win contested in-flight slots and choke permits
 before cases behind it. For steady fleet-wide progress without seniority, use
-``TieredCasePoolDriver``.
+``BalancedCasePoolDriver``.
 
-**Strategy:** Subclasses ``TieredCasePoolDriver`` and keeps its MLFQ cadence
+**Strategy:** Subclasses ``BalancedCasePoolDriver`` and keeps its MLFQ cadence
 (HOT/WARM/COLD) for *when* cases are due, but adds a queue contract on *who
 wins* when capacity is scarce: ``_by_folder`` insertion order is seniority.
 Cases requeue to the tail when waking from a manual-only state so newly active
@@ -24,33 +24,33 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
-from totodev_pub.folder_backed_case_support.tiered_case_pool_driver import (
+from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import (
     CasePeek,
-    TieredCasePoolDriver,
+    BalancedCasePoolDriver,
     _Slot,
 )
 
 
 @dataclass
-class _QueuedSlot(_Slot):
+class _SenioritySlot(_Slot):
     """Tiered slot plus queue wake tracking."""
 
     last_seen_state: str = ""
 
 
 @dataclass(frozen=True)
-class QueuedCasePeek(CasePeek):
+class SeniorityCasePeek(CasePeek):
     """Scheduling peek including queue position (0 = front)."""
 
     queue_position: int = 0
 
 
-class QueuedCasePoolDriver(TieredCasePoolDriver):
+class SeniorityCasePoolDriver(BalancedCasePoolDriver):
     """MLFQ cadence with queue-ordered seniority on contested capacity."""
 
     def _make_slot(self, case) -> _Slot:
         slot = super()._make_slot(case)
-        return _QueuedSlot(
+        return _SenioritySlot(
             case=slot.case,
             tier=slot.tier,
             reset_multiple=slot.reset_multiple,
@@ -67,11 +67,13 @@ class QueuedCasePoolDriver(TieredCasePoolDriver):
             task=slot.task,
             choked=slot.choked,
             pending_grant=slot.pending_grant,
+            pending_fires=slot.pending_fires,
+            active_fire=slot.active_fire,
             last_seen_state=case.case_state,
         )
 
     def _slot_prelaunch(self, slot: _Slot) -> None:
-        if not isinstance(slot, _QueuedSlot):
+        if not isinstance(slot, _SenioritySlot):
             return
         spec = slot.case.case_type_spec()
         if (
@@ -82,24 +84,24 @@ class QueuedCasePoolDriver(TieredCasePoolDriver):
         slot.last_seen_state = slot.case.case_state
 
     def _slot_post_step(self, slot: _Slot, result: AdvanceResult) -> None:
-        if not isinstance(slot, _QueuedSlot):
+        if not isinstance(slot, _SenioritySlot):
             return
         spec = slot.case.case_type_spec()
         if result.progressed and not spec.fsm.has_auto_exits(result.initial_state):
             self._requeue_to_tail(slot)
         slot.last_seen_state = slot.case.case_state
 
-    def _requeue_to_tail(self, slot: _QueuedSlot) -> None:
+    def _requeue_to_tail(self, slot: _SenioritySlot) -> None:
         folder = slot.case.case_folder
         if folder not in self._by_folder:
             return
         del self._by_folder[folder]
         self._by_folder[folder] = slot
 
-    def peek(self, case_folder: Path) -> QueuedCasePeek:
+    def peek(self, case_folder: Path) -> SeniorityCasePeek:
         base = super().peek(case_folder)
         queue_position = list(self._by_folder.keys()).index(case_folder)
-        return QueuedCasePeek(
+        return SeniorityCasePeek(
             case_folder=base.case_folder,
             case_id=base.case_id,
             state=base.state,
@@ -112,5 +114,6 @@ class QueuedCasePoolDriver(TieredCasePoolDriver):
             skip_countdown=base.skip_countdown,
             last_result=base.last_result,
             choked=base.choked,
+            pending_fire_count=base.pending_fire_count,
             queue_position=queue_position,
         )

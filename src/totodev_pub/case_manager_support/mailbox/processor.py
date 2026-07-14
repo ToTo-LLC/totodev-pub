@@ -19,11 +19,13 @@ from pydantic import BaseModel, Field
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.advance_result_serializable import AdvanceResultSerializable
 from totodev_pub.case_manager_support.adopt import AdoptResult
+from totodev_pub.case_manager_support.exceptions import LiveCaseNotFoundError
 from totodev_pub.case_manager_support.shutdown import (
     ShutdownAck,
     scan_shutdown_intake,
     write_shutdown_request,
 )
+from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 
 if TYPE_CHECKING:
     from totodev_pub.case_manager import CaseManager
@@ -31,6 +33,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAILBOX_PROTOCOL_VERSION = 1
+
+
+def _arrival_order(path: Path) -> tuple[float, str]:
+    """Sort key for intake drains: FIFO by file mtime, filename as tiebreak.
+
+    Filenames are correlation ids (random UUIDs), so a bare ``sorted()`` would be
+    UUID-lexicographic — effectively random relative to submission order. A file
+    that vanishes mid-scan (crash cleanup, manual removal) sorts first and is
+    skipped by the per-file load guard."""
+    try:
+        return (path.stat().st_mtime, path.name)
+    except OSError:
+        return (0.0, path.name)
 
 
 class FireRequest(BaseModel, FileMappedPydanticMixin):
@@ -277,54 +292,115 @@ class MailboxProcessor:
         self._manager._notify_shutdown_request(directive)
 
     async def _process_fire_intake(self) -> None:
+        """Drain the fire mailbox by attaching each request to its case's slot.
+
+        The intake DIRECTORY is the durable queue — there is no in-memory intake
+        queue. Requests are processed FIFO by arrival (file mtime; filename
+        tiebreak), each moved ``intake/ → pending/`` and handed to
+        ``driver.attach_fire``. The drain itself does NOT await the case step:
+        ``on_launch`` moves ``pending/ → firing/`` when the sweep actually
+        launches the fire, and ``on_complete`` writes the result file. That keeps
+        the manager tick from stalling on a slow or choke-starved fire.
+
+        Runs at the head of the manager tick (before the pool sweep) so newly
+        attached fires are due for the same tick's sweep. Requires a running
+        manager loop — with the loop stopped, requests sit in ``intake/`` until
+        the next ``start()``. Crash recovery dead-letters ``firing/`` and requeues
+        ``pending/`` back to intake."""
         intake = self.fire_intake()
-        for path in sorted(intake.glob("*.yaml")):
+        for path in sorted(intake.glob("*.yaml"), key=_arrival_order):
             try:
                 req = FireRequest.load(str(path), acquire_lock=False)
             except Exception:
                 malformed = self._mgr_dir / self._policy.fire_mailbox_subdir / "malformed" / path.name
+                malformed.parent.mkdir(parents=True, exist_ok=True)
                 path.rename(malformed)
                 continue
-            pending_dir = self._mgr_dir / self._policy.fire_mailbox_subdir / "pending" / (req.case_id or "unknown")
+            case_key = req.case_id or "unknown"
+            pending_dir = self._mgr_dir / self._policy.fire_mailbox_subdir / "pending" / case_key
             pending_dir.mkdir(parents=True, exist_ok=True)
             pending = pending_dir / path.name
             os.replace(path, pending)
-            firing_dir = self._mgr_dir / self._policy.fire_mailbox_subdir / "firing" / (req.case_id or "unknown")
-            firing_dir.mkdir(parents=True, exist_ok=True)
+
+            firing_dir = self._mgr_dir / self._policy.fire_mailbox_subdir / "firing" / case_key
             firing = firing_dir / path.name
-            os.replace(pending, firing)
+            corr = req.correlation_id
+
             try:
                 if req.case_id:
-                    ar = await self._manager.fire(case_id=req.case_id, trigger=req.trigger, **req.trigger_kwargs)
+                    loc = self._manager.locate(case_id=req.case_id)
                 elif req.case_folder:
-                    ar = await self._manager.fire(
-                        case_folder=Path(req.case_folder), trigger=req.trigger, **req.trigger_kwargs
-                    )
+                    loc = self._manager.locate(case_folder=Path(req.case_folder))
                 else:
                     raise ValueError("fire request missing case_id and case_folder")
-                result = AdvanceResultSerializable.from_advance_result(ar)
-                result.save(str(self.results_dir() / f"{req.correlation_id}.yaml"), retain_lock=False)
-                if req.case_id or req.case_folder:
-                    loc = self._manager.locate(
-                        case_id=req.case_id,
-                        case_folder=Path(req.case_folder) if req.case_folder else None,
-                    )
-                    if loc:
-                        self._manager._driver.boost(loc.case_folder)
-                firing.unlink(missing_ok=True)
+                if loc is None or not loc.in_pool:
+                    raise LiveCaseNotFoundError(req.case_id or str(req.case_folder))
+
+                def on_launch(
+                    pending_path: Path = pending, firing_path: Path = firing,
+                ) -> None:
+                    firing_path.parent.mkdir(parents=True, exist_ok=True)
+                    if pending_path.exists():
+                        os.replace(pending_path, firing_path)
+
+                def on_complete(
+                    result: AdvanceResult | None,
+                    error: BaseException | None,
+                    *,
+                    corr_id: str = corr,
+                    pending_path: Path = pending,
+                    firing_path: Path = firing,
+                ) -> None:
+                    try:
+                        if error is not None:
+                            AdvanceResultSerializable(
+                                status="error",
+                                initial_state="",
+                                final_state="",
+                                exception_messages=(str(error),),
+                            ).save(
+                                str(self.results_dir() / f"{corr_id}.yaml"),
+                                retain_lock=False,
+                            )
+                        elif result is not None:
+                            AdvanceResultSerializable.from_advance_result(result).save(
+                                str(self.results_dir() / f"{corr_id}.yaml"),
+                                retain_lock=False,
+                            )
+                        else:
+                            AdvanceResultSerializable(
+                                status="error",
+                                initial_state="",
+                                final_state="",
+                                exception_messages=("fire completed with no result",),
+                            ).save(
+                                str(self.results_dir() / f"{corr_id}.yaml"),
+                                retain_lock=False,
+                            )
+                    finally:
+                        firing_path.unlink(missing_ok=True)
+                        pending_path.unlink(missing_ok=True)
+
+                self._manager._driver.attach_fire(
+                    loc.case_folder,
+                    req.trigger,
+                    req.trigger_kwargs or {},
+                    on_launch=on_launch,
+                    on_complete=on_complete,
+                )
             except Exception as exc:
-                err = AdvanceResultSerializable(
+                AdvanceResultSerializable(
                     status="error",
                     initial_state="",
                     final_state="",
                     exception_messages=(str(exc),),
-                )
-                err.save(str(self.results_dir() / f"{req.correlation_id}.yaml"), retain_lock=False)
+                ).save(str(self.results_dir() / f"{corr}.yaml"), retain_lock=False)
+                pending.unlink(missing_ok=True)
                 firing.unlink(missing_ok=True)
 
     async def _process_reclassify_intake(self) -> None:
         intake = self.reclassify_intake()
-        for path in sorted(intake.glob("*.yaml")):
+        for path in sorted(intake.glob("*.yaml"), key=_arrival_order):
             try:
                 req = ReclassifyRequest.load(str(path), acquire_lock=False)
             except Exception as exc:
@@ -399,7 +475,7 @@ class MailboxProcessor:
         intake = self.adopt_intake()
         pending_dir = self._mgr_dir / self._policy.adopt_mailbox_subdir / "pending"
         pending_dir.mkdir(parents=True, exist_ok=True)
-        for path in sorted(intake.glob("*.yaml")):
+        for path in sorted(intake.glob("*.yaml"), key=_arrival_order):
             try:
                 req = AdoptRequest.load(str(path), acquire_lock=False)
             except Exception:
@@ -416,6 +492,7 @@ class MailboxProcessor:
             pending.unlink(missing_ok=True)
 
     def replay_fire_on_recover(self) -> int:
+        """Dead-letter mid-flight fires; requeue attached-but-never-launched pending."""
         count = 0
         firing_root = self._mgr_dir / self._policy.fire_mailbox_subdir / "firing"
         if firing_root.exists():
@@ -430,6 +507,17 @@ class MailboxProcessor:
                     )
                     err.save(str(self.results_dir() / f"{req.correlation_id}.yaml"), retain_lock=False)
                     path.unlink(missing_ok=True)
+                    count += 1
+                except Exception:
+                    path.unlink(missing_ok=True)
+        pending_root = self._mgr_dir / self._policy.fire_mailbox_subdir / "pending"
+        if pending_root.exists():
+            intake = self.fire_intake()
+            intake.mkdir(parents=True, exist_ok=True)
+            for path in pending_root.rglob("*.yaml"):
+                try:
+                    dest = intake / path.name
+                    os.replace(path, dest)
                     count += 1
                 except Exception:
                     path.unlink(missing_ok=True)

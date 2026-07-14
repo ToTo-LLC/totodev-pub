@@ -175,3 +175,18 @@ class RecoverRequiredError(Exception):
             "(recover() rebuilds the pool from disk and is where a competing live "
             "manager is detected). Its RecoverReport is then on manager.last_recover_report."
         )
+
+
+class ManagerNotRunningError(Exception):
+    """``CaseManager.fire()`` requires a running manager loop (queue-only semantics).
+
+    Start the manager first (``await manager.start()``). To force a step without the
+    queue, obtain the live case via ``get_live()`` and call a trigger directly — that
+    bypasses pool events and scheduling bookkeeping."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "CaseManager.fire() requires a running manager. "
+            "Call await manager.start() first, or use get_live() and trigger the case "
+            "directly to force an immediate step outside the tick queue."
+        )

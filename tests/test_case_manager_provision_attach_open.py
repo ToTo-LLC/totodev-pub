@@ -29,7 +29,9 @@ async def test_adopt_get_live_fire(tmp_path):
     seed_detached_case(TicketCase, staging / "c1")
     case = await adopt_into_live(manager, staging / "c1")
     assert manager.get_live(case.case_id).case_id == case.case_id
-    ar = await manager.fire(case_id=case.case_id, trigger="work")
+    # CaseManager.fire() requires a running loop; use the driver's immediate primitive
+    # for deterministic not-started-manager tests.
+    ar = await manager._driver.fire(case.case_folder, "work")
     assert ar.progressed or ar.final_state == "done"
 
 
