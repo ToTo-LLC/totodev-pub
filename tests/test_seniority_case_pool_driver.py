@@ -175,6 +175,45 @@ def test_burst_fifo_case_one_reaches_manual_before_case_two(tmp_path):
     _run(body())
 
 
+def test_seniority_order_overrides_choke_wait_streak(tmp_path):
+    """SeniorityCasePoolDriver overrides ``_order_chokeables`` to keep queue order
+    even when the base class's wait-streak fairness would disagree: the junior case
+    accrues a higher ``choke_wait_streak`` than the senior one, yet the senior case
+    still wins the contested permit."""
+    async def body():
+        driver = SeniorityCasePoolDriver(choke_limits={"cpu": 1})
+        holder = _make(ChokedStepCase, tmp_path, "streak_holder")
+        senior = _make(FastChokedCase, tmp_path, "streak_senior")   # front of queue
+        junior = _make(FastChokedCase, tmp_path, "streak_junior")   # back of queue
+        holder._gate = asyncio.Event()
+        driver.add(holder)
+        driver.add(senior)
+        driver.add(junior)
+        driver._by_folder[senior.case_folder].skip_countdown = 1000
+        driver._by_folder[junior.case_folder].skip_countdown = 1000
+
+        driver.boost(holder.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)   # holder in-flight, holds cpu
+        assert driver._by_folder[holder.case_folder].in_flight
+
+        driver.boost(junior.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.advance(suggested_interval_secs=0.0)
+        assert driver._by_folder[junior.case_folder].choke_wait_streak == 2
+        assert driver._by_folder[senior.case_folder].choke_wait_streak == 0
+
+        driver.boost(senior.case_folder)
+        holder._gate.set()
+        await driver.settle()
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+
+        assert senior.case_state == "s1"
+        assert junior.case_state == "s0"
+
+    _run(body())
+
+
 def test_fire_priority_wakes_on_release(tmp_path):
     async def body():
         driver = SeniorityCasePoolDriver(choke_limits={"cpu": 1})

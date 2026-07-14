@@ -835,3 +835,51 @@ def test_fire_awaits_choke_permit(tmp_path):
         assert driver.snapshot()["fire_waiters"] == 0
 
     _run(body())
+
+
+def test_choke_contention_favors_longest_waiting_streak_over_dict_order(tmp_path):
+    """Fairness is decided by ``choke_wait_streak``, not incidental sweep (dict) order:
+    a slot admitted earlier but new to choke contention loses to one admitted later
+    that's already been declined repeatedly."""
+    async def body():
+        driver = BalancedCasePoolDriver(choke_limits={"cpu": 1})
+        holder = _make(ChokedBlockingCase, tmp_path, "streak_holder")
+        early = _make(CpuChokedCase, tmp_path, "streak_early")   # dict-order first
+        late = _make(CpuChokedCase, tmp_path, "streak_late")     # dict-order second
+        holder._gate = asyncio.Event()
+        driver.add(holder)
+        driver.add(early)
+        driver.add(late)
+        # Park "early" and "late" out of the sweep's way until explicitly boosted,
+        # so neither races into contention before this test intends it to.
+        driver._by_folder[early.case_folder].skip_countdown = 1000
+        driver._by_folder[late.case_folder].skip_countdown = 1000
+
+        driver.boost(holder.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)   # holder in-flight, holds cpu
+        assert driver._by_folder[holder.case_folder].in_flight
+
+        # "late" gets declined twice while cpu is held, building up its streak.
+        driver.boost(late.case_folder)
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.advance(suggested_interval_secs=0.0)
+        late_slot = driver._by_folder[late.case_folder]
+        assert late_slot.choke_wait_streak == 2
+        assert late.case_state == "s0"       # never got the permit yet
+        assert driver._by_folder[early.case_folder].choke_wait_streak == 0
+
+        # Now both are due in the same beat, cpu is freshly released, but only 1
+        # permit exists — "early" holds dict-order precedence, "late" does not.
+        driver.boost(early.case_folder)
+        holder._gate.set()
+        await driver.settle()
+        await driver.advance(suggested_interval_secs=0.0)
+        await driver.settle()
+
+        # "late" (higher streak) wins despite "early" holding dict-order precedence.
+        assert late.case_state == "s1"
+        assert early.case_state == "s0"
+        assert driver._by_folder[late.case_folder].choke_wait_streak == 0
+        assert driver._by_folder[early.case_folder].choke_wait_streak == 1
+
+    _run(body())

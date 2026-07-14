@@ -57,6 +57,7 @@ class SeniorityCasePoolDriver(BalancedCasePoolDriver):
             skip_countdown=slot.skip_countdown,
             noop_streak=slot.noop_streak,
             fail_streak=slot.fail_streak,
+            choke_wait_streak=slot.choke_wait_streak,
             in_flight=slot.in_flight,
             terminal=slot.terminal,
             halt_requested=slot.halt_requested,
@@ -98,6 +99,12 @@ class SeniorityCasePoolDriver(BalancedCasePoolDriver):
         del self._by_folder[folder]
         self._by_folder[folder] = slot
 
+    def _order_chokeables(self, chokeables):
+        """Preserve queue order for choke contention too: the front of the line
+        (``_by_folder`` insertion order, which the walk already visited in order)
+        holds top claim on choke permits, same as it does for in-flight slots."""
+        return chokeables
+
     def peek(self, case_folder: Path) -> SeniorityCasePeek:
         base = super().peek(case_folder)
         queue_position = list(self._by_folder.keys()).index(case_folder)
@@ -111,6 +118,7 @@ class SeniorityCasePoolDriver(BalancedCasePoolDriver):
             halt_requested=base.halt_requested,
             noop_streak=base.noop_streak,
             fail_streak=base.fail_streak,
+            choke_wait_streak=base.choke_wait_streak,
             skip_countdown=base.skip_countdown,
             last_result=base.last_result,
             choked=base.choked,

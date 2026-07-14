@@ -11,11 +11,16 @@ queue-ordered, seniority-first bursting, see ``SeniorityCasePoolDriver``.
 
 **Strategy:** Multi-level feedback queue (MLFQ) tiers driven by ``AdvanceResult``
 observations. Every live case is polled on its tier schedule; promotion/demotion
-adjusts cadence. Contested capacity (concurrency ceiling, choke permits) is a
-launch gate only — no seniority among due cases beyond incidental sweep order.
-If a gate declines, ``case_advance()`` is not called; the slot retries next beat
-(``skip_countdown = 1``, not a full tier reload). See ``ChokePermitGovernor`` for
-beat-quantized permit budgeting.
+adjusts cadence. Contested capacity is a launch gate only, but the two gates
+resolve contention differently: the concurrency ceiling is decided by incidental
+sweep order (whoever is due and visited first wins any headroom), while choke
+permits are decided by ``choke_wait_streak`` — among due cases contending for
+the same beat's frozen choke budget, whoever has been declined longest goes
+first, so no case is starved indefinitely by dict order. If a gate declines,
+``case_advance()`` is not called; the slot retries next beat (``skip_countdown
+= 1``, not a full tier reload). See ``ChokePermitGovernor`` for beat-quantized
+permit budgeting, and ``_order_chokeables`` for the ordering hook
+(``SeniorityCasePoolDriver`` overrides it to preserve queue order instead).
 
 Implements ``CasePoolDriver`` with extensions: ``peek``, ``by_tier``, ``snapshot``,
 ``find_by_external_key``, ``settle``. Each case has a ``_Slot`` (tier +
@@ -170,6 +175,7 @@ class _Slot:
     skip_countdown: int                  # beats to next step; _DORMANT when dormant
     noop_streak: int = 0
     fail_streak: int = 0
+    choke_wait_streak: int = 0           # consecutive beats declined a choke grant
     in_flight: bool = False
     terminal: bool = False
     halt_requested: bool = False
@@ -196,6 +202,7 @@ class CasePeek:
     halt_requested: bool
     noop_streak: int
     fail_streak: int
+    choke_wait_streak: int
     skip_countdown: int
     last_result: Optional[AdvanceResult]
     choked: Optional[frozenset[str]] = None
@@ -331,6 +338,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
     def _sweep_once(self) -> None:
         self._sweep_preamble()
         try:
+            chokeables: list[tuple[_Slot, frozenset[str]]] = []
             for slot in list(self._by_folder.values()):
                 if slot.skip_countdown <= 0:          # dormant (terminal / in-flight)
                     continue
@@ -340,39 +348,73 @@ class BalancedCasePoolDriver(CasePoolDriver):
                 if slot.halt_requested:               # defensive: halt should already be dormant
                     slot.skip_countdown = _DORMANT
                     continue
-                if self._in_flight_count >= self._ceiling:
-                    slot.skip_countdown = 1           # backpressure: retry next beat
-                    continue
                 self._slot_prelaunch(slot)
-                if slot.pending_fires:
-                    if not self._try_launch_pending_fire(slot):
-                        continue
+                needed = self._slot_choke_need(slot)
+                if needed:
+                    # Defer: this beat's choke budget is assigned by priority below,
+                    # not incidental sweep order.
+                    chokeables.append((slot, needed))
                     continue
-                grant = self._choke_try_acquire(slot)
-                if grant is None:
-                    slot.skip_countdown = 1
-                    continue
-                if self._live_or_evict(slot):
-                    self._launch_with_grant(slot, grant)
-                else:
-                    self._choke_release(grant)
+                self._attempt_launch(slot, needed)
+            for slot, needed in self._order_chokeables(chokeables):
+                self._attempt_launch(slot, needed)
         finally:
             self._sweep_end()
 
-    def _try_launch_pending_fire(self, slot: _Slot) -> bool:
-        """Try to launch the head pending fire. Returns False if denied / deferred."""
-        record = slot.pending_fires[0]
-        needed = self._needed_chokes_for_fire(slot, record.trigger)
+    def _slot_choke_need(self, slot: _Slot) -> frozenset[str]:
+        """The choke resources ``slot``'s next launch will need: its lead pending
+        fire's trigger-specific need if one is queued, else the generic need for
+        its current state."""
+        if slot.pending_fires:
+            return self._needed_chokes_for_fire(slot, slot.pending_fires[0].trigger)
+        return slot.case.case_type_spec().fsm.pending_chokes_for(slot.case.case_state)
+
+    def _order_chokeables(
+        self, chokeables: list[tuple[_Slot, frozenset[str]]],
+    ) -> list[tuple[_Slot, frozenset[str]]]:
+        """Order in which this beat's choke-needing due slots compete for the
+        frozen budget. Default: longest-waiting-first, so no slot is starved by
+        incidental sweep order. Subclasses may override for a different contract
+        (e.g. queue/seniority order — see ``SeniorityCasePoolDriver``)."""
+        return sorted(chokeables, key=lambda item: item[0].choke_wait_streak, reverse=True)
+
+    def _attempt_launch(self, slot: _Slot, needed: frozenset[str]) -> bool:
+        """Gate a due slot through the concurrency ceiling, then the choke budget,
+        then launch it (via its pending fire if one is queued, else the generic
+        advance). Tracks ``choke_wait_streak`` on decline/success so a later beat's
+        ``_order_chokeables`` can prioritize the longest-waiting slot."""
+        if self._in_flight_count >= self._ceiling:
+            slot.skip_countdown = 1               # backpressure: retry next beat
+            return False
         grant = self._governor.try_acquire(needed)
         if grant is None:
             slot.choked = needed
+            slot.choke_wait_streak += 1
             slot.skip_countdown = 1
             return False
         slot.choked = None
+        launched = (
+            self._launch_pending_fire(slot, grant) if slot.pending_fires
+            else self._launch_generic(slot, grant)
+        )
+        if launched:
+            slot.choke_wait_streak = 0
+        return launched
+
+    def _launch_generic(self, slot: _Slot, grant: ChokeGrant) -> bool:
         if not self._live_or_evict(slot):
             self._choke_release(grant)
             return False
-        slot.pending_fires.popleft()
+        self._launch_with_grant(slot, grant)
+        return True
+
+    def _launch_pending_fire(self, slot: _Slot, grant: ChokeGrant) -> bool:
+        """Launch the head pending fire using an already-acquired ``grant``. Returns
+        False (releasing the grant) if the case couldn't be kept live."""
+        if not self._live_or_evict(slot):
+            self._choke_release(grant)
+            return False
+        record = slot.pending_fires.popleft()
         slot.active_fire = record
         self._invoke_fire_callback(record.on_launch)
         pass_kwargs = record.trigger_kwargs if record.trigger is not None else None
@@ -395,15 +437,6 @@ class BalancedCasePoolDriver(CasePoolDriver):
 
     def _slot_prelaunch(self, slot: _Slot) -> None:
         """Hook for subclasses (e.g. queue wake / requeue). No-op on tiered."""
-
-    def _choke_try_acquire(self, slot: _Slot) -> ChokeGrant | None:
-        needed = slot.case.case_type_spec().fsm.pending_chokes_for(slot.case.case_state)
-        grant = self._governor.try_acquire(needed)
-        if grant is None:
-            slot.choked = needed
-            return None
-        slot.choked = None
-        return grant
 
     def _launch_with_grant(self, slot: _Slot, grant: ChokeGrant) -> asyncio.Task:
         return self._launch_case_step(slot, grant=grant)
@@ -830,6 +863,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
             halt_requested=slot.halt_requested,
             noop_streak=slot.noop_streak,
             fail_streak=slot.fail_streak,
+            choke_wait_streak=slot.choke_wait_streak,
             skip_countdown=slot.skip_countdown,
             last_result=slot.last_result,
             choked=slot.choked,
