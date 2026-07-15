@@ -23,53 +23,49 @@ Key Concepts:
   - They can be defined as an array of linear segments (see fsm_state_chains)
   - Triggers may be preceded by "gates"
 - Case objects have two kinds of states:  Live or Terminal.
-  - Automatic cleanup is performed after entering terminal states.
+  - Automatic cleanup is performed soon after entering terminal states.
 - Case objects have two kinds of triggers: automated or manual.
-  - Automated cases can be driven repeated calls to advance() which chooses
-    the next trigger to fire based on the FSM.  Manual cases are never
-    fired by advance().
-- Case objects have two kinds of: automated or manual.
-  - Automated cases can be driven repeated calls to advance() which chooses
-the next trigger to fire based on the FSM.  Manual cases are never
-fired by advance().
+  - Automated triggers can be driven repeated calls to case_advance(), 
+    moving the object forward even if the caller knows nothing about the FSM.
+    They don't receive arguments.
+  - Manual triggers can't be driven by case_advance(), they must be called directly.
+    They may receive arguments.
 - Case object should keep ALL state info in their assets folder.
   - Asset files get auto-purged unless they have been added to a keep list
     ( see case_keep_assets() )
-  - Use FileMappedPydanticMixin derived classes to persist objects to files.
-    (see case_load_asset() and case_keep_assets())
+  - Use FileMappedPydanticMixin derived classes to persist data strutures to 
+    files.  (see case_load_asset() and case_keep_assets())
+  - Assets are automatically purged at terminal states unless you call 
+    case_keep_assets() to add them to the keep list.
 - Case objects maintain a journal of events such as state entry
   - The journal is the authorititative source of truth about the case's state
-  - Do not manually alter state after creation (very unpredictable results)
+  - State change should happen ONLY through triggers
+  - Never directly alter state (leads to very unpredictable results)
 - Cases can be rehydrated from disk by mapping the correct class to the
   case folder and calling rehydrate() on it.
 - Cases keep a very simple identity file called the "case record" with a 
-  handful of very stable fields
-- You don't use the FolderBackedCase class directly, you create subclasses
+  handful of very stable fields.
+  - Put most of your data in assets and mostly leave the case record alone.
+- Don't use the FolderBackedCase class directly, define subclasses to use.
 
 
 
-
-Core pieces (case authors)
+Core pieces (for case authors)
 --------------------------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
 CaseJournalView         — read-only facade over the case event-log protocol.
 CaseAssets              — working-file playground + retention manifest (_keep.txt).
 FolderBackedCase        — ABC you subclass to define a case type.
-CaseReadView            — Protocol shared by live case and read-only views.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
-CaseTypeSpec            — compiled class-behavior contract (FSM + assets).
-FsmChainSpec            — compiled state-chains DSL, as returned by compile_fsm().
-
-Terminology
------------
-See volatile/tmp/case-docs-glossary.md for standard terms (case, record, rehydrate,
-bind/detach, journal vs reader, CaseManager).
 
 Quick start
 -----------
-    class TicketCase(FolderBackedCase):
+    class TroubleTicketCase(FolderBackedCase):
+
+        ##### CLASS CONFIG FOR CASE CLASSES #####
         fsm_state_chains = ["^new --open_ticket--> open ==close_ticket-->closed^"
                             "*--@DWELL>14d#non_responsive-->auto_closed^", # all state timed-escape edge
+                            "open --@FAIL>0#failure-->terminal^", # failure edge
                            ]
 
         asset_aliases = [
@@ -77,6 +73,8 @@ Quick start
             {"path": "resolution-log/customer--convo.md", "loader": ChatLog, "states": {"open"}}, # alias "convo"
         ]
         fsm_trigger_chokes = {"open_ticket": {"cpu"}}  # pretend it takes lots of cpu
+
+        ##### END CLASS CONFIG FOR CASE CLASSES #####
 
         async def perform_open_ticket(self, tctx) -> None:
             # called by the open_ticket() trigger
@@ -98,8 +96,9 @@ Quick start
 
     case = TicketCase.create_case_in_folder(Path("/data/cases/t-001"), case_id="t-001")
     try:
-        await case.open_ticket()
-        await case.close_ticket()
+        # new case defaults to the first declared `^` state (here: "new")
+        await case.open_ticket() # transition to "open" state
+        await case.close_ticket() # transition to "closed" state
     finally:
         case.case_detach()   # release the lease when done; folder is self-contained on disk
 
@@ -224,7 +223,7 @@ class FolderBackedCase(ABC):
     aborts the transition and counts as a transition fail.
 
     Guards should be fast, idempotent, and side-effect free (they may be polled
-    many times). Library-provided factual guards:
+    many times). Library provides two built-in factual guards:
 
       * ``@FAIL(>|>=|<|<=)n#`` — transition-fail count since entering current state
       * ``@DWELL(>|>=|<|<=)dur#`` — seconds in current state (units s/m/h/d)
@@ -236,13 +235,22 @@ class FolderBackedCase(ABC):
 
     Creating Hook Methods — passing arguments to triggers
     -----------------------------------------------------
-    Every hook receives one trigger-context argument, conventionally ``tctx``
+    Every hook receives one trigger-context argument, conventionally ``tctx:EventData``
     (the ``transitions`` EventData object — not to be confused with the event log).
 
       * Direct ``await case.<trigger>(**kwargs)`` bundles kwargs into ``tctx.kwargs``.
       * No-argument ``case_advance()`` sweeps leave ``tctx.kwargs`` empty.
       * Pinned ``case_advance(trigger, trigger_kwargs={...})`` passes kwargs through;
         ``trigger_kwargs`` is REQUIRED for MANUAL (``==``) edges via the reporter.
+
+    Contract — hooks must be well-behaved async. The lease keepalive, and cooperative
+    scheduling generally, depend on a trigger's work actually YIELDING the event loop:
+    await at reasonable intervals and offload blocking/CPU-bound work via
+    ``case_run_blocking()`` (or your own executor/thread). A hook that monopolizes the
+    loop starves every other case sharing it AND its own heartbeat, so the lease can
+    lapse despite the keepalive. The keepalive protects only the trigger's WORK slot
+    (``perform_``/``before``); guards and ``on_enter``/``on_exit``/``after`` are
+    expected to be light.
 
     Advanced ``transitions`` customization is possible but beyond this docstring.
   """
@@ -251,7 +259,7 @@ class FolderBackedCase(ABC):
     # SECTION 1 — START HERE: define your case type (ALL audiences)
     # -----------------------------------------------------------------------
     # The first thing every subclass does: declare its FSM in `fsm_state_chains` and
-    # write the hook methods it names. Most case types need ONLY this section — set
+    # write the hook methods it names. Simple case types need ONLY this section — set
     # `fsm_state_chains`, add a few `perform_<trigger>` / `guard_<guard>` methods, done.
     # (Rarer define-time seams — `_record_cls`, `compile_fsm()` — live in SECTION 3.)
     # =======================================================================
@@ -300,7 +308,8 @@ class FolderBackedCase(ABC):
     # DSL name) fail at bind via validate_object_compatibility(orphan_detection="error").
     #
     # SIGNATURE: every hook takes `tctx` after `self`. Hooks must yield the event loop;
-    # offload blocking work via case_run_blocking(). See case_advance() for lease keepalive.
+    # offload blocking work via case_run_blocking(). See "Creating Hook Methods" in the
+    # class docstring for the well-behaved-async / lease-keepalive contract.
 
     # =======================================================================
     # SECTION 2 — Quick-start runtime API (mainstream "quick & dirty" users)
@@ -321,6 +330,8 @@ class FolderBackedCase(ABC):
         **fields,
     ) -> FolderBackedCase:
         """First-time inception of a brand-new case.
+        This is the only built-in way to create a new case as the class's 
+        built-in constructor can best be thought of as loading a case from disk.
 
         Creates a fresh case folder, writes the record, binds a live lease-held
         instance, and logs CASE_CREATED + initial CASE_STATE_ENTERED. For reopening an
@@ -417,7 +428,7 @@ class FolderBackedCase(ABC):
         self, trigger: str | None = None, trigger_kwargs: dict | None = None,
     ) -> AdvanceResult:
         """Fire ONE forward step from the current state and report the outcome as an
-        AdvanceResult (a NON-throwing reporter — see that class).
+        AdvanceResult (a NON-throwing reporter — see that class). 
 
         Quick use:
           Call with NO arguments (the common case) and a driver loops it across cases to
@@ -456,53 +467,42 @@ class FolderBackedCase(ABC):
               bag if you choose to pass one; omitted means an empty `tctx.kwargs`). Passing
               it with `trigger=None` is meaningless and RAISES ValueError.
 
-        Maintainer notes:
-          Outcomes (all returned, never raised — except the misuse guards below):
-            * progressed — a transition fired; result.trigger names it, final_state advanced.
-            * a failed attempt — the work raised; the exception is CAUGHT and carried in
-              result.exceptions (decorated + logged + hooked by _on_fsm_exception), the case
-              stayed in its source state to be retried next pass. This now ALSO covers a
-              pinned MANUAL edge: routed through here, its failure is folded as data rather
-              than raised (a direct `await case.<trigger>()` still raises — the other channel).
-            * nothing to do — terminal, a guard declined, or the pinned trigger has no edge
-              from here, all with no progress.
-            * BLOCKED — only on the NO-ARGUMENT sweep: when nothing fired/raised AND the
-              state has no timed escape, a synthetic AutoAdvanceBlocked is carried in
-              result.exceptions (one CASE_ALERTED logged on first detection per dwell).
-              Deterministic. NOT synthesized for a pinned `trigger=...` call.
-          Stall handling has NO self-pulse: a case cannot watchdog its own case_advance()
-          from inside a single suspended coroutine, so stalls are split by failure mode
-          instead: a stalled external job rides a `@DWELL>...` timed-escape edge that
-          ripens and case_advance() fires it (in-band, declarative, self-healing); a
-          genuinely stuck state surfaces as the BLOCKED outcome above; and a hung
-          case_advance() call itself is an out-of-band concern for the driver (e.g.
-          wrapping the call in asyncio.wait_for) — the case cannot observe that itself.
-          Misuse guards that RAISE (programming errors, not flow conditions): DetachedCaseError
-          (acting on a detached husk); ValueError (unknown trigger name, a manual edge fired
-          without trigger_kwargs, or trigger_kwargs given with no trigger). Also RAISES
-          OwnershipLostError (NOT folded into the result) if a beat — the pre-step one below
-          or the in-flight keepalive — finds the folder reclaimed by another owner: a fatal
-          invariant breach, not a step outcome. Also RAISES CaseTransitionInFlightError (also
-          NOT folded into the result) if another trigger call is ALREADY in flight on this
-          same object — this method is deliberately NON-REENTRANT: at most one FSM trigger
-          invocation may be executing on a given live case at a time, checked and enforced
-          fail-fast (not queued) via _on_prepare_fsm_event. A direct `await case.<trigger>()`
-          call is guarded the same way. A driver's fire() does not hit this for its own
-          beats — it detects an in-flight slot and waits for the existing task to finish
-          (coalescing with it for a trigger-less fire, or queueing a pinned trigger behind
-          it) rather than launching a second concurrent step; this exception is for callers
-          that bypass that serialization (e.g. a caller that obtained a live reference via
-          CaseManager.get() and calls a trigger directly while a beat is already advancing
-          the same case).
+        Returns:
+            AdvanceResult carrying the FLOW outcome as data — progressed, a failed attempt
+            (the exception CAUGHT and folded into `exceptions`, the case left in its source
+            state to retry), nothing to do, or BLOCKED. See AdvanceResult for the full
+            taxonomy and its `progressed`/`failed`/`blocked` properties. Two wrinkles:
+              * A pinned MANUAL edge routed through here also folds its failure as data
+                (a direct `await case.<trigger>()` still raises — the other channel).
+              * BLOCKED (a synthetic AutoAdvanceBlocked in `exceptions`; see that class) is
+                detected only on the NO-ARGUMENT sweep — pinning one edge can never prove
+                the whole state is walled off.
 
-        Contract (well-behaved async hooks):
-          The lease keepalive — and cooperative scheduling generally — depends on a trigger's
-          work actually YIELDING the event loop. Hooks MUST be well-behaved async: await at
-          reasonable intervals and offload blocking/CPU-bound work via case_run_blocking()
-          (or their own executor/thread). A hook that monopolizes the loop starves every other
-          case sharing it AND its own heartbeat, so the lease can lapse despite the keepalive.
-          The keepalive protects only the trigger's WORK slot (perform_/before); guards and
-          on_enter/on_exit/after are expected to be light (see the hook conventions)."""
+        Raises:
+            Misuse guards and fatal invariants only — never flow outcomes:
+            DetachedCaseError: mutating a detached husk.
+            ValueError: unknown trigger name; a MANUAL edge without trigger_kwargs;
+              trigger_kwargs without a trigger (see Args).
+            OwnershipLostError: a lease beat (the pre-step one below, or the in-flight
+              keepalive) found the folder reclaimed by another owner — a fatal invariant
+              breach, NOT folded into the result.
+            CaseTransitionInFlightError: another trigger call is ALREADY in flight on this
+              same object; also NOT folded. This method is deliberately NON-REENTRANT — at
+              most one FSM trigger invocation per live case, enforced fail-fast via
+              _on_prepare_fsm_event (a direct `await case.<trigger>()` is guarded the same
+              way). See that exception's docstring for who typically hits this and how
+              CasePoolDriver.fire() serializes around it.
+
+        Stall handling has NO self-pulse (a case cannot watchdog its own case_advance()
+        from inside a single suspended coroutine): a stalled external job rides a
+        `@DWELL>...` timed-escape edge that ripens and fires here; a genuinely stuck state
+        surfaces as BLOCKED; a hung case_advance() call itself is the DRIVER's concern
+        (e.g. asyncio.wait_for). Fuller rationale: notebooks/DEVDAVE/case_manager_classes/
+        _backlog/finishing_watchdog.md.
+
+        Hooks must be well-behaved async (yield the loop; offload blocking work) or the
+        lease keepalive cannot protect them — see "Creating Hook Methods" in the class
+        docstring for the contract."""
         if trigger is None and trigger_kwargs is not None:
             raise ValueError(
                 "case_advance(): trigger_kwargs was supplied without a trigger; kwargs have "
@@ -602,7 +602,7 @@ class FolderBackedCase(ABC):
 
     # Why no run_to_completion()/drive loop lives here: see case_advance()'s docstring.
 
-    # ---- Identity & status (read-only snapshots; case_state is a plain attribute) ----
+    # ---- Identity & status (read-only snapshots) ----
 
     @property
     def case_id(self) -> str:
@@ -638,6 +638,17 @@ class FolderBackedCase(ABC):
     def case_folder(self) -> Path:
         """On-disk folder this case is bound to."""
         return self._folder
+
+    @property
+    def case_state(self) -> str:
+        """Current FSM state name.
+
+        Backed by the private `_case_state` field, which is the machine's
+        `model_attribute` (see `_CaseMachineFactory.build`): `transitions` writes it
+        directly on every committed transition, bypassing this property. There is no
+        setter — `case.case_state = ...` raises `AttributeError` by design; drive state
+        changes through `case_advance()` or a named trigger instead."""
+        return self._case_state
 
     @property
     def case_is_live(self) -> bool:
@@ -850,7 +861,11 @@ class FolderBackedCase(ABC):
 
     @staticmethod
     def get_case_reader(folder: Path) -> "FolderBackedCaseReader":
-        """Return a lock-free read-only view of a case folder — no lease, no registry."""
+        """Return a lock-free read-only view of a case folder — no lease, no registry.
+        
+        The case reader object allows retrieving data about the class from disk rather
+        than memory but typically provides no direct means of modifying the case.
+        """
         from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
         return FolderBackedCaseReader(Path(folder))
 
@@ -1311,9 +1326,10 @@ class FolderBackedCase(ABC):
             keep_manifest=self._keep_manifest,
         )
         self._listeners: list = []        # fn(case, event_name, info)
-        # State is derived from the event log on load; transitions then cache on
-        # self.case_state (the machine's model_attribute).
-        self.case_state: str = self._derive_state() or self._fsm.initial_state
+        # State is derived from the event log on load; transitions then caches it on
+        # _case_state (the machine's model_attribute), exposed read-only via the
+        # case_state property defined in SECTION 3 above.
+        self._case_state: str = self._derive_state() or self._fsm.initial_state
         # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _as_utc() converts them
         # to aware UTC. record.created is already aware UTC (CaseRecord validator).
         self._last_activity: datetime.datetime = (
@@ -1467,8 +1483,8 @@ class FolderBackedCase(ABC):
         `perform_<trigger>`, on_exit/on_enter, or an `after`.
 
         It distinguishes the COMMIT BOUNDARY without needing to know which callback slot
-        raised: `transitions` sets `self.case_state` to the dest during the state change, BEFORE
-        on_enter/after run, so `self.case_state == dest` means we are POST-commit.
+        raised: `transitions` writes the dest to `_case_state` during the state change,
+        BEFORE on_enter/after run, so `self.case_state == dest` means we are POST-commit.
 
         Steps, in order:
           1. NO-DRIFT REMEDY (post-commit only): if we advanced in memory but the durable
@@ -1614,4 +1630,5 @@ class FolderBackedCase(ABC):
             self.case_id, self.case_state, candidates=[t for t, _ in candidates]
         )
 
-    # ---- stall handling (why there's no self-pulse: see case_advance()'s docstring) ----
+    # ---- stall handling (no self-pulse by design: see case_advance()'s docstring and
+    # notebooks/DEVDAVE/case_manager_classes/_backlog/finishing_watchdog.md) ----

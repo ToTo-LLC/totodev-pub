@@ -134,7 +134,9 @@ class _CaseMachineFactory:
             states=self._fsm.states,
             transitions=self._prepare_transitions(self._fsm.transitions),
             initial=initial_state,
-            model_attribute="case_state",
+            # Writes the private backing field, not the public `case_state` property
+            # (which has no setter) — see FolderBackedCase.case_state.
+            model_attribute="_case_state",
             prepare_event="_on_prepare_fsm_event",
             after_state_change="_on_state_changed",
             finalize_event="_on_finalize_fsm_event",

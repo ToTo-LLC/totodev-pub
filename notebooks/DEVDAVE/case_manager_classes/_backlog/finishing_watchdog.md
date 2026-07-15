@@ -256,6 +256,23 @@ Fine for v1; a future enhancement could read `case_manager_policy.yaml` from the
 
 ---
 
+## Design note: why `case_advance()` has no self-pulse watchdog
+
+(Referenced from `FolderBackedCase.case_advance()`'s docstring.)
+
+A case cannot watchdog its own `case_advance()` from inside a single suspended
+coroutine — if the step is wedged, so is any monitor living in the same coroutine. So
+stall handling is split by failure mode instead of adding a self-pulse:
+
+- **Stalled external job** — rides a `@DWELL>...` timed-escape edge that ripens with
+  time; `case_advance()` fires it on a later pass. In-band, declarative, self-healing.
+- **Genuinely stuck state** — no auto edge can fire now or ever ripen; surfaces as the
+  BLOCKED outcome (a synthetic `AutoAdvanceBlocked` carried in
+  `AdvanceResult.exceptions`), deterministic on every no-argument sweep.
+- **Hung `case_advance()` call itself** — an out-of-band concern for the DRIVER (e.g.
+  wrapping the call in `asyncio.wait_for`); the case cannot observe that itself. This
+  is the layer the manager watchdog in this document backstops.
+
 ## Deferred from parent proposal (not in scope here)
 
 These remain open in the parent proposal's "Remaining open questions" and are **not**
