@@ -122,6 +122,27 @@ def test_fsm_transitions(tmp_path):
         case.case_detach()
 
 
+def test_terminal_state_stamped_on_record(tmp_path):
+    """Termination seals `terminal_state` (the final FSM state name) onto the record
+    alongside the `terminal` timestamp: None while live, frozen once at terminal entry,
+    and readable from the on-disk record without parsing the event log."""
+    folder = tmp_path / "case-004ts"
+    case = SimpleCase.create_case_in_folder(folder)
+    try:
+        assert case.case_terminal_state is None
+        asyncio.run(case.begin())
+        assert case.case_terminal_state is None  # still live
+        asyncio.run(case.finish())
+        assert case.case_terminal_state == "done"
+    finally:
+        case.case_detach()
+    record = FolderBackedCase.peek_case_record(folder)
+    assert record.terminal_state == "done"
+    assert record.terminal is not None
+    reader = FolderBackedCase.get_case_reader(folder)
+    assert reader.case_terminal_state == "done"
+
+
 def test_enter_state_event_carries_trigger_payload(tmp_path):
     """A committed transition's CASE_STATE_ENTERED records WHICH trigger produced it
     (and from where); the inception entry, which no trigger produced, carries none."""

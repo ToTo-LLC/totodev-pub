@@ -47,6 +47,12 @@ Key Concepts:
   handful of very stable fields.
   - Put most of your data in assets and mostly leave the case record alone.
 - Don't use the FolderBackedCase class directly, define subclasses to use.
+- An in-memory case object keeps a "heartbeat lease" on its case folder 
+  - The lease only protects if it is refreshed periodically
+  - Attempting to create a new case object on the same folder will fail if
+    the lease is still fresh
+  - Simple programs and business cases can simply ignore the lease completely,
+    it exists to address complex concurrency scenarios.
 
 
 
@@ -63,7 +69,8 @@ Quick start
     class TroubleTicketCase(FolderBackedCase):
 
         ##### CLASS CONFIG FOR CASE CLASSES #####
-        fsm_state_chains = ["^new --open_ticket--> open ==close_ticket-->closed^"
+        fsm_state_chains = ["^new --open_ticket-->open ==close_ticket-->closed^",
+                            "open --is_duplicative#mark_as_duplicate-->closed",
                             "*--@DWELL>14d#non_responsive-->auto_closed^", # all state timed-escape edge
                             "open --@FAIL>0#failure-->terminal^", # failure edge
                            ]
@@ -73,22 +80,25 @@ Quick start
             {"path": "resolution-log/customer--convo.md", "loader": ChatLog, "states": {"open"}}, # alias "convo"
         ]
         fsm_trigger_chokes = {"open_ticket": {"cpu"}}  # pretend it takes lots of cpu
-
         ##### END CLASS CONFIG FOR CASE CLASSES #####
 
+        ##### TRIGGER HOOKS - FIRE AUTOMATICALLY WHEN THE TRIGGER IS INVOKED #####
         async def perform_open_ticket(self, tctx) -> None:
-            # called by the open_ticket() trigger
+            # Do any work needed by the open_ticket() trigger
             # when this case is run in a pool, it may wait on other "cpu" choking triggers
 
         async def perform_close_ticket(self, tctx) -> None:
-            # called by the close_ticket() trigger
-            # note that the fsm_state_chains say this step isn't auto-triggered (by advance())
+            # Do any work needed by the close_ticket() trigger
+        ##### END TRIGGER HOOKS #####
+
+        async def is_duplicative(self, tctx) -> bool:
+            # Check if the ticket is a duplicate
+            return False
 
         async def on_enter_closed(self, tctx) -> None:
             # do something like notify the customer that their ticket has been closed
+            # Note this triggers before the asset purge is performed
 
-        # Every hook takes the trigger context `tctx` after `self`; see "Creating Hook
-        # Methods" in the class docstring for what `tctx` is and how it is populated.
      
 
     from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
@@ -98,7 +108,9 @@ Quick start
     try:
         # new case defaults to the first declared `^` state (here: "new")
         await case.open_ticket() # transition to "open" state
-        await case.close_ticket() # transition to "closed" state
+        await case.case_advance() # might trigger mark_as_duplicate()
+        if case.case_is_live:
+            await case.close_ticket() # transition to "closed" state
     finally:
         case.case_detach()   # release the lease when done; folder is self-contained on disk
 
@@ -633,6 +645,13 @@ class FolderBackedCase(ABC):
     def case_terminal_at(self) -> datetime.datetime | None:
         """Termination timestamp when terminal; None while live."""
         return self._record.terminal
+
+    @property
+    def case_terminal_state(self) -> str | None:
+        """The terminal FSM state name stamped on the record at termination;
+        None while live. Unlike ``case_state`` (derived from the event log),
+        this is the frozen record fact — set once alongside ``terminal``."""
+        return self._record.terminal_state
 
     @property
     def case_folder(self) -> Path:
@@ -1440,7 +1459,8 @@ class FolderBackedCase(ABC):
             3. _notify("CASE_TERMINATING") — pre-purge observers (audit, test harness)
           Phase 2 — POST-FINALIZATION (immutable, still BOUND):
             4. _keep_manifest.purge() — drop everything not matched in _keep.txt
-            5. _record.terminal stamped + FORCE-flushed (authoritative seal)
+            5. _record.terminal + _record.terminal_state stamped + FORCE-flushed
+               (authoritative seal)
             6. heartbeat(force) — keep the lock fresh; termination does NOT detach (the
                object stays bound so owners can harvest before calling case_detach())
             7. _notify("CASE_TERMINATED") — finalized-but-still-bound; the "safe to move"
@@ -1469,6 +1489,7 @@ class FolderBackedCase(ABC):
             if get_case_log_retention() is LogRetention.PURGE:
                 purge_case_log(self._folder / LOGS_DIR_NAME / LOG_FILE_NAME)
             self._record.terminal = self._last_activity
+            self._record.terminal_state = dest
             self._flush_record(force=True)
             # Termination keeps the lock; it does NOT detach. Force a fresh beat so the now-idle
             # (un-advanced) terminal case holds a full-TTL grace window for owners to harvest

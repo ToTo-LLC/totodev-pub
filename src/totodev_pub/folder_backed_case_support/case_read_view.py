@@ -63,6 +63,9 @@ class CaseReadView(Protocol):
     def case_terminal_at(self) -> datetime.datetime | None: ...
 
     @property
+    def case_terminal_state(self) -> str | None: ...
+
+    @property
     def case_dwell_secs(self) -> float: ...
 
     @property

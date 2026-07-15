@@ -21,6 +21,12 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     status, last-activity time, and the retained-file set are all DERIVED from the
     event log (and cached in memory while the case is live), never persisted here.
 
+    TERMINAL FACTS are the sanctioned exception to "no derived state": `terminal`
+    and `terminal_state` are stamped exactly once, at terminal entry, and are
+    immutable thereafter — frozen facts, not volatile status. They let any reader
+    answer "did it end, when, and in which state?" from this one file without
+    parsing the event log (which remains the authoritative history).
+
     Serialized as YAML (FileMappedPydanticMixin). Fields emit in definition order
     (sort_keys=False) for clean, churn-free diffs.
 
@@ -54,6 +60,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     nickname: Optional[str] = None     # optional human-friendly label for listings
     created: datetime.datetime         # immutable
     terminal: Optional[datetime.datetime] = None  # stamped once on terminal entry
+    terminal_state: Optional[str] = None  # the terminal FSM state name, stamped with `terminal`
     asset_aliases: dict[str, dict[str, Any]]  # alias -> {path, loader, states?}
     fsm_state_chains: list[str]        # the concrete class's raw state-chain DSL, verbatim
 

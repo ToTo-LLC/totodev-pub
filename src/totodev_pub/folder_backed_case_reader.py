@@ -99,6 +99,10 @@ class FolderBackedCaseReader:
         return self._peek_record().terminal
 
     @property
+    def case_terminal_state(self) -> str | None:
+        return self._peek_record().terminal_state
+
+    @property
     def case_state(self) -> str | None:
         return self._peek_events().current_state
 
