@@ -20,7 +20,7 @@ def _isolate_case_registry():
 
 
 class SimpleCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--step-->open==finish-->done^"]
 
@@ -32,7 +32,7 @@ class SimpleCase(FolderBackedCase):
 
 
 class MultiAutoCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {
         "fast": {"cpu"},
         "slow": {"cpu", "ms-graph-api"},
@@ -47,7 +47,7 @@ class MultiAutoCase(FolderBackedCase):
 
 
 class ChokedCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {
         "analyze": {"cpu", "ms-graph-api"},
     }

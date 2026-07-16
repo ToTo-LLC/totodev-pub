@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.exceptions import (
     AssetNotTrustedInStateError,
     AssetSchemaError,
@@ -27,17 +28,17 @@ class ChatLog(BaseModel, FileMappedPydanticMixin):
 class TicketCase(FolderBackedCase):
     fsm_state_chains = ["^new==open_ticket-->open==close_ticket-->closed^"]
     asset_aliases = [
-        {
-            "path": "ticket.yaml",
-            "loader": TicketForm,
-            "states": {"new", "open", "closed"},
-            "keep": True,
-        },
-        {
-            "path": "customer--conversation.json",
-            "loader": ChatLog,
-            "states": {"open"},
-        },
+        AssetSpec(
+            relative_path="ticket.yaml",
+            loader=TicketForm,
+            states={"new", "open", "closed"},
+            keep=True,
+        ),
+        AssetSpec(
+            relative_path="customer--conversation.json",
+            loader=ChatLog,
+            states={"open"},
+        ),
     ]
     fsm_trigger_chokes = {}
 
@@ -52,8 +53,8 @@ class FlexibleCase(FolderBackedCase):
     flexible_asset_alias_loading = True
     fsm_state_chains = ["^new==go-->done^"]
     asset_aliases = [
-        {"path": "unguarded.json"},
-        {"path": "guarded.json", "loader": TicketForm, "states": {"new"}},
+        AssetSpec(relative_path="unguarded.json"),
+        AssetSpec(relative_path="guarded.json", loader=TicketForm, states={"new"}),
     ]
     fsm_trigger_chokes = {}
 
@@ -64,12 +65,12 @@ class FlexibleCase(FolderBackedCase):
 class ReclassSource(FolderBackedCase):
     fsm_state_chains = ["^new==go-->shared^"]
     asset_aliases = [
-        {
-            "path": "old.yaml",
-            "loader": TicketForm,
-            "states": {"new", "shared"},
-            "keep": True,
-        },
+        AssetSpec(
+            relative_path="old.yaml",
+            loader=TicketForm,
+            states={"new", "shared"},
+            keep=True,
+        ),
     ]
     fsm_trigger_chokes = {}
 
@@ -80,7 +81,7 @@ class ReclassSource(FolderBackedCase):
 class ReclassTarget(FolderBackedCase):
     fsm_state_chains = ["^new==go-->shared^"]
     asset_aliases = [
-        {"path": "new.yaml", "loader": ChatLog, "states": {"shared"}, "keep": True},
+        AssetSpec(relative_path="new.yaml", loader=ChatLog, states={"shared"}, keep=True),
     ]
     fsm_trigger_chokes = {}
 
@@ -102,21 +103,18 @@ def test_empty_declaration_warns(caplog):
     assert any("empty" in r.message.lower() for r in caplog.records)
 
 
-def test_build_time_validation_at_first_instantiation_not_subclass(tmp_path):
-    class BadStateCase(FolderBackedCase):
-        asset_aliases = [
-            {"path": "a.json", "loader": TicketForm, "states": {"opne"}},
-        ]
-        fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new--begin-->done^"]
-
-        async def perform_begin(self, tctx):
-            pass
-
-    parent = tmp_path / "parent"
-    parent.mkdir()
+def test_build_time_validation_at_class_definition():
     with pytest.raises(AssetSchemaError, match="opne"):
-        BadStateCase.create_case_in_folder(parent / "bad")
+
+        class BadStateCase(FolderBackedCase):
+            asset_aliases = [
+                AssetSpec(relative_path="a.json", loader=TicketForm, states={"opne"}),
+            ]
+            fsm_trigger_chokes = {}
+            fsm_state_chains = ["^new--begin-->done^"]
+
+            async def perform_begin(self, tctx):
+                pass
 
 
 def test_guarded_load_allowed_in_listed_state(tmp_path):

@@ -234,7 +234,7 @@ declarations describe the design; named methods attach the behavior.
 ```python
 from pydantic import BaseModel
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
-from totodev_pub.folder_backed_case import FolderBackedCase
+from totodev_pub.folder_backed_case import FolderBackedCase, AssetSpec
 
 
 # -- The data contracts external systems care about (plain Pydantic V2 models) --
@@ -275,12 +275,12 @@ class InquiryCase(FolderBackedCase):
 
     # 2. The on-disk data objects other tiers may read — and WHEN they may trust them.
     asset_aliases = [
-        {"path": "analysis.yaml", "loader": InquiryAnalysis,
-         "states": POST_TRIAGE, "keep": True},
-        {"path": "expert_answers.yaml", "loader": ExpertAnswers,
-         "states": {"drafted", "waiting_for_approval", "approved"}},
-        {"path": "reply_draft.md", "loader": lambda p: p.read_text(),
-         "states": {"waiting_for_approval", "approved", "sent"}, "keep": True},
+        AssetSpec(relative_path="analysis.yaml", loader=InquiryAnalysis,
+                  states=POST_TRIAGE, keep=True),
+        AssetSpec(relative_path="expert_answers.yaml", loader=ExpertAnswers,
+                  states={"drafted", "waiting_for_approval", "approved"}),
+        AssetSpec(relative_path="reply_draft.md", loader=lambda p: p.read_text(),
+                  states={"waiting_for_approval", "approved", "sent"}, keep=True),
     ]
 
     # 3. Which capacity-constrained resources each step draws on.

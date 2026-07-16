@@ -72,7 +72,7 @@ def _write_json(assets, rel, obj):
 def test_load_dataclass_filemapped(tmp_path):
     assets = CaseAssets(
         tmp_path / "c1",
-        asset_specs={"doc": AssetSpec("doc", "sub/doc.json", _Doc)},
+        asset_specs={"doc": AssetSpec(alias="doc", relative_path="sub/doc.json", loader=_Doc)},
     )
     _write_json(assets, "sub/doc.json", {"name": "hi", "n": 3})
     doc = assets.load_dataclass("doc")
@@ -83,7 +83,11 @@ def test_load_dataclass_filemapped(tmp_path):
 def test_load_dataclass_callable(tmp_path):
     assets = CaseAssets(
         tmp_path / "c2",
-        asset_specs={"raw": AssetSpec("raw", "raw.json", lambda p: p.read_text())},
+        asset_specs={
+            "raw": AssetSpec(
+                alias="raw", relative_path="raw.json", loader=lambda p: p.read_text(),
+            )
+        },
     )
     _write_json(assets, "raw.json", {"k": 1})
     assert assets.load_dataclass("raw") == '{"k": 1}'
@@ -92,7 +96,7 @@ def test_load_dataclass_callable(tmp_path):
 def test_load_dataclass_missing_file_raises(tmp_path):
     assets = CaseAssets(
         tmp_path / "c3",
-        asset_specs={"doc": AssetSpec("doc", "doc.json", _Doc)},
+        asset_specs={"doc": AssetSpec(alias="doc", relative_path="doc.json", loader=_Doc)},
     )
     with pytest.raises(FileNotFoundError):
         assets.load_dataclass("doc")
@@ -107,7 +111,7 @@ def test_unknown_alias_raises_keyerror(tmp_path):
 def test_glob_paths_and_file_loading(tmp_path):
     assets = CaseAssets(
         tmp_path / "c5",
-        asset_specs={"scans": AssetSpec("scans", "scans/*.json", _Doc)},
+        asset_specs={"scans": AssetSpec(alias="scans", relative_path="scans/*.json", loader=_Doc)},
     )
     _write_json(assets, "scans/a.json", {"name": "a"})
     _write_json(assets, "scans/b.json", {"name": "b"})
@@ -122,7 +126,7 @@ def test_glob_paths_and_file_loading(tmp_path):
 def test_flexible_loading_returns_lazy(tmp_path):
     assets = CaseAssets(
         tmp_path / "c6",
-        asset_specs={"cfg": AssetSpec("cfg", "cfg.json", None)},
+        asset_specs={"cfg": AssetSpec(alias="cfg", relative_path="cfg.json")},
         flexible_asset_alias_loading=True,
     )
     _write_json(assets, "cfg.json", {"feature": True})

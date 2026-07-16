@@ -76,8 +76,11 @@ Quick start
                            ]
 
         asset_aliases = [
-            {"path": "ticket.yaml", "loader": Callable, "states": {"new", "open", "closed"}}, # alias "ticket"
-            {"path": "resolution-log/customer--convo.md", "loader": ChatLog, "states": {"open"}}, # alias "convo"
+            AssetSpec(alias="ticket", relative_path="ticket_info.yaml", loader=Callable,
+                      states={"new", "open", "closed"}, keep=True), 
+            # alias "convo" inferred from the path (text after the last "--")
+            AssetSpec(relative_path="resolution-log/customer--convo.md",
+                      loader=ChatLog, states={"open"}),
         ]
         fsm_trigger_chokes = {"open_ticket": {"cpu"}}  # pretend it takes lots of cpu
         ##### END CLASS CONFIG FOR CASE CLASSES #####
@@ -166,13 +169,13 @@ from totodev_pub.folder_backed_case_support.case_logging import (
     LogRetention, set_case_log_retention, get_case_log_retention,
     build_case_logger, write_attach_banner, purge_case_log,
 )
-from totodev_pub.folder_backed_case_support.case_read_view import CaseReadView
+from totodev_pub.folder_backed_case_support.case_read_protocol import CaseReadProtocol
 
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "FolderBackedCase", "CaseReadView",
+    "FolderBackedCase", "CaseReadProtocol", "AssetSpec",
     "CaseRecord", "CaseJournalView", "CaseAssets", "AdvanceResult",
     "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
@@ -280,7 +283,7 @@ class FolderBackedCase(ABC):
     # PRIMARY extension point — set this on your subclass to define the whole lifecycle.
     #
     # DSL cheatsheet:
-    #   ^state           leading  `^` = initial state
+    #   ^state           leading  `^` = initial state (first declared one is default)
     #   state^           trailing `^` = terminal state
     #   A==trigger-->B   `==` connector = MANUAL edge (fired by `await case.trigger()`)
     #   A--trigger-->B   `--` connector = AUTO edge (fired by case_advance(); a driver loops it)
@@ -290,22 +293,27 @@ class FolderBackedCase(ABC):
     #   ~<dur>           soft (warning) timeout for the trigger's work
     #   *--...-->X       wildcard source: an edge leaving every state
     # See StateChainParser for the authoritative, complete grammar.
-    fsm_state_chains: list[str] = []
+    # `None` means "not yet declared" — a concrete subclass MUST set this to a non-empty
+    # list (unless it overrides compile_fsm() to build the FsmChainSpec by hand). No
+    # legitimate case type has zero chains, so unlike fsm_trigger_chokes/asset_aliases
+    # below there is no separate "declared empty" value to distinguish this from —
+    # `None` and "declared []" both mean the same thing: this class has no FSM.
+    fsm_state_chains: list[str] | None = None
 
     # Required declaration of which capacity-constrained resources each trigger's work
     # may draw on when this case runs inside a pool that throttles such resources.
     # Map trigger name -> set of resource name strings. An empty dict means none.
-    # Pool drivers (not the case itself) supply the integer permit counts.
+    # `None` means "not yet declared" — a concrete subclass MUST set this (even to {}).
+    # No legitimate declaration is ever `None`, so the class default doubles as an
+    # unambiguous sentinel a concrete subclass can't collide with by writing a real value.
     # External readers of compiled behavior: ``case_type_spec()`` (class method).
-    _TRIGGER_CHOKES_NOT_DECLARED = object()
-    fsm_trigger_chokes = _TRIGGER_CHOKES_NOT_DECLARED
+    fsm_trigger_chokes: dict[str, set[str]] | None = None
 
     # Required declaration of the case's on-disk data objects (see aliased_asset_specs).
-    # A concrete subclass MUST set this (even to []). The sentinel lets abstract
-    # intermediates stay undeclared until something tries to instantiate them.
+    # `None` means "not yet declared", same sentinel convention as `fsm_trigger_chokes`
+    # above — a concrete subclass MUST set this (even to []).
     # External readers of compiled behavior: ``case_type_spec()`` (class method).
-    _ASSET_ALIASES_NOT_DECLARED = object()
-    asset_aliases = _ASSET_ALIASES_NOT_DECLARED
+    asset_aliases: list[AssetSpec] | None = None
     _asset_book: AliasedAssetSpecs | None = None
 
     # When False (default), every declared alias must specify loader and states.
@@ -915,7 +923,7 @@ class FolderBackedCase(ABC):
     def _resolve_asset_book(cls) -> AliasedAssetSpecs:
         """The class's declared alias book. Raises MissingAssetSchemaError if the
         concrete subclass never declared `asset_aliases`."""
-        if cls.asset_aliases is FolderBackedCase._ASSET_ALIASES_NOT_DECLARED:
+        if cls.asset_aliases is None:
             raise MissingAssetSchemaError(cls.__name__)
         if cls._asset_book is None:
             cls._asset_book = AliasedAssetSpecs.from_declaration(
@@ -937,7 +945,7 @@ class FolderBackedCase(ABC):
     @classmethod
     def _require_fsm_trigger_chokes_declared(cls) -> None:
         """Every subclass must set `fsm_trigger_chokes` explicitly ({} is valid)."""
-        if cls.fsm_trigger_chokes is FolderBackedCase._TRIGGER_CHOKES_NOT_DECLARED:
+        if cls.fsm_trigger_chokes is None:
             raise MissingTriggerChokesError(cls.__name__)
 
     @classmethod
@@ -1228,22 +1236,33 @@ class FolderBackedCase(ABC):
     })
 
     def __init_subclass__(cls, **kwargs) -> None:
-        # Parse + validate at class-definition time: fail-fast (a malformed chain blows
-        # up at import, not first instantiation) and performant (compiled once, not per
-        # instance). The result is the shared per-class FSM singleton.
+        # Parse + validate at class-definition time: fail-fast (a malformed OR missing
+        # declaration blows up at import, not first instantiation) and performant
+        # (compiled once, not per instance). The result is the shared per-class FSM
+        # singleton. Every declaration this class must supply (chains, chokes, asset
+        # aliases) is checked here, uniformly, the moment the class statement finishes
+        # executing — none of it waits for someone to try to instantiate the class.
+        #
+        # NOT checked here: hook-method completeness (validate_object_compatibility).
+        # That stays at first instantiation (_bind_existing_case_dir) — deliberately,
+        # see the comment there.
         super().__init_subclass__(**kwargs)
         cls._require_fsm_trigger_chokes_declared()
         cls._fsm = cls.compile_fsm()
-        if cls.asset_aliases is not FolderBackedCase._ASSET_ALIASES_NOT_DECLARED:
-            cls._asset_book = AliasedAssetSpecs.from_declaration(
-                cls.asset_aliases, flexible=cls.flexible_asset_alias_loading,
+        if not cls._fsm.states:
+            raise MissingFsmError(cls.__name__)
+        if cls.asset_aliases is None:
+            raise MissingAssetSchemaError(cls.__name__)
+        cls._asset_book = AliasedAssetSpecs.from_declaration(
+            cls.asset_aliases, flexible=cls.flexible_asset_alias_loading,
+        )
+        if not cls._asset_book.aliases():
+            logger.warning(
+                "%r declares asset_aliases but the alias set is empty — no "
+                "protocol-elevated data objects are registered for cross-process trust.",
+                cls.__name__,
             )
-            if not cls._asset_book.aliases():
-                logger.warning(
-                    "%r declares asset_aliases but the alias set is empty — no "
-                    "protocol-elevated data objects are registered for cross-process trust.",
-                    cls.__name__,
-                )
+        cls._asset_book.validate_against_fsm(cls._fsm, flexible=cls.flexible_asset_alias_loading)
         if cls._fsm.primary_chain is not None:
             logger.debug(
                 "FSM for %s: chains compiled (primary=%r, initial=%r, initial_states=%s, "
@@ -1294,21 +1313,24 @@ class FolderBackedCase(ABC):
         """
         # Run config guards BEFORE any disk/lease I/O so misconfigured classes fail cleanly.
         cls = type(self)
-        # 1) Empty FSM is legal on base/abstract classes, so this check belongs here.
+        # 1) Every real subclass already had this checked in __init_subclass__ (class
+        # definition time). This is dead code for subclasses; it only still matters if
+        # someone directly instantiates FolderBackedCase itself, which never runs
+        # __init_subclass__ and so never gets a compiled FSM.
         if not cls._fsm.states:
             raise MissingFsmError(cls.__name__)
         # 2) One-time carrier binding check, keyed on cls.__dict__ so subclasses don't
         # inherit a parent's "already checked" sentinel. Uses the method's default
         # orphan_detection="error": a hook/guard-looking method that maps to no known
         # state/trigger/guard is treated as a typo and fails the build.
+        #
+        # Kept here, not in __init_subclass__: intermediate bases may leave hooks for a
+        # later leaf to supply; checking this at class-definition time would break that.
         if "_fsm_binding_checked" not in cls.__dict__:
             cls._fsm.validate_object_compatibility(
                 self,
                 sealed_names=FolderBackedCase._SEALED_MEMBER_NAMES,
                 sealed_owner=FolderBackedCase,
-            )
-            cls._resolve_asset_book().validate_against_fsm(
-                cls._fsm, flexible=cls.flexible_asset_alias_loading,
             )
             cls._fsm_binding_checked = True
         self._folder = Path(case_folder)

@@ -37,7 +37,7 @@ def _use_short_ttl(monkeypatch, ttl=0.3):
 class _FactoryCase(FolderBackedCase):
 
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     """Auto edge `go` (with timed/perform work), a manual `finish`, and a @FAIL-guarded
     auto edge `bail` — enough surface to test wiring, fact guards, and the timed wrapper."""

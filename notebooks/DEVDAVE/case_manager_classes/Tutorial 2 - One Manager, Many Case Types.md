@@ -116,8 +116,8 @@ class InboundCase(FolderBackedCase):
     ]
 
     asset_aliases = [
-        {"path": "traffic_verdict.yaml", "loader": TrafficVerdict,
-         "states": {"received"}},
+        AssetSpec(relative_path="traffic_verdict.yaml", loader=TrafficVerdict,
+                  states={"received"}),
     ]
 
     fsm_trigger_chokes = {"classify_traffic": {"llm"}}
@@ -143,8 +143,8 @@ class SpamCase(FolderBackedCase):
     ]
 
     asset_aliases = [
-        {"path": "spam_stats.yaml", "loader": SpamStats,
-         "states": {"marked_spam"}, "keep": True},
+        AssetSpec(relative_path="spam_stats.yaml", loader=SpamStats,
+                  states={"marked_spam"}, keep=True),
     ]
 
     fsm_trigger_chokes = {}

@@ -28,7 +28,7 @@ def _isolate_case_registry():
 class BurstCase(FolderBackedCase):
     """Auto chain ending at a manual gate — for burst-FIFO tests."""
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {"a": {"cpu"}, "b": {"cpu"}}
     fsm_state_chains = ["^s0--a-->s1--b-->waiting==done-->done^"]
 
@@ -45,7 +45,7 @@ class BurstCase(FolderBackedCase):
 class WakeCase(FolderBackedCase):
     """Manual stall then auto resume — for requeue-on-wake."""
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {"resume": {"cpu"}, "work": {"cpu"}}
     fsm_state_chains = ["^idle==resume-->active--work-->done^"]
 
@@ -57,7 +57,7 @@ class WakeCase(FolderBackedCase):
 
 
 class ChokedStepCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {"step": {"cpu"}}
     fsm_state_chains = ["^s0--step-->s1^"]
 
@@ -66,7 +66,7 @@ class ChokedStepCase(FolderBackedCase):
 
 
 class FastChokedCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {"step": {"cpu"}}
     fsm_state_chains = ["^s0--step-->s1^"]
 
@@ -75,7 +75,7 @@ class FastChokedCase(FolderBackedCase):
 
 
 class PlainAutoCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^s0--step-->s1^"]
 
@@ -86,7 +86,7 @@ class PlainAutoCase(FolderBackedCase):
 class GuardedNoopCase(FolderBackedCase):
     """Advanceable auto exit whose guard always declines — normal HOT demotion ladder."""
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^hold--blockit#go-->done^"]
 
@@ -100,7 +100,7 @@ class GuardedNoopCase(FolderBackedCase):
 class LongAutoCase(FolderBackedCase):
     """Several auto steps so post-step cadence can be inspected while still HOT."""
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^s0--a-->s1--b-->s2--c-->s3^"]
 

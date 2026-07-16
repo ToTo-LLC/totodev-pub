@@ -3,7 +3,8 @@
 
 """Declarative asset aliases: AssetSpec and shared parsing helpers.
 
-Class-level `asset_aliases` declarations are normalized by AliasedAssetSpecs
+A class-level `asset_aliases` declaration is a list (or tuple) of AssetSpec
+instances, normalized by AliasedAssetSpecs
 (folder_backed_case_support.aliased_asset_specs)."""
 
 from __future__ import annotations
@@ -26,19 +27,27 @@ _GLOB_CHARS = "*?["
 CALLABLE_SENTINEL = "Callable"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class AssetSpec:
-    """One declared on-disk data object: a lookup `alias`, a `relative_path` under
-    assets/ (an exact path OR a glob pattern), and a `loader` that is either a
+    """One declared on-disk data object: a `relative_path` under assets/ (an exact
+    path OR a glob pattern), a lookup `alias`, and a `loader` that is either a
     FileMappedPydanticMixin subclass, any Callable[[Path], Any], or None (load
     generically via LazyLoadedFileData when flexible loading is enabled).
+
+    All fields are keyword-only — construct as
+    ``AssetSpec(relative_path=..., loader=..., states=..., keep=...)``.
+
+    `alias` may be omitted in a class-level `asset_aliases` declaration; the alias
+    is then inferred from the path's basename (see `infer_alias`), except for glob
+    paths, which require an explicit alias. Specs normalized by AliasedAssetSpecs
+    always carry a resolved alias.
 
     `states` names the FSM states in which this asset is trustworthy (semantics #3);
     None means unconstrained (guard is a no-op). `keep` is declaration-only sugar
     for retention seeding at create — it is not persisted on the case record."""
 
-    alias: str
     relative_path: str
+    alias: str | None = None
     loader: type | Callable[[Path], Any] | None = None
     states: frozenset[str] | None = None
     keep: bool = False

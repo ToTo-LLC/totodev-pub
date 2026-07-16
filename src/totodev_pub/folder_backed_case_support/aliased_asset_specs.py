@@ -34,8 +34,6 @@ if TYPE_CHECKING:
 
 _UNSET = object()
 
-_DECL_KEYS = frozenset({"path", "loader", "states", "alias", "keep"})
-
 
 def _normalize_states(raw, *, context: str) -> frozenset[str] | None:
     if raw is None:
@@ -66,6 +64,17 @@ class AliasedAssetSpecs:
         flexible: bool,
         delimiter: str = DEFAULT_ALIAS_DELIMITER,
     ) -> AliasedAssetSpecs:
+        """Normalize a class-level `asset_aliases` declaration: a list (or tuple) of
+        AssetSpec instances, `[]` when the case has no protocol-elevated data objects.
+        `flexible` is accepted for symmetry with `validate_against_fsm` and is not
+        otherwise used here — omitted loader/states are always legal per-entry;
+        strict-mode enforcement of their presence happens at FSM-binding time."""
+        if not isinstance(raw, (list, tuple)):
+            raise AssetSchemaError(
+                "asset_aliases must be a list (or tuple) of AssetSpec instances; "
+                f"got {type(raw).__name__}. Use [] when the case declares none."
+            )
+
         specs: dict[str, AssetSpec] = {}
 
         def _add(spec: AssetSpec) -> None:
@@ -77,105 +86,35 @@ class AliasedAssetSpecs:
                 )
             specs[spec.alias] = spec
 
-        if isinstance(raw, dict):
-            if not raw:
-                return cls({})
-            if not flexible:
+        for index, entry in enumerate(raw):
+            if not isinstance(entry, AssetSpec):
                 raise AssetSchemaError(
-                    "asset_aliases simple-dict form is only valid under "
-                    "flexible_asset_alias_loading=True or when empty; use a list of dicts "
-                    "with path, loader, and states."
+                    "asset_aliases list entries must be AssetSpec instances; got "
+                    f"{type(entry).__name__} at index {index}. Construct with "
+                    "AssetSpec(relative_path=..., loader=..., states=..., ...)."
                 )
-            for key, loader in raw.items():
-                if isinstance(loader, (AssetSpec, tuple, list, dict)):
-                    raise AssetSchemaError(
-                        f"value for {key!r} must be a loader (a class or callable) or "
-                        "None; use a list of dicts for explicit aliases, states, or globs."
-                    )
-                rel = _norm_rel(str(key))
+            rel = _norm_rel(entry.relative_path)
+            if entry.alias is not None:
+                alias = entry.alias
+            else:
                 if _is_glob(rel):
                     raise AssetSchemaError(
-                        f"{key!r} is a glob; the simple-dict form cannot infer an alias "
-                        "from a glob. Use a list-of-dicts entry with an explicit alias."
+                        f"asset_aliases[{index}] ({rel!r}) is a glob; "
+                        "provide an explicit 'alias' on the AssetSpec."
                     )
                 alias = infer_alias(rel, delimiter=delimiter)
-                validate_alias(alias, context=repr(key))
-                _add(AssetSpec(alias, rel, loader))
-            return cls(specs)
-
-        if isinstance(raw, (list, tuple)):
-            if not raw:
-                return cls({})
-            for index, entry in enumerate(raw):
-                if isinstance(entry, dict):
-                    unknown = set(entry) - _DECL_KEYS
-                    if unknown:
-                        raise AssetSchemaError(
-                            f"asset_aliases[{index}] has unknown key(s) "
-                            f"{sorted(unknown)!r}; allowed: {sorted(_DECL_KEYS)}."
-                        )
-                    if "path" not in entry:
-                        raise AssetSchemaError(
-                            f"asset_aliases[{index}] is missing required key 'path'."
-                        )
-                    rel = _norm_rel(str(entry["path"]))
-                    if "alias" in entry:
-                        alias = str(entry["alias"])
-                    else:
-                        if _is_glob(rel):
-                            raise AssetSchemaError(
-                                f"asset_aliases[{index}] ({rel!r}) is a glob; "
-                                "provide an explicit 'alias' key."
-                            )
-                        alias = infer_alias(rel, delimiter=delimiter)
-                    validate_alias(alias, context=f"asset_aliases[{index}]")
-                    states = _normalize_states(
-                        entry.get("states"), context=f"alias {alias!r}"
-                    )
-                    keep = bool(entry.get("keep", False))
-                    loader = entry.get("loader")
-                    _add(
-                        AssetSpec(
-                            alias,
-                            rel,
-                            loader,
-                            states=states,
-                            keep=keep,
-                        )
-                    )
-                elif isinstance(entry, AssetSpec):
-                    if not flexible:
-                        raise AssetSchemaError(
-                            "asset_aliases list of AssetSpec instances is only valid "
-                            "under flexible_asset_alias_loading=True; use list-of-dicts "
-                            "with path, loader, and states."
-                        )
-                    rel = _norm_rel(entry.relative_path)
-                    validate_alias(
-                        entry.alias, context=f"AssetSpec({entry.relative_path!r})"
-                    )
-                    _add(
-                        AssetSpec(
-                            entry.alias,
-                            rel,
-                            entry.loader,
-                            states=entry.states,
-                            keep=entry.keep,
-                        )
-                    )
-                else:
-                    raise AssetSchemaError(
-                        "asset_aliases list entries must be dicts "
-                        f"({{path, loader, states, ...}}) or AssetSpec instances; "
-                        f"got {type(entry).__name__} at index {index}."
-                    )
-            return cls(specs)
-
-        raise AssetSchemaError(
-            "asset_aliases must be a dict {path: loader}, a list of dicts "
-            "({path, loader, states, ...}), or a list of AssetSpec; got "
-            f"{type(raw).__name__}."
-        )
+            validate_alias(alias, context=f"AssetSpec({entry.relative_path!r})")
+            states = _normalize_states(entry.states, context=f"alias {alias!r}")
+            _add(
+                AssetSpec(
+                    alias=alias,
+                    relative_path=rel,
+                    loader=entry.loader,
+                    states=states,
+                    keep=bool(entry.keep),
+                )
+            )
+        return cls(specs)
 
     @classmethod
     def from_record(
@@ -200,7 +139,9 @@ class AliasedAssetSpecs:
             states = (
                 frozenset(states_raw) if states_raw is not None else None
             )
-            specs[alias] = AssetSpec(alias, path, loader, states=states, keep=False)
+            specs[alias] = AssetSpec(
+                alias=alias, relative_path=path, loader=loader, states=states,
+            )
         return cls(specs)
 
     def to_record(self) -> dict[str, dict[str, Any]]:

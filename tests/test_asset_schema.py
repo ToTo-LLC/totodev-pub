@@ -35,7 +35,7 @@ def test_infer_alias_is_always_substring_of_filename():
 
 
 def test_asset_spec_is_frozen():
-    spec = AssetSpec("rlist", "receipts/rlist.json", None)
+    spec = AssetSpec(alias="rlist", relative_path="receipts/rlist.json")
     assert spec.alias == "rlist"
     assert spec.relative_path == "receipts/rlist.json"
     assert spec.loader is None
@@ -45,10 +45,21 @@ def test_asset_spec_is_frozen():
 
 def test_asset_spec_states_and_keep():
     spec = AssetSpec(
-        "ticket", "ticket.yaml", _Rec, states=frozenset({"new", "open"}), keep=True,
+        alias="ticket", relative_path="ticket.yaml", loader=_Rec,
+        states=frozenset({"new", "open"}), keep=True,
     )
     assert spec.states == frozenset({"new", "open"})
     assert spec.keep is True
+
+
+def test_asset_spec_is_keyword_only():
+    with pytest.raises(TypeError):
+        AssetSpec("rlist", "receipts/rlist.json")  # noqa — deliberate positional
+
+
+def test_asset_spec_alias_defaults_to_none():
+    spec = AssetSpec(relative_path="ticket.yaml", loader=_Rec)
+    assert spec.alias is None
 
 
 def test_loader_name_filemapped_class():

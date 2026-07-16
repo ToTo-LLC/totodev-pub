@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""CaseReadView: structural typing Protocol for lock-free case reads."""
+"""CaseReadProtocol: structural typing Protocol for lock-free case reads."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     )
 
 
-class CaseReadView(Protocol):
+class CaseReadProtocol(Protocol):
     """Read-only surface shared by live FolderBackedCase and FolderBackedCaseReader.
 
     Type-checking only — no runtime isinstance checks required. Both implementers

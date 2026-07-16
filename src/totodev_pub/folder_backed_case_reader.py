@@ -23,7 +23,7 @@ class ActiveTrigger(NamedTuple):
 
 
 class FolderBackedCaseReader:
-    """Read-only ``CaseReadView`` over a case folder — no lease, no FSM, no writes.
+    """Read-only ``CaseReadProtocol`` over a case folder — no lease, no FSM, no writes.
 
     Properties read from disk on access (no refresh API). ``case_assets`` memoizes
     on first use; asset file content stays live per ``CaseAssets`` call.

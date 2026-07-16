@@ -58,7 +58,7 @@ def _isolate_case_registry():
 
 class AutoCase(FolderBackedCase):
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     """Two auto edges to a terminal: progresses on every step, then closes."""
     fsm_state_chains = ["^s0--step-->s1--step2-->s2^"]
@@ -73,7 +73,7 @@ class AutoCase(FolderBackedCase):
 class BlockingCase(FolderBackedCase):
 
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     """Auto step that blocks on an injected gate, to hold a case in-flight."""
     fsm_state_chains = ["^s0--step-->s1^"]
@@ -85,7 +85,7 @@ class BlockingCase(FolderBackedCase):
 class UnregisteredCase(FolderBackedCase):
 
 
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     """A type deliberately left out of the registry to exercise the bad-type drop path."""
     fsm_state_chains = ["^s0--step-->s1^"]

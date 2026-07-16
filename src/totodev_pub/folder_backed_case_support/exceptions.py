@@ -224,16 +224,15 @@ class TriggerTimeout(Exception):
 
 
 class MissingFsmError(Exception):
-    """Raised at first instantiation of a concrete FolderBackedCase subclass that defines
-    no FSM at all — it neither declares `fsm_state_chains` nor overrides `compile_fsm()`
-    to build a spec by hand, so its compiled `_fsm` has zero states.
-
-    An empty spec is intentionally LEGAL for the base class and for abstract intermediates
-    (which are never instantiated), so this omission cannot be caught at class-definition
-    time — only at the first attempt to construct a concrete case. Distinct from its
-    siblings: FsmChainParseError means the chains are malformed; FsmBindingError means the
-    chains are fine but the carrier lacks (or mis-types) their methods; THIS means there is
-    no state model to bind at all. The message names the corrective action."""
+    """Raised at class-definition time for any FolderBackedCase subclass that defines no
+    FSM at all — it neither declares `fsm_state_chains` (or leaves it `None`) nor
+    overrides `compile_fsm()` to build a spec by hand, so its compiled `_fsm` has zero
+    states. Legal only on `FolderBackedCase` itself, which never runs this check (there is
+    no subclass to define); direct instantiation of the base is instead caught later, at
+    first use, as a fallback. Distinct from its siblings: FsmChainParseError means the
+    chains are malformed; FsmBindingError means the chains are fine but the carrier lacks
+    (or mis-types) their methods; THIS means there is no state model to bind at all. The
+    message names the corrective action."""
     def __init__(self, carrier_name: str):
         self.carrier_name = carrier_name
         super().__init__(
@@ -245,18 +244,18 @@ class MissingFsmError(Exception):
 
 class AssetSchemaError(Exception):
     """Raised when a FolderBackedCase subclass's `asset_aliases` declaration is malformed,
-    or when a declared alias fails FSM-state validation at first instantiation: a glob in
-    the simple-dict form (which cannot infer an alias), an empty or invalid alias, a
-    duplicate alias, unknown state names, missing loader/states in strict mode, or
-    valid-in-terminal without keep=True. The message names the specific offence and how
-    to fix it."""
+    or when a declared alias fails FSM-state validation at first instantiation: a non-list
+    declaration, a non-AssetSpec list entry, a glob path with no explicit alias (alias
+    cannot be inferred from a glob), an empty or invalid alias, a duplicate alias, unknown
+    state names, missing loader/states in strict mode, or valid-in-terminal without
+    keep=True. The message names the specific offence and how to fix it."""
 
 
 class MissingAssetSchemaError(Exception):
-    """Raised at first construction/creation of a concrete FolderBackedCase subclass that
-    never declared `asset_aliases`. Declaring nothing is still declaring: set an empty
-    list or mapping if the case has no protocol-elevated data objects. Legal-and-uncaught
-    on abstract intermediates (never instantiated), exactly like MissingFsmError."""
+    """Raised at class-definition time for any FolderBackedCase subclass that never
+    declared `asset_aliases`. Declaring nothing is still declaring: set an empty list if
+    the case has no protocol-elevated data objects. Legal only on `FolderBackedCase`
+    itself, exactly like MissingFsmError."""
 
     def __init__(self, carrier_name: str):
         self.carrier_name = carrier_name
@@ -297,10 +296,9 @@ class UnconfiguredChokeError(Exception):
 
 
 class MissingTriggerChokesError(Exception):
-    """Raised at class-definition time when a FolderBackedCase subclass never declared
-    `fsm_trigger_chokes`. Legal on the base class and on abstract intermediates only if
-    they are never subclassed without the declaration — every concrete case type must set
-    it explicitly, even to an empty dict."""
+    """Raised at class-definition time for any FolderBackedCase subclass that never
+    declared `fsm_trigger_chokes`. Legal only on `FolderBackedCase` itself, exactly like
+    MissingFsmError — every subclass must set it explicitly, even to an empty dict."""
 
     def __init__(self, carrier_name: str):
         self.carrier_name = carrier_name

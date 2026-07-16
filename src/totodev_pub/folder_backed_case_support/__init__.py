@@ -36,7 +36,7 @@ from .exceptions import (
     UnconfiguredChokeError,
 )
 from .case_record import CaseRecord
-from .case_read_view import CaseReadView
+from .case_read_protocol import CaseReadProtocol
 from .case_journal import CaseJournal, CaseJournalView
 from .case_assets import CaseAssets
 from .asset_schema import AssetSpec
@@ -84,7 +84,7 @@ __all__ = [
     "TriggerTimeout",
     "UnconfiguredChokeError",
     "CaseRecord",
-    "CaseReadView",
+    "CaseReadProtocol",
     "CaseJournal",
     "CaseJournalView",
     "CaseAssets",

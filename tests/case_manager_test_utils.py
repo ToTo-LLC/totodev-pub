@@ -28,7 +28,7 @@ def _isolate_case_registry():
 
 
 class TicketCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^open--work-->done^"]
 
@@ -37,7 +37,7 @@ class TicketCase(FolderBackedCase):
 
 
 class TerminalCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^open--finish-->done^"]
 
@@ -46,7 +46,7 @@ class TerminalCase(FolderBackedCase):
 
 
 class ManualCase(FolderBackedCase):
-    asset_aliases = {}
+    asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^waiting==push-->done^"]
 
