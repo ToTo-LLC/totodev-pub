@@ -14,6 +14,9 @@ from totodev_pub.folder_backed_case import (
     CaseTypeMismatchError,
     MissingFsmError,
     AssetSpec,
+    CaseIDGenerator,
+    TimeSlugCaseIDGenerator,
+    DEFAULT_CASE_ID_GENERATOR,
 )
 import totodev_pub.folder_backed_case as _fbc
 import totodev_pub.folder_backed_case_support.case_machine_factory as _cmf
@@ -708,13 +711,129 @@ def test_sealed_member_override_fails_construction(tmp_path):
     assert not (folder / ".case.lease").exists()
 
 
-def test_generate_case_id_auto_bumps_on_same_millisecond(monkeypatch):
+def test_time_slug_generator_auto_bumps_on_same_millisecond(monkeypatch):
     fixed_seconds = 1_700_000_000.123
     monkeypatch.setattr(
-        "totodev_pub.folder_backed_case.time.time", lambda: fixed_seconds
+        "totodev_pub.folder_backed_case_support.case_id_generation.time.time",
+        lambda: fixed_seconds,
     )
-    first = SimpleCase.generate_case_id()
-    second = SimpleCase.generate_case_id()
+    gen = TimeSlugCaseIDGenerator()
+    first = gen.generate()
+    second = gen.generate()
+    assert second != first
+    assert int(second, 36) == int(first, 36) + 1
+
+
+def test_create_case_mints_id_via_default_generator(tmp_path):
+    case = SimpleCase.create_case_in_folder(tmp_path / "minted")
+    try:
+        assert case.case_id  # non-empty slug
+        assert int(case.case_id, 36) > 0
+    finally:
+        case.case_detach()
+
+
+def test_explicit_case_id_bypasses_generator(tmp_path):
+    class NeverCalled(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            raise AssertionError("generator must not run when case_id is a literal string")
+
+    class NeverCalledCase(FolderBackedCase):
+        asset_aliases = []
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["^new==begin-->done^"]
+        case_id_generator = NeverCalled()
+
+    case = NeverCalledCase.create_case_in_folder(
+        tmp_path / "explicit", case_id="explicit-id-1",
+    )
+    try:
+        assert case.case_id == "explicit-id-1"
+    finally:
+        case.case_detach()
+
+
+def test_class_attribute_case_id_generator(tmp_path):
+    class StubGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            return "from-class-attr"
+
+    class ClassGenCase(FolderBackedCase):
+        asset_aliases = []
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["^new==begin-->done^"]
+        case_id_generator = StubGen()
+
+    case = ClassGenCase.create_case_in_folder(tmp_path / "class-gen")
+    try:
+        assert case.case_id == "from-class-attr"
+    finally:
+        case.case_detach()
+
+
+def test_per_call_generator_overrides_class_attribute(tmp_path):
+    """Passing a CaseIDGenerator instance as case_id overrides the class default."""
+
+    class ClassGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            return "from-class"
+
+    class CallGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            return "from-call"
+
+    class OverrideCase(FolderBackedCase):
+        asset_aliases = []
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["^new==begin-->done^"]
+        case_id_generator = ClassGen()
+
+    case = OverrideCase.create_case_in_folder(
+        tmp_path / "call-override", case_id=CallGen(),
+    )
+    try:
+        assert case.case_id == "from-call"
+    finally:
+        case.case_detach()
+
+
+def test_generator_receives_case_cls(tmp_path):
+    captured = {}
+
+    class CapturingGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            captured["case_cls"] = case_cls
+            return "captured-id"
+
+    case = SimpleCase.create_case_in_folder(
+        tmp_path / "captured", case_id=CapturingGen(),
+    )
+    try:
+        assert case.case_id == "captured-id"
+        assert captured["case_cls"] is SimpleCase
+    finally:
+        case.case_detach()
+
+
+def test_default_generator_is_shared_across_case_classes(monkeypatch):
+    """Sibling classes sharing DEFAULT_CASE_ID_GENERATOR stay monotonic together."""
+    fixed_seconds = 1_700_000_000.123
+    monkeypatch.setattr(
+        "totodev_pub.folder_backed_case_support.case_id_generation.time.time",
+        lambda: fixed_seconds,
+    )
+    # Reset the shared singleton clock so this test is order-independent.
+    DEFAULT_CASE_ID_GENERATOR._last_ms = -1
+
+    class OtherCase(FolderBackedCase):
+        asset_aliases = []
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["^new==begin-->done^"]
+
+    first = SimpleCase.case_id_generator.generate(case_cls=SimpleCase)
+    second = OtherCase.case_id_generator.generate(case_cls=OtherCase)
+    assert SimpleCase.case_id_generator is OtherCase.case_id_generator
+    assert SimpleCase.case_id_generator is DEFAULT_CASE_ID_GENERATOR
     assert second != first
     assert int(second, 36) == int(first, 36) + 1
 

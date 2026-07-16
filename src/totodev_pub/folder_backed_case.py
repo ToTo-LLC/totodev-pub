@@ -131,7 +131,6 @@ import asyncio
 import datetime
 import functools
 import logging
-import time
 import weakref
 from abc import ABC
 from pathlib import Path
@@ -145,7 +144,10 @@ from totodev_pub.folder_backed_case_support.constants import (
     EV_TERMINATED, SIG_TERMINATING,
 )
 from totodev_pub.folder_backed_case_support.helpers import (
-    _utcnow, _new_time_slug, _local_mtime_as_utc,
+    _utcnow, _local_mtime_as_utc,
+)
+from totodev_pub.folder_backed_case_support.case_id_generation import (
+    CaseIDGenerator, TimeSlugCaseIDGenerator, DEFAULT_CASE_ID_GENERATOR,
 )
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
@@ -184,6 +186,7 @@ __all__ = [
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
     "MissingAssetSchemaError", "MissingTriggerChokesError",
+    "CaseIDGenerator", "TimeSlugCaseIDGenerator",
     "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
 ]
@@ -346,7 +349,7 @@ class FolderBackedCase(ABC):
         cls,
         case_folder: Path,
         *,
-        case_id: str | None = None,
+        case_id: str | CaseIDGenerator | None = None,
         external_key: str | None = None,
         nickname: str | None = None,
         **fields,
@@ -359,6 +362,9 @@ class FolderBackedCase(ABC):
         instance, and logs CASE_CREATED + initial CASE_STATE_ENTERED. For reopening an
         existing folder use ``MyCase(folder)`` or ``case_type_registry.rehydrate(folder)``.
         Call ``case_detach()`` on the returned instance when you are done with it.
+
+        ``case_id`` may be a literal id string, a ``CaseIDGenerator`` to mint one
+        from, or omitted to use ``cls.case_id_generator``.
 
         Planned ``CaseManager`` (draft: notebooks/DEVDAVE/case_manager_classes/CaseManager
         Model.md) will also call this for fleet inception.
@@ -397,9 +403,13 @@ class FolderBackedCase(ABC):
                 f"Cannot create a new case in {case_folder}: existing case artifacts "
                 f"found ({found_list}). Choose a clean case folder."
             )
+        if case_id is None:
+            case_id = cls.case_id_generator.generate(case_cls=cls)
+        elif isinstance(case_id, CaseIDGenerator):
+            case_id = case_id.generate(case_cls=cls)
         record = cls._record_cls(
             case_object_type=cls.__name__,
-            case_id=case_id or cls.generate_case_id(),
+            case_id=case_id,
             external_key=external_key,
             nickname=nickname,
             created=_utcnow(),
@@ -870,30 +880,12 @@ class FolderBackedCase(ABC):
           shouldn't need one for a best-effort progress signal like this."""
         return {}
 
-    @classmethod
-    def generate_case_id(cls) -> str:
-        """Auto-ID factory used by create_case_in_folder() when no explicit case_id is
-        supplied.
-
-        Advanced:
-          The SOLE public slug seam: an overridable extension point — a subclass may
-          return a UUID, a domain-prefixed id, a sequential counter, etc., and can COMPOSE
-          with the default via super().generate_case_id() (e.g.
-          f"INV-{super().generate_case_id()}"). The default is a short, sortable, base-36
-          millisecond time slug.
-
-        Maintainer notes:
-          For in-process collision resistance, generation is monotonic per class:
-          if two calls land in the same millisecond, the latter is bumped to
-          (previous + 1ms) before encoding. This does not guarantee uniqueness
-          across multiple processes or machines.
-
-          (Must be a classmethod: the id is minted before the instance exists, so
-          there is no `self` to hang an instance method on.)"""
-        now_ms = int(time.time() * 1000)
-        mint_ms = now_ms if now_ms > cls._last_generated_case_id_ms else cls._last_generated_case_id_ms + 1
-        cls._last_generated_case_id_ms = mint_ms
-        return _new_time_slug(mint_ms)
+    # Auto-ID seam used by create_case_in_folder() when case_id is omitted (or is
+    # itself a CaseIDGenerator, overriding this for just that call). Override on a
+    # subclass to share one generator across case types, run multiple namespaces, or
+    # encode limited type info into the id. Default: short, sortable, base-36
+    # millisecond time slug (in-process monotonic).
+    case_id_generator: CaseIDGenerator = DEFAULT_CASE_ID_GENERATOR
 
     # Lease timing (TTL, beat throttle, in-flight pulse cadence) is a single FIXED policy in
     # constants.py (DEFAULT_LEASE_TTL_SECS et al.), deliberately not a per-case/per-state seam.
@@ -1024,7 +1016,7 @@ class FolderBackedCase(ABC):
     # never be shadowed by a subclass. The binding check (validate_object_compatibility,
     # passed these via _bind_existing_case_dir) fails fast if a subclass redefines one in
     # its body, so descendants are free to use short names everywhere else. Deliberately
-    # excludes the override SEAMS (compile_fsm, generate_case_id, on_terminating, case_dwell_secs,
+    # excludes the override SEAMS (compile_fsm, case_id_generator, on_terminating, case_dwell_secs,
     # ...) — those are MEANT to be overridden — and the hook-name conventions
     # (perform_/before_/after_/on_enter_/on_exit_/guard_), which belong to the subclass.
     _SEALED_MEMBER_NAMES: frozenset[str] = frozenset({
@@ -1074,11 +1066,6 @@ class FolderBackedCase(ABC):
                 cls._fsm.pipeline,
             )
 
-    # ---- ID generation state ----
-
-    # Monotonic clock for in-process case_id minting (see generate_case_id in SECTION 3).
-    _last_generated_case_id_ms: int = -1
-
     # ---- construction / binding ----
 
     def __init__(self, case_folder: Path):
@@ -1096,7 +1083,7 @@ class FolderBackedCase(ABC):
 
         Brand-new cases are created via `create_case_in_folder(...)`, which first
         materializes the folder + record (minting `case_id` via
-        `generate_case_id()` when needed), then immediately calls this
+        `case_id_generator` when needed), then immediately calls this
         constructor to attach the live object.
 
         Retention at close is manifest-driven: ``_keep.txt`` at the case root lists
