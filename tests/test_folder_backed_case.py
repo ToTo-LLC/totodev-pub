@@ -93,6 +93,7 @@ def test_create_and_basic_properties(tmp_path):
     try:
         assert case.case_id == "c-001"
         assert case.case_state == "new"
+        assert case.case_terminal_states == frozenset({"done"})
         assert case.case_is_live
         assert not case.case_is_terminal
     finally:
@@ -130,11 +131,11 @@ def test_terminal_state_stamped_on_record(tmp_path):
     folder = tmp_path / "case-004ts"
     case = SimpleCase.create_case_in_folder(folder)
     try:
-        assert case.case_terminal_state is None
+        assert case.case_record().terminal_state is None
         asyncio.run(case.begin())
-        assert case.case_terminal_state is None  # still live
+        assert case.case_record().terminal_state is None  # still live
         asyncio.run(case.finish())
-        assert case.case_terminal_state == "done"
+        assert case.case_record().terminal_state == "done"
     finally:
         case.case_detach()
     record = FolderBackedCase.peek_case_record(folder)

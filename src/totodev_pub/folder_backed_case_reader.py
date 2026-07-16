@@ -11,7 +11,7 @@ from typing import NamedTuple
 
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
-from totodev_pub.folder_backed_case_support.case_journal import CaseJournalView
+from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournalView
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
 from totodev_pub.folder_backed_case_support.helpers import _utcnow
 
@@ -41,7 +41,7 @@ class FolderBackedCaseReader:
         # Deliberate memoization of asset alias specs / CaseAssets (variation from otherwise no-caching).
         self._assets: CaseAssets | None = None
         self._asset_book: AliasedAssetSpecs | None = None
-        self._events_view: CaseJournalView | None = None
+        self._events_view: CaseEventJournalView | None = None
 
     @staticmethod
     def _as_utc(dt: datetime.datetime | None) -> datetime.datetime | None:
@@ -57,7 +57,7 @@ class FolderBackedCaseReader:
     def _peek_record(self) -> CaseRecord:
         return self._folder_backed_case().peek_case_record(self._folder)
 
-    def _peek_events(self) -> CaseJournalView:
+    def _peek_events(self) -> CaseEventJournalView:
         if self._events_view is None:
             self._events_view = self._folder_backed_case().peek_case_events(self._folder)
         return self._events_view
@@ -147,7 +147,7 @@ class FolderBackedCaseReader:
         return self.case_assets.load_dataclass(alias)
 
     @property
-    def case_events(self) -> CaseJournalView:
+    def case_events(self) -> CaseEventJournalView:
         return self._peek_events()
 
     @property
@@ -159,7 +159,7 @@ class FolderBackedCaseReader:
     def case_active_trigger(self) -> ActiveTrigger | None:
         """Unresolved ``CASE_TRIGGER_STARTED`` with live lease, or None.
 
-        See ``CaseJournalView.unresolved_trigger_started``. ``elapsed_secs`` grows
+        See ``CaseEventJournalView.unresolved_trigger_started``. ``elapsed_secs`` grows
         between reads (wall-clock from start event mtime).
         """
         lease_left = self.case_lease_secs_left

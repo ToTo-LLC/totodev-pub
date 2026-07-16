@@ -47,7 +47,7 @@ LOG_PURGE_SENTINEL = "Log auto-truncated by FolderBackedCase termination policy.
 # single CASE_* glob; subclasses are free to log their own labels alongside.
 #
 # CASE_BASE_EVENT_PREFIX is the class-family INVARIANT: every event label the base
-# class auto-generates (now funneled through CaseJournal) MUST start with it, so a
+# class auto-generates (now funneled through CaseEventJournal) MUST start with it, so a
 # derived class can cleanly separate its own custom events from base lifecycle ones.
 # SIG_TERMINATING reuses the prefix but is an in-memory listener signal, never logged.
 CASE_BASE_EVENT_PREFIX = "CASE_"

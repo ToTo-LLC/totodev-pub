@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 from transitions.extensions.asyncio import AsyncMachine
 
-from totodev_pub.folder_backed_case_support.case_journal import CaseJournal
+from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournal
 from totodev_pub.folder_backed_case_support.constants import (
     TIMEOUT_KILL_MULTIPLE_OF_WARNING,
     DEFAULT_LEASE_TTL_SECS,
@@ -114,7 +114,7 @@ class _CaseMachineFactory:
     not re-exported from the support package. Don't depend on or use it directly."""
 
     def __init__(
-        self, case: "FolderBackedCase", fsm: FsmChainSpec, journal: CaseJournal
+        self, case: "FolderBackedCase", fsm: FsmChainSpec, journal: CaseEventJournal
     ) -> None:
         self._case = case
         self._fsm = fsm
@@ -200,7 +200,7 @@ class _CaseMachineFactory:
                     "still let the lease lapse; consider a shorter trigger_warn_secs.",
                     case.case_id, trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
                 )
-            # CASE_TRIGGER_STARTED before work (see CaseJournal.log_trigger_started).
+            # CASE_TRIGGER_STARTED before work (see CaseEventJournal.log_trigger_started).
             journal.log_trigger_started(trigger, state=state, warn=warn, kill=kill)
             start = time.monotonic()
             completed = False

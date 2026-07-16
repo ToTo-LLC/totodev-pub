@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
     from totodev_pub.folder_backed_case_support.case_journal import (
-        CaseJournalView,
+        CaseEventJournalView,
     )
 
 
@@ -23,13 +23,18 @@ class CaseReadProtocol(Protocol):
     may differ on edge-case semantics (e.g. terminal detection) while exposing the
     same property names and types.
 
-    DELIBERATE EXCLUSIONS (reader-only, not case content): the operational-liveness
-    reads `case_lease_secs_left` and `case_active_trigger` live ONLY on
-    FolderBackedCaseReader. Their meaning does not translate cleanly to a live case
-    (its own self-beaten lease; a trigger it is itself executing — which a live
-    driver already learns synchronously via AdvanceResult.trigger), so putting them
-    here would be an LSP smell. Promote only if a real consumer needs them
-    polymorphically across both types.
+    DELIBERATE EXCLUSIONS:
+
+    * Operational-liveness reads ``case_lease_secs_left`` and ``case_active_trigger``
+      live ONLY on FolderBackedCaseReader. Their meaning does not translate cleanly
+      to a live case (its own self-beaten lease; a trigger it is itself executing —
+      which a live driver already learns synchronously via AdvanceResult.trigger),
+      so putting them here would be an LSP smell.
+
+    * Record-identity fields (``nickname``, ``case_object_type``, ``created``,
+      ``terminal``, ``terminal_state``) live on CaseRecord. The reader may wrap them
+      for closed-case inspection; the live case does not — use
+      ``case_record()`` / ``peek_case_record()`` instead.
     """
 
     @property
@@ -37,12 +42,6 @@ class CaseReadProtocol(Protocol):
 
     @property
     def case_external_key(self) -> str | None: ...
-
-    @property
-    def case_nickname(self) -> str | None: ...
-
-    @property
-    def case_object_type(self) -> str: ...
 
     @property
     def case_folder(self) -> Path: ...
@@ -55,15 +54,6 @@ class CaseReadProtocol(Protocol):
 
     @property
     def case_is_terminal(self) -> bool: ...
-
-    @property
-    def case_created(self) -> datetime.datetime: ...
-
-    @property
-    def case_terminal_at(self) -> datetime.datetime | None: ...
-
-    @property
-    def case_terminal_state(self) -> str | None: ...
 
     @property
     def case_dwell_secs(self) -> float: ...
@@ -80,4 +70,4 @@ class CaseReadProtocol(Protocol):
     def case_load_asset(self, alias: str) -> object: ...
 
     @property
-    def case_events(self) -> CaseJournalView: ...
+    def case_events(self) -> CaseEventJournalView: ...

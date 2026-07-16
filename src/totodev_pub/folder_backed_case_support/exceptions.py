@@ -203,7 +203,7 @@ class TriggerTimeout(Exception):
     CASE_TRANSITION_FAILED), keeping a timeout visually distinct in the event log.
 
     A timeout IS a failed pre-commit attempt: the case never left its source state, and it
-    counts toward @FAIL (see CaseJournal.count_fails_this_dwell) so the retry cap applies and
+    counts toward @FAIL (see CaseEventJournal.count_fails_this_dwell) so the retry cap applies and
     a timing-out trigger cannot hammer forever. case_advance() folds it into AdvanceResult.failed like any other
     absorbed failure.
 

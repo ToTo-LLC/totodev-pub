@@ -59,7 +59,7 @@ Key Concepts:
 Core pieces (for case authors)
 --------------------------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
-CaseJournalView         — read-only facade over the case event-log protocol.
+CaseEventJournalView    — read-only facade over the case event-log protocol.
 CaseAssets              — working-file playground + retention manifest (_keep.txt).
 FolderBackedCase        — ABC you subclass to define a case type.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
@@ -156,7 +156,7 @@ from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_type_spec import CaseTypeSpec
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
-from totodev_pub.folder_backed_case_support.case_journal import CaseJournal, CaseJournalView
+from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournal, CaseEventJournalView
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.case_keep_manifest import CaseKeepManifest
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
@@ -176,7 +176,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FolderBackedCase", "CaseReadProtocol", "AssetSpec",
-    "CaseRecord", "CaseJournalView", "CaseAssets", "AdvanceResult",
+    "CaseRecord", "CaseEventJournalView", "CaseAssets", "AdvanceResult",
     "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
@@ -635,33 +635,6 @@ class FolderBackedCase(ABC):
         return self._record.external_key
 
     @property
-    def case_nickname(self) -> str | None:
-        """Optional display label from the record."""
-        return self._record.nickname
-
-    @property
-    def case_object_type(self) -> str:
-        """Registered case class name stamped on the record."""
-        return self._record.case_object_type
-
-    @property
-    def case_created(self) -> datetime.datetime:
-        """Record creation timestamp (aware UTC)."""
-        return self._record.created
-
-    @property
-    def case_terminal_at(self) -> datetime.datetime | None:
-        """Termination timestamp when terminal; None while live."""
-        return self._record.terminal
-
-    @property
-    def case_terminal_state(self) -> str | None:
-        """The terminal FSM state name stamped on the record at termination;
-        None while live. Unlike ``case_state`` (derived from the event log),
-        this is the frozen record fact — set once alongside ``terminal``."""
-        return self._record.terminal_state
-
-    @property
     def case_folder(self) -> Path:
         """On-disk folder this case is bound to."""
         return self._folder
@@ -678,14 +651,22 @@ class FolderBackedCase(ABC):
         return self._case_state
 
     @property
+    def case_terminal_states(self) -> frozenset[str]:
+        """FSM states marked terminal for this case type (trailing ``^`` in the DSL).
+
+        Class-level fact — same for every instance. Prefer this over digging into
+        ``_fsm``; the full compiled contract is still ``case_type_spec().fsm``."""
+        return frozenset(self._fsm.terminal_states)
+
+    @property
     def case_is_live(self) -> bool:
         """True when current FSM state is not terminal."""
-        return self.case_state not in self._fsm.terminal_states
+        return self.case_state not in self.case_terminal_states
 
     @property
     def case_is_terminal(self) -> bool:
         """True when current FSM state is terminal."""
-        return self.case_state in self._fsm.terminal_states
+        return self.case_state in self.case_terminal_states
 
     @property
     def case_is_detached(self) -> bool:
@@ -714,7 +695,7 @@ class FolderBackedCase(ABC):
     def case_transition_fail_count(self) -> int:
         """The value the `@FAIL` guard compares against: the count of failed transition
         attempts since the case entered its current state. See
-        `CaseJournal.count_fails_this_dwell` for exactly what counts as a failure and how it
+        `CaseEventJournal.count_fails_this_dwell` for exactly what counts as a failure and how it
         is derived."""
         return self._journal.count_fails_this_dwell()
 
@@ -735,8 +716,8 @@ class FolderBackedCase(ABC):
         return self._as_utc(self._journal.last_activity) or self._record.created
 
     @property
-    def case_events(self) -> CaseJournalView:
-        """Read-only view of this case's event log (writes go through CaseJournal)."""
+    def case_events(self) -> CaseEventJournalView:
+        """Read-only view of this case's event log (writes go through CaseEventJournal)."""
         return self._journal.view()
 
     # ---- assets (playground + retention), grouped on CaseAssets ----
@@ -789,7 +770,7 @@ class FolderBackedCase(ABC):
 
     # ---- record read accessor ----
 
-    def case_fetch_record(self, *, force: bool = False) -> CaseRecord:
+    def case_record(self, *, force: bool = False) -> CaseRecord:
         """Public read accessor for the identity record.
 
         Returns a detached deep-copy snapshot. Pass ``force=True`` to re-read from disk
@@ -849,11 +830,11 @@ class FolderBackedCase(ABC):
         return record_cls.open(str(Path(folder) / RECORD_NAME), without_lock=True)
 
     @staticmethod
-    def peek_case_events(folder: Path) -> CaseJournalView:
-        """A CaseJournalView over the folder's event log — lock-free, no live case,
+    def peek_case_events(folder: Path) -> CaseEventJournalView:
+        """A CaseEventJournalView over the folder's event log — lock-free, no live case,
         no registry. Uniform across every case type (the log format is not subclassed).
         Exposes current_state, is_terminal, last_activity, and .primitive for the raw log."""
-        return CaseJournalView.for_folder(Path(folder))
+        return CaseEventJournalView.for_folder(Path(folder))
 
     @staticmethod
     def peek_case_assets(folder: Path, *, resolve_asset_types: bool = False) -> CaseAssets:
@@ -907,7 +888,7 @@ class FolderBackedCase(ABC):
     # ---- Define-time seams (rarely needed; most case types use the defaults) ----
 
     # The record-type seam: defaults to CaseRecord. Override with a CaseRecord subclass
-    # when extra fields are needed. Read back via case_fetch_record().
+    # when extra fields are needed. Read back via case_record().
     _record_cls: type[CaseRecord] = CaseRecord
 
     @classmethod
@@ -1228,9 +1209,10 @@ class FolderBackedCase(ABC):
     # ...) — those are MEANT to be overridden — and the hook-name conventions
     # (perform_/before_/after_/on_enter_/on_exit_/guard_), which belong to the subclass.
     _SEALED_MEMBER_NAMES: frozenset[str] = frozenset({
-        "case_state", "case_folder", "case_assets", "case_nickname", "case_external_key",
-        "case_is_live", "case_is_terminal", "case_transition_fail_count", "case_id",
-        "case_advance", "case_detach", "case_heartbeat", "case_fetch_record",
+        "case_state", "case_folder", "case_assets", "case_external_key",
+        "case_is_live", "case_is_terminal", "case_terminal_states",
+        "case_transition_fail_count", "case_id",
+        "case_advance", "case_detach", "case_heartbeat", "case_record",
         "case_log_alert", "case_run_blocking", "case_reclassify_to",
         "case_add_transition_listener",
     })
@@ -1357,7 +1339,7 @@ class FolderBackedCase(ABC):
             raise CaseTypeMismatchError(
                 on_disk=self._record.case_object_type, loading_class=cls.__name__
             )
-        self._journal = CaseJournal.for_folder(self._folder)
+        self._journal = CaseEventJournal.for_folder(self._folder)
         self._keep_manifest = CaseKeepManifest(self._folder)
         self._keep_manifest.ensure_framework_rules()
         self._assets = CaseAssets(
@@ -1420,7 +1402,7 @@ class FolderBackedCase(ABC):
 
     def _derive_state(self) -> str | None:
         """Current state = the most recent CASE_STATE_ENTERED entry. Delegates to the
-        journal (over the same CaseJournalView the peek path uses) — no-drift
+        journal (over the same CaseEventJournalView the peek path uses) — no-drift
         guarantee is structural."""
         return self._journal.current_state
 
@@ -1614,7 +1596,7 @@ class FolderBackedCase(ABC):
     # instance lifetime, which conflicts with our single-owner lease model).
     # Writes use the mixin's save() as normal — it acquires a brief transient
     # lock only for the duration of the write and releases immediately after.
-    # The public read companion, case_fetch_record(), lives in SECTION 2.
+    # The public read companion, case_record(), lives in SECTION 2.
 
     def _flush_record(self, *, force: bool = False) -> None:
         """Persist the owned record. Default is THROTTLED — writes only when

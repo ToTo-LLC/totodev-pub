@@ -1,4 +1,4 @@
-"""Standalone tests for CaseJournal — the domain-aware event-log read/write facade.
+"""Standalone tests for CaseEventJournal — the domain-aware event-log read/write facade.
 
 These exercise the journal directly over a tmp event folder (no live FolderBackedCase),
 proving it owns the case family's log conventions: the CASE_ naming invariant on writes
@@ -11,11 +11,11 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_ALERTED,
 )
-from totodev_pub.folder_backed_case_support.case_journal import CaseJournal, CaseJournalView
+from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournal, CaseEventJournalView
 
 
-def _journal(tmp_path) -> CaseJournal:
-    return CaseJournal.for_folder(tmp_path)
+def _journal(tmp_path) -> CaseEventJournal:
+    return CaseEventJournal.for_folder(tmp_path)
 
 
 def _data_of(event) -> dict:
@@ -230,7 +230,7 @@ def test_view_returns_fresh_instances(tmp_path):
     journal = _journal(tmp_path)
     view_a = journal.view()
     view_b = journal.view()
-    assert isinstance(view_a, CaseJournalView)
+    assert isinstance(view_a, CaseEventJournalView)
     assert view_a is not view_b
     assert view_a is not journal
 
@@ -244,7 +244,7 @@ def test_view_delegates_reads(tmp_path):
 
 
 def test_view_has_no_write_surface(tmp_path):
-    view = CaseJournalView.for_folder(tmp_path)
+    view = CaseEventJournalView.for_folder(tmp_path)
     for name in (
         "log_created", "log_state_entered", "log_terminated", "log_reclassified",
         "log_alerted", "log_transition_failed", "log_entry_exception",
@@ -258,5 +258,5 @@ def test_view_has_no_write_surface(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_is_base_event_label_shares_the_prefix():
-    assert CaseJournal.is_base_event_label("CASE_CREATED") is True
-    assert CaseJournal.is_base_event_label("MY_CUSTOM") is False
+    assert CaseEventJournal.is_base_event_label("CASE_CREATED") is True
+    assert CaseEventJournal.is_base_event_label("MY_CUSTOM") is False

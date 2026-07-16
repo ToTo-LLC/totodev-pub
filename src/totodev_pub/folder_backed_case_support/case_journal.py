@@ -3,7 +3,7 @@
 
 """Domain-aware event-log protocol for the FolderBackedCase family.
 
-`CaseJournal` is the ONE place that knows how *this* case family reads and writes
+`CaseEventJournal` is the ONE place that knows how *this* case family reads and writes
 its event log:
 
   - WRITES funnel through a single chokepoint (`_append_base`) that enforces the
@@ -15,7 +15,7 @@ its event log:
     fired since we entered the state") are the case-specific *interpretations* of
     the generic log.
 
-`CaseJournalView` is a read-only facade over the same protocol — for observers
+`CaseEventJournalView` is a read-only facade over the same protocol — for observers
 that must not append lifecycle facts (peek paths, fleet scans, FolderBackedCaseReader).
 """
 
@@ -50,7 +50,7 @@ _TRIGGER_START_RESOLUTION_LABELS = frozenset({
 })
 
 
-class CaseJournal:
+class CaseEventJournal:
     """The case family's authoritative event-log protocol: convention-aware reads
     plus the sanctioned write surface, both over one PrimitiveEventLog."""
 
@@ -59,7 +59,7 @@ class CaseJournal:
         self._log = PrimitiveEventLog(event_dir=self._folder / EVENTS_DIR_NAME)
 
     @classmethod
-    def for_folder(cls, folder: Path) -> "CaseJournal":
+    def for_folder(cls, folder: Path) -> "CaseEventJournal":
         """Build a journal over a case folder's event log."""
         return cls(Path(folder))
 
@@ -71,9 +71,9 @@ class CaseJournal:
         covered by journal methods. Prefer `log_*` for base lifecycle writes."""
         return self._log
 
-    def view(self) -> "CaseJournalView":
+    def view(self) -> "CaseEventJournalView":
         """A fresh read-only facade over this folder's event log."""
-        return CaseJournalView.for_folder(self._folder)
+        return CaseEventJournalView.for_folder(self._folder)
 
     @staticmethod
     def is_base_event_label(label: str) -> bool:
@@ -255,20 +255,20 @@ class CaseJournal:
         return False
 
 
-class CaseJournalView:
+class CaseEventJournalView:
     """Read-only facade over a case folder's event log.
 
-    Observers use this type; lifecycle writes go through CaseJournal on the owning case.
+    Observers use this type; lifecycle writes go through CaseEventJournal on the owning case.
     Instances are lightweight handles — create freely via ``for_folder`` or
-    ``CaseJournal.view()``.
+    ``CaseEventJournal.view()``.
     """
 
     def __init__(self, folder: Path) -> None:
         self._folder = Path(folder)
-        self._journal = CaseJournal.for_folder(self._folder)
+        self._journal = CaseEventJournal.for_folder(self._folder)
 
     @classmethod
-    def for_folder(cls, folder: Path) -> "CaseJournalView":
+    def for_folder(cls, folder: Path) -> "CaseEventJournalView":
         """Build a read-only view over a case folder's event log."""
         return cls(Path(folder))
 

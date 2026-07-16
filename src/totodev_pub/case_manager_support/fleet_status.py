@@ -26,7 +26,7 @@ from totodev_pub.case_manager_support.constants import (
 from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_journal import (
-    CaseJournalView,
+    CaseEventJournalView,
     _TRIGGER_START_RESOLUTION_LABELS,
 )
 from totodev_pub.folder_backed_case_support.constants import (
@@ -41,7 +41,7 @@ from totodev_pub.folder_backed_case_support.constants import (
 
 logger = logging.getLogger(__name__)
 
-# Events that resolve a CASE_TRIGGER_STARTED (mirrors CaseJournal).
+# Events that resolve a CASE_TRIGGER_STARTED (mirrors CaseEventJournal).
 
 # Serialization order of the standard fields — deterministic bytes are load-bearing:
 # the writer's skip-publish hash and the watcher's mtime short-circuit rely on
@@ -109,7 +109,7 @@ def collect_case_status_facts(case_folder: Path) -> dict[str, Any]:
     The walk touches filenames only (PrimitiveEventProxy metadata is parsed from
     the directory listing); no event file contents are read.
     """
-    events = CaseJournalView.for_folder(case_folder)
+    events = CaseEventJournalView.for_folder(case_folder)
     case_state: str | None = None
     state_entered_at: datetime.datetime | None = None
     terminal_at: datetime.datetime | None = None
@@ -171,7 +171,7 @@ def build_live_row(
     row: dict[str, Any] = {
         "case_id": case.case_id,
         "external_key": case.case_external_key,
-        "case_type": case.case_object_type,
+        "case_type": type(case).__name__,
         "case_folder": str(case.case_folder),
     }
     row.update(collect_case_status_facts(case.case_folder))
@@ -454,7 +454,7 @@ class FleetStatusBoardWriter:
         row: dict[str, Any] = {
             "case_id": case_id,
             "external_key": case.case_external_key,
-            "case_type": case.case_object_type,
+            "case_type": type(case).__name__,
             "case_folder": str(case.case_folder),
         }
         try:

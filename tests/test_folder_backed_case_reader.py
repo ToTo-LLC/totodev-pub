@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from totodev_pub.folder_backed_case import FolderBackedCase, AssetSpec
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
-from totodev_pub.folder_backed_case_support.case_journal import CaseJournalView
+from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournalView
 from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
 from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (
     asset_dataclass_registry,
@@ -179,7 +179,7 @@ def test_reader_has_no_write_surface(tmp_path):
         "case_detach",
         "case_heartbeat",
         "case_log_alert",
-        "case_fetch_record",
+        "case_record",
     ):
         assert not hasattr(reader, name)
 
@@ -242,10 +242,11 @@ def test_live_case_prep_properties(tmp_path):
     folder = tmp_path / "reader-010"
     case = SimpleCase.create_case_in_folder(folder, case_id="r-010", nickname="live")
     try:
-        assert case.case_object_type == "SimpleCase"
-        assert case.case_created == case._record.created
-        assert case.case_terminal_at is None
-        assert isinstance(case.case_events, CaseJournalView)
+        record = case.case_record()
+        assert record.case_object_type == "SimpleCase"
+        assert record.created == case._record.created
+        assert record.terminal is None
+        assert isinstance(case.case_events, CaseEventJournalView)
         assert case.case_events is not case._journal
         assert case.case_events is not case._journal.view()  # fresh view each access
         assert case.case_last_activity is not None
