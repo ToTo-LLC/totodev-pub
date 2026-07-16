@@ -13,7 +13,7 @@ from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAs
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournalView
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
-from totodev_pub.folder_backed_case_support.helpers import _utcnow
+from totodev_pub.folder_backed_case_support.helpers import _utcnow, _local_mtime_as_utc
 
 
 class ActiveTrigger(NamedTuple):
@@ -42,11 +42,6 @@ class FolderBackedCaseReader:
         self._assets: CaseAssets | None = None
         self._asset_book: AliasedAssetSpecs | None = None
         self._events_view: CaseEventJournalView | None = None
-
-    @staticmethod
-    def _as_utc(dt: datetime.datetime | None) -> datetime.datetime | None:
-        """Read a naive (local) event-log mtime as aware UTC; pass None through."""
-        return dt.astimezone(datetime.timezone.utc) if dt is not None else None
 
     @staticmethod
     def _folder_backed_case():
@@ -117,7 +112,7 @@ class FolderBackedCaseReader:
     @property
     def case_last_activity(self) -> datetime.datetime | None:
         record = self._peek_record()
-        return self._as_utc(self._peek_events().last_activity) or record.created
+        return _local_mtime_as_utc(self._peek_events().last_activity) or record.created
 
     @property
     def case_transition_fail_count(self) -> int:
@@ -126,7 +121,7 @@ class FolderBackedCaseReader:
     @property
     def case_dwell_secs(self) -> float:
         record = self._peek_record()
-        entered_at = self._as_utc(self._peek_events().last_state_entered_mtime()) or record.created
+        entered_at = _local_mtime_as_utc(self._peek_events().last_state_entered_mtime()) or record.created
         return (_utcnow() - entered_at).total_seconds()
 
     @property
@@ -168,5 +163,5 @@ class FolderBackedCaseReader:
         ev = self._peek_events().unresolved_trigger_started
         if ev is None:
             return None
-        started = self._as_utc(ev.mtime)
+        started = _local_mtime_as_utc(ev.mtime)
         return ActiveTrigger(ev.value, (_utcnow() - started).total_seconds())

@@ -134,7 +134,6 @@ import logging
 import time
 import weakref
 from abc import ABC
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -143,9 +142,11 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
     DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
-    EV_TERMINATED, EV_ALERTED, SIG_TERMINATING,
+    EV_TERMINATED, SIG_TERMINATING,
 )
-from totodev_pub.folder_backed_case_support.helpers import _utcnow, _new_time_slug
+from totodev_pub.folder_backed_case_support.helpers import (
+    _utcnow, _new_time_slug, _local_mtime_as_utc,
+)
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
     CaseTypeMismatchError, RecordTypeMismatchError,
@@ -160,6 +161,7 @@ from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournal
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.case_keep_manifest import CaseKeepManifest
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
+from totodev_pub.folder_backed_case_support.case_advancer import _CaseAdvancer
 from totodev_pub.folder_backed_case_support.heartbeat_lease import (
     HeartbeatLease, LeaseAlreadyHeldError, LeaseOwnershipLostError,)
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
@@ -447,180 +449,10 @@ class FolderBackedCase(ABC):
     async def case_advance(
         self, trigger: str | None = None, trigger_kwargs: dict | None = None,
     ) -> AdvanceResult:
-        """Fire ONE forward step from the current state and report the outcome as an
-        AdvanceResult (a NON-throwing reporter — see that class). 
+        """Advance one reported step; see `_CaseAdvancer.advance` for the full contract."""
+        return await _CaseAdvancer(self).advance(trigger, trigger_kwargs)
 
-        Quick use:
-          Call with NO arguments (the common case) and a driver loops it across cases to
-          drive AUTO (`--`) edges: it tries each auto candidate in declared order, firing
-          the first whose guard permits. Transition failures are REPORTED, not raised:
-          inspect `result.progressed` and `result.exceptions` rather than wrapping in
-          try/except.
-
-          Pass `trigger=...` to pin ONE specific edge — and uniquely, this is how you fire
-          a MANUAL (`==`) edge through the reporter instead of via `await case.<trigger>()`
-          (which DOES raise). A pinned manual edge needs `trigger_kwargs` (see Args); the
-          same AdvanceResult / non-throwing contract then covers both auto and manual.
-
-          There is deliberately NO run_to_completion()/drive loop on the case itself: this
-          method knows how to take ONE step; deciding WHICH case to drive, in what order,
-          with what fairness/concurrency/backpressure, is a SCHEDULER concern that belongs
-          to a driver layer (see CasePoolDriver), not to the domain object. A built-in
-          single-case loop would quietly endorse a one-case-at-a-time fleet model, which is
-          the opposite of the intended round-robin-over-many-cases deployment. Tests that
-          genuinely want to run a single case to its end use the `drive_to_completion()`
-          helper in the test utilities.
-
-        Args:
-            trigger: optional name of a single edge (auto OR manual) leaving the current
-              state. When given, ONLY that trigger is attempted — every other edge is
-              skipped, and the BLOCKED detection below is suppressed (pinning one edge can
-              never prove the whole state is walled off). If the name is not a trigger on
-              this FSM at all, that is misuse and RAISES ValueError. If it IS a real
-              trigger but simply has no edge out of the current state, it is a plain
-              non-advance (nothing fires; no exception).
-            trigger_kwargs: the keyword arguments bundled into `tctx.kwargs` for the fired
-              trigger's hooks. REQUIRED (even as `{}`) when `trigger` names a MANUAL (`==`)
-              edge — firing one without it is misuse and RAISES ValueError; the explicit
-              bag is the deliberate "yes, fire this manual edge" acknowledgement. OPTIONAL
-              for AUTO edges and for the no-argument sweep (an auto edge may still accept a
-              bag if you choose to pass one; omitted means an empty `tctx.kwargs`). Passing
-              it with `trigger=None` is meaningless and RAISES ValueError.
-
-        Returns:
-            AdvanceResult carrying the FLOW outcome as data — progressed, a failed attempt
-            (the exception CAUGHT and folded into `exceptions`, the case left in its source
-            state to retry), nothing to do, or BLOCKED. See AdvanceResult for the full
-            taxonomy and its `progressed`/`failed`/`blocked` properties. Two wrinkles:
-              * A pinned MANUAL edge routed through here also folds its failure as data
-                (a direct `await case.<trigger>()` still raises — the other channel).
-              * BLOCKED (a synthetic AutoAdvanceBlocked in `exceptions`; see that class) is
-                detected only on the NO-ARGUMENT sweep — pinning one edge can never prove
-                the whole state is walled off.
-
-        Raises:
-            Misuse guards and fatal invariants only — never flow outcomes:
-            DetachedCaseError: mutating a detached husk.
-            ValueError: unknown trigger name; a MANUAL edge without trigger_kwargs;
-              trigger_kwargs without a trigger (see Args).
-            OwnershipLostError: a lease beat (the pre-step one below, or the in-flight
-              keepalive) found the folder reclaimed by another owner — a fatal invariant
-              breach, NOT folded into the result.
-            CaseTransitionInFlightError: another trigger call is ALREADY in flight on this
-              same object; also NOT folded. This method is deliberately NON-REENTRANT — at
-              most one FSM trigger invocation per live case, enforced fail-fast via
-              _on_prepare_fsm_event (a direct `await case.<trigger>()` is guarded the same
-              way). See that exception's docstring for who typically hits this and how
-              CasePoolDriver.fire() serializes around it.
-
-        Stall handling has NO self-pulse (a case cannot watchdog its own case_advance()
-        from inside a single suspended coroutine): a stalled external job rides a
-        `@DWELL>...` timed-escape edge that ripens and fires here; a genuinely stuck state
-        surfaces as BLOCKED; a hung case_advance() call itself is the DRIVER's concern
-        (e.g. asyncio.wait_for). Fuller rationale: notebooks/DEVDAVE/case_manager_classes/
-        _backlog/finishing_watchdog.md.
-
-        Hooks must be well-behaved async (yield the loop; offload blocking work) or the
-        lease keepalive cannot protect them — see "Creating Hook Methods" in the class
-        docstring for the contract."""
-        if trigger is None and trigger_kwargs is not None:
-            raise ValueError(
-                "case_advance(): trigger_kwargs was supplied without a trigger; kwargs have "
-                "no edge to flow into. Name the trigger to fire, or drop trigger_kwargs."
-            )
-        initial = self.case_state
-        if self.case_is_terminal:
-            return AdvanceResult(initial, self.case_state)
-        # Peek _transition_in_flight before _advance_collecting_alerts installs its alert
-        # override — a rejected overlapping call would restore in finally and clobber the
-        # in-flight call's override. The flag is set only in _on_prepare_fsm_event.
-        if self._transition_in_flight:
-            raise CaseTransitionInFlightError(self.case_id, self._folder, self._active_trigger_name)
-        self._check_active()
-        self.case_heartbeat()  # pre-step beat for long-dwelling no-op polls; see docstring
-        return await self._advance_collecting_alerts(initial, trigger, trigger_kwargs)
-
-    async def _advance_collecting_alerts(
-        self, initial: str, trigger: str | None, trigger_kwargs: dict | None,
-    ) -> AdvanceResult:
-        """Run the chosen advance helper while harvesting CASE_ALERTED events into the result.
-
-        Temporarily overrides the instance's case_log_alert so each call both records the
-        message locally AND performs its normal on-disk logging, then restores the class
-        method (by deleting the instance attribute) and folds the collected messages into
-        the returned AdvanceResult's `alerts`. See case_advance() / AdvanceResult.alerts."""
-        collected: list[str] = []
-        underlying = self.case_log_alert
-
-        def _collecting_log_alert(short_msg: str = "", *, where: str | None = None) -> None:
-            collected.append(short_msg)
-            underlying(short_msg, where=where)
-
-        self.case_log_alert = _collecting_log_alert  # type: ignore[method-assign]
-        try:
-            if trigger is not None:
-                result = await self._advance_pinned(initial, trigger, trigger_kwargs)
-            else:
-                result = await self._advance_auto_sweep(initial)
-        finally:
-            del self.case_log_alert  # drop the instance override; class method shines through
-        if collected:
-            result = replace(result, alerts=tuple(collected))
-        return result
-
-    async def _advance_pinned(
-        self, initial: str, trigger: str, trigger_kwargs: dict | None,
-    ) -> AdvanceResult:
-        """Pinned-trigger path of case_advance(). See case_advance()."""
-        if trigger not in self._fsm.triggers:   # not a trigger at all -> misuse, raise
-            known = ", ".join(self._fsm.triggers) or "(none)"
-            raise ValueError(
-                f"case_advance(trigger={trigger!r}): {type(self).__name__!r} has no such "
-                f"trigger on its FSM. Known triggers: {known}."
-            )
-        if not self._has_edge_from(self.case_state, trigger):
-            # A real trigger, but no edge leaves the CURRENT state by it: a plain non-advance
-            # (NOT 'blocked' — only the unrestricted sweep can prove that).
-            return AdvanceResult(initial, self.case_state)
-        if trigger_kwargs is None and not self._fsm.is_auto(self.case_state, trigger):
-            raise ValueError(
-                f"case_advance(trigger={trigger!r}): {trigger!r} is a MANUAL ('==') edge "
-                f"from state {self.case_state!r}; pass trigger_kwargs (even {{}}) to fire it "
-                "through the reporter. (Auto '--' edges may omit it.)"
-            )
-        result = await self._attempt_one_trigger(initial, trigger, trigger_kwargs or {})
-        # progressed/failed -> report it; guard declined (None) -> a plain non-advance.
-        return result if result is not None else AdvanceResult(initial, self.case_state)
-
-    async def _advance_auto_sweep(self, initial: str) -> AdvanceResult:
-        """No-argument path of case_advance(). See case_advance()."""
-        candidates = self._forward_candidates(self.case_state)
-        for trig, _dest in candidates:
-            result = await self._attempt_one_trigger(initial, trig, {})
-            if result is not None:      # progressed or failed-and-folded -> done this pass
-                return result
-        exceptions: tuple = ()
-        if self.case_state not in self._fsm.timed_escape_states:
-            exceptions = (self._make_blocked(candidates),)
-        return AdvanceResult(initial, self.case_state, exceptions=exceptions)
-
-    async def _attempt_one_trigger(
-        self, initial: str, trigger: str, kwargs: dict,
-    ) -> AdvanceResult | None:
-        """Fire one selected trigger. See case_advance()."""
-        try:
-            if await getattr(self, trigger)(**kwargs):
-                return AdvanceResult(initial, self.case_state, trigger=trigger)
-            return None
-        except OwnershipLostError:      # FATAL: surfaced exactly like the pre-step beat does.
-            raise
-        except CaseTransitionInFlightError:   # misuse, not a transition outcome: raise, don't fold.
-            raise
-        except Exception as err:        # absorbed: reported as data, not raised at the driver
-            return AdvanceResult(initial, self.case_state, trigger=trigger,
-                                 exceptions=(err,))
-
-    # Why no run_to_completion()/drive loop lives here: see case_advance()'s docstring.
+    # Why no run_to_completion()/drive loop lives here: see `_CaseAdvancer.advance`.
 
     # ---- Identity & status (read-only snapshots) ----
 
@@ -680,16 +512,8 @@ class FolderBackedCase(ABC):
 
     @property
     def case_advanceable(self) -> bool:
-        """True when the CURRENT state has at least one auto-advanceable (`--`) exit, i.e.
-        an unattended `case_advance()` could fire here (subject to guards). False for a
-        terminal state or a state left only by MANUAL (`==`) edges.
-
-        STRUCTURAL, not runtime: this reports whether an auto exit EXISTS, not whether a
-        guard would currently permit it. A scheduler uses it to tell a genuinely manual-only
-        state (no auto exits — accelerate demotion) apart from a state whose guards merely
-        declined this pass (auto exits exist — normal cadence). See AutoAdvanceBlocked for
-        the runtime "declined now and can't ripen" signal."""
-        return self._fsm.has_auto_exits(self.case_state)
+        """Whether the current state has an auto exit; see `_CaseAdvancer.advanceable`."""
+        return _CaseAdvancer(self).advanceable
 
     @property
     def case_transition_fail_count(self) -> int:
@@ -713,7 +537,7 @@ class FolderBackedCase(ABC):
     @property
     def case_last_activity(self) -> datetime.datetime | None:
         """Latest event-log activity, or record creation if none."""
-        return self._as_utc(self._journal.last_activity) or self._record.created
+        return _local_mtime_as_utc(self._journal.last_activity) or self._record.created
 
     @property
     def case_events(self) -> CaseEventJournalView:
@@ -902,14 +726,8 @@ class FolderBackedCase(ABC):
 
     @classmethod
     def _resolve_asset_book(cls) -> AliasedAssetSpecs:
-        """The class's declared alias book. Raises MissingAssetSchemaError if the
-        concrete subclass never declared `asset_aliases`."""
-        if cls.asset_aliases is None:
-            raise MissingAssetSchemaError(cls.__name__)
-        if cls._asset_book is None:
-            cls._asset_book = AliasedAssetSpecs.from_declaration(
-                cls.asset_aliases, flexible=cls.flexible_asset_alias_loading,
-            )
+        """The class's declared alias book (built once in ``__init_subclass__``)."""
+        assert cls._asset_book is not None  # populated by __init_subclass__
         return cls._asset_book
 
     @classmethod
@@ -1190,7 +1008,8 @@ class FolderBackedCase(ABC):
     # SECTION 4 — Internal mechanics (maintainers)
     # -----------------------------------------------------------------------
     # Construction/binding, the FSM state-change and exception choke points,
-    # record flush, the pipeline candidate finder, and other private machinery.
+    # record flush, and other private machinery. One-step advance orchestration
+    # lives in `_CaseAdvancer` (see case_advance() / case_advanceable façades).
     # Read this to MAINTAIN the class; you should not need it to USE it.
     # =======================================================================
 
@@ -1235,6 +1054,7 @@ class FolderBackedCase(ABC):
             raise MissingFsmError(cls.__name__)
         if cls.asset_aliases is None:
             raise MissingAssetSchemaError(cls.__name__)
+        # allowed to be empty
         cls._asset_book = AliasedAssetSpecs.from_declaration(
             cls.asset_aliases, flexible=cls.flexible_asset_alias_loading,
         )
@@ -1349,19 +1169,20 @@ class FolderBackedCase(ABC):
             keep_manifest=self._keep_manifest,
         )
         self._listeners: list = []        # fn(case, event_name, info)
-        # State is derived from the event log on load; transitions then caches it on
-        # _case_state (the machine's model_attribute), exposed read-only via the
-        # case_state property defined in SECTION 3 above.
-        self._case_state: str = self._derive_state() or self._fsm.initial_state
-        # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _as_utc() converts them
-        # to aware UTC. record.created is already aware UTC (CaseRecord validator).
+        # State is derived from the event log on load (most recent CASE_STATE_ENTERED);
+        # transitions then caches it on _case_state (the machine's model_attribute),
+        # exposed read-only via the case_state property defined in SECTION 3 above.
+        self._case_state: str = self._journal.current_state or self._fsm.initial_state
+        # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _local_mtime_as_utc()
+        # converts them to aware UTC. record.created is already aware UTC (CaseRecord
+        # validator).
         self._last_activity: datetime.datetime = (
-            self._as_utc(self._journal.last_activity) or self._record.created
+            _local_mtime_as_utc(self._journal.last_activity) or self._record.created
         )
         # When the CURRENT state was entered — dwell anchor for @DWELL guards,
         # from the latest CASE_STATE_ENTERED; a brand-new case has none yet, so fall back.
         self._state_entered_at: datetime.datetime = (
-            self._as_utc(self._journal.last_state_entered_mtime()) or self._record.created
+            _local_mtime_as_utc(self._journal.last_state_entered_mtime()) or self._record.created
         )
         # The lease TTL is a single fixed crash-recovery window (see constants.py); the
         # provider is a constant function, not a per-state policy.
@@ -1394,17 +1215,6 @@ class FolderBackedCase(ABC):
         self._active_trigger_name: str | None = None
         # Instance-time machine binding is delegated to _CaseMachineFactory.
         self._machine = _CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
-
-    @staticmethod
-    def _as_utc(dt: datetime.datetime | None) -> datetime.datetime | None:
-        """Read a naive (local) event-log mtime as aware UTC; pass None through."""
-        return dt.astimezone(datetime.timezone.utc) if dt is not None else None
-
-    def _derive_state(self) -> str | None:
-        """Current state = the most recent CASE_STATE_ENTERED entry. Delegates to the
-        journal (over the same CaseEventJournalView the peek path uses) — no-drift
-        guarantee is structural."""
-        return self._journal.current_state
 
     def _notify(self, event_name: str, **info) -> None:
         for fn in self._listeners:
@@ -1536,7 +1346,7 @@ class FolderBackedCase(ABC):
         # ran for THIS call, so there is nothing here to decorate or log — no transition was
         # even attempted. Surface it exactly like OwnershipLostError: a misuse/invariant
         # signal, not a transition outcome (never folded into AdvanceResult; see
-        # CaseTransitionInFlightError and _attempt_one_trigger's matching re-raise).
+        # CaseTransitionInFlightError and `_CaseAdvancer._attempt_one_trigger`'s matching re-raise).
         if isinstance(err, CaseTransitionInFlightError):
             raise err
         trigger = event.event.name if event.event is not None else None
@@ -1625,35 +1435,5 @@ class FolderBackedCase(ABC):
         except Exception:
             pass
 
-    # ---- flat pipeline driver (internals behind case_advance()) ----
-
-    def _forward_candidates(self, state: str):
-        """The auto-advance edges leaving `state`, as (trigger, dest) in declared order.
-        Empty when terminal / nothing auto-advances from here (e.g. awaiting input). With
-        guards, more than one candidate may be eligible; case_advance() tries them in order."""
-        return self._fsm.auto_edges_from(state)
-
-    def _has_edge_from(self, state: str, trigger: str) -> bool:
-        """Is `trigger` an edge (auto OR manual) leaving `state`? Unlike _forward_candidates
-        (auto only), this also sees MANUAL (`==`) edges. case_advance()'s pinned-trigger path
-        uses it to tell 'real trigger but not available from here' (a plain non-advance) apart
-        from 'not a trigger at all' (misuse that raises) — the latter checked against
-        self._fsm.triggers before this."""
-        for t in self._fsm.transitions:
-            srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
-            if state in srcs and t["trigger"] == trigger:
-                return True
-        return False
-
-    def _make_blocked(self, candidates) -> AutoAdvanceBlocked:
-        """Build the AutoAdvanceBlocked marker for the current (provably stuck) state,
-        logging a SINGLE CASE_ALERTED the first time we detect the block in this dwell so it
-        is visible on disk without spamming the low-volume log on every case_advance() call."""
-        if not self._journal.has_event_since_enter(EV_ALERTED):
-            self.case_log_alert(f"auto-advance blocked in {self.case_state!r}", where=self.case_state)
-        return AutoAdvanceBlocked(
-            self.case_id, self.case_state, candidates=[t for t, _ in candidates]
-        )
-
-    # ---- stall handling (no self-pulse by design: see case_advance()'s docstring and
+    # ---- stall handling (no self-pulse by design: see `_CaseAdvancer.advance` and
     # notebooks/DEVDAVE/case_manager_classes/_backlog/finishing_watchdog.md) ----

@@ -29,6 +29,7 @@ from totodev_pub.folder_backed_case_support.case_journal import (
     CaseEventJournalView,
     _TRIGGER_START_RESOLUTION_LABELS,
 )
+from totodev_pub.folder_backed_case_support.helpers import _local_mtime_as_utc
 from totodev_pub.folder_backed_case_support.constants import (
     EV_ALERTED,
     EV_STATE_ENTERED,
@@ -87,11 +88,10 @@ class FleetStatusRow(BaseModel):
 
 
 def _iso_utc(dt: datetime.datetime | None) -> str | None:
-    """Naive event-log mtime (read as local, like FolderBackedCaseReader._as_utc)
-    or aware datetime → ISO-8601 UTC 'Z' string."""
-    if dt is None:
-        return None
-    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    """Naive (local) event-log mtime, converted via `_local_mtime_as_utc`, → ISO-8601
+    UTC 'Z' string. None passes through."""
+    utc_dt = _local_mtime_as_utc(dt)
+    return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ") if utc_dt is not None else None
 
 
 def parse_iso_utc(value: str | None) -> datetime.datetime | None:

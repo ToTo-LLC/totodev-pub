@@ -33,6 +33,19 @@ def _to_utc(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
     return dt.astimezone(datetime.timezone.utc)
 
 
+def _local_mtime_as_utc(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
+    """Convert a naive LOCAL filesystem mtime to aware UTC; None passes through.
+
+    Event-log timestamps (``PrimitiveEventProxy.mtime``/``.ctime``, and anything derived
+    from them — ``CaseEventJournal.last_activity``, ``last_state_entered_mtime()``, etc.)
+    come from ``datetime.fromtimestamp(stat().st_mtime)``: naive, in the LOCAL timezone.
+    That is the opposite convention from ``_to_utc`` above (which assumes a naive value
+    is already UTC — true for case-minted record timestamps, never true for mtimes), so
+    the two must not be conflated: this one calls ``astimezone()`` to reinterpret the
+    naive local wall-clock reading, not ``replace(tzinfo=...)`` to relabel it."""
+    return dt.astimezone(datetime.timezone.utc) if dt is not None else None
+
+
 def _norm_rel(relative_path: str) -> str:
     """Canonicalize an asset path to a clean, forward-slash RELATIVE string (the on-disk
     manifest form). Collapses '.' segments and OS separators; REJECTS absolute paths and

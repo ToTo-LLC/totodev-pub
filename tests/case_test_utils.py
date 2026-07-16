@@ -30,7 +30,7 @@ async def drive_to_completion(
     """
     last: AdvanceResult | None = None
     while case.case_is_live:
-        candidates = case._forward_candidates(case.case_state)
+        candidates = case.case_type_spec().fsm.auto_edges_from(case.case_state)
         if not candidates:
             break
         if stop_before and any(dest == stop_before for _, dest in candidates):

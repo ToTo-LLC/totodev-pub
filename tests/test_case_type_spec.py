@@ -104,11 +104,11 @@ def test_pending_chokes_for_integration_smoke():
     assert spec.fsm.pending_chokes_for("new") == frozenset({"cpu", "ms-graph-api"})
 
 
-def test_forward_candidates_delegates_to_fsm(tmp_path):
+def test_auto_edges_from_on_compiled_fsm(tmp_path):
     folder = tmp_path / "case"
     folder.mkdir()
     case = SimpleCase.create_case_in_folder(folder)
     try:
-        assert case._forward_candidates("new") == [("step", "open")]
+        assert case.case_type_spec().fsm.auto_edges_from("new") == [("step", "open")]
     finally:
         case.case_detach()
