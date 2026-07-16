@@ -249,7 +249,7 @@ def test_live_case_prep_properties(tmp_path):
         assert isinstance(case.case_events, CaseEventJournalView)
         assert case.case_events is not case._journal
         assert case.case_events is not case._journal.view()  # fresh view each access
-        assert case.case_last_activity is not None
+        assert case.case_last_event_at is not None
         asyncio.run(case.begin())
         assert case.case_state == "open"
 

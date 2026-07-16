@@ -485,11 +485,8 @@ class FolderBackedCase(ABC):
     def case_state(self) -> str:
         """Current FSM state name.
 
-        Backed by the private `_case_state` field, which is the machine's
-        `model_attribute` (see `_CaseMachineFactory.build`): `transitions` writes it
-        directly on every committed transition, bypassing this property. There is no
-        setter — `case.case_state = ...` raises `AttributeError` by design; drive state
-        changes through `case_advance()` or a named trigger instead."""
+        Read-only. Do not update directly — drive state changes through
+        `case_advance()` or a named trigger instead."""
         return self._case_state
 
     @property
@@ -545,9 +542,9 @@ class FolderBackedCase(ABC):
         return (_utcnow() - self._state_entered_at).total_seconds()
 
     @property
-    def case_last_activity(self) -> datetime.datetime | None:
+    def case_last_event_at(self) -> datetime.datetime | None:
         """Latest event-log activity, or record creation if none."""
-        return _local_mtime_as_utc(self._journal.last_activity) or self._record.created
+        return _local_mtime_as_utc(self._journal.last_activity_at) or self._record.created
 
     @property
     def case_events(self) -> CaseEventJournalView:
@@ -667,7 +664,7 @@ class FolderBackedCase(ABC):
     def peek_case_events(folder: Path) -> CaseEventJournalView:
         """A CaseEventJournalView over the folder's event log — lock-free, no live case,
         no registry. Uniform across every case type (the log format is not subclassed).
-        Exposes current_state, is_terminal, last_activity, and .primitive for the raw log."""
+        Exposes current_state, is_terminal, last_activity_at, and .primitive for the raw log."""
         return CaseEventJournalView.for_folder(Path(folder))
 
     @staticmethod
@@ -1163,8 +1160,8 @@ class FolderBackedCase(ABC):
         # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _local_mtime_as_utc()
         # converts them to aware UTC. record.created is already aware UTC (CaseRecord
         # validator).
-        self._last_activity: datetime.datetime = (
-            _local_mtime_as_utc(self._journal.last_activity) or self._record.created
+        self._last_activity_at: datetime.datetime = (
+            _local_mtime_as_utc(self._journal.last_activity_at) or self._record.created
         )
         # When the CURRENT state was entered — dwell anchor for @DWELL guards,
         # from the latest CASE_STATE_ENTERED; a brand-new case has none yet, so fall back.
@@ -1270,8 +1267,8 @@ class FolderBackedCase(ABC):
         src, dest = event.transition.source, event.transition.dest
         trigger = event.event.name if event.event is not None else None
         self._journal.log_state_entered(dest, trigger=trigger, from_state=src)
-        self._last_activity = _utcnow()
-        self._state_entered_at = self._last_activity   # reset the time-guard dwell anchor
+        self._last_activity_at = _utcnow()
+        self._state_entered_at = self._last_activity_at   # reset the time-guard dwell anchor
         terminating = src not in self._fsm.terminal_states and dest in self._fsm.terminal_states
         if not terminating:
             # Throttled flush + lease beat at the boundary. Skipped on the terminating edge:
@@ -1289,7 +1286,7 @@ class FolderBackedCase(ABC):
             # the asset purge. PURGE rewrites logs/case.log with a single sentinel line.
             if get_case_log_retention() is LogRetention.PURGE:
                 purge_case_log(self._folder / LOGS_DIR_NAME / LOG_FILE_NAME)
-            self._record.terminal = self._last_activity
+            self._record.terminal = self._last_activity_at
             self._record.terminal_state = dest
             self._flush_record(force=True)
             # Termination keeps the lock; it does NOT detach. Force a fresh beat so the now-idle
@@ -1349,8 +1346,8 @@ class FolderBackedCase(ABC):
         # idempotent/re-runnable.
         if post_commit and self._journal.current_state != dest:
             self._journal.log_state_entered(dest, trigger=trigger, from_state=src)
-            self._last_activity = _utcnow()
-            self._state_entered_at = self._last_activity
+            self._last_activity_at = _utcnow()
+            self._state_entered_at = self._last_activity_at
 
         # 2. Decorate.
         context = {

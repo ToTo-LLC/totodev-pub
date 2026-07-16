@@ -37,7 +37,7 @@ def _local_mtime_as_utc(dt: Optional[datetime.datetime]) -> Optional[datetime.da
     """Convert a naive LOCAL filesystem mtime to aware UTC; None passes through.
 
     Event-log timestamps (``PrimitiveEventProxy.mtime``/``.ctime``, and anything derived
-    from them — ``CaseEventJournal.last_activity``, ``last_state_entered_mtime()``, etc.)
+    from them — ``CaseEventJournal.last_activity_at``, ``last_state_entered_mtime()``, etc.)
     come from ``datetime.fromtimestamp(stat().st_mtime)``: naive, in the LOCAL timezone.
     That is the opposite convention from ``_to_utc`` above (which assumes a naive value
     is already UTC — true for case-minted record timestamps, never true for mtimes), so

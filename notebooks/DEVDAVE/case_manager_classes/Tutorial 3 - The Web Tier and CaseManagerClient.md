@@ -238,7 +238,7 @@ Zoom from the fleet into a single inquiry. `client.reader(...)` returns a
 reader = client.reader(case_id=case_id)
 reader.case_state          # "waiting_for_answers"
 reader.case_dwell_secs     # how long it's been parked here — grows between reads, live
-reader.case_last_activity  # for a "last touched" column
+reader.case_last_activity_at  # for a "last touched" column
 reader.case_assets.list_assets()   # every file actually on disk right now, for free-form display
 ```
 

@@ -110,9 +110,9 @@ class FolderBackedCaseReader:
         return not self.case_is_terminal
 
     @property
-    def case_last_activity(self) -> datetime.datetime | None:
+    def case_last_activity_at(self) -> datetime.datetime | None:
         record = self._peek_record()
-        return _local_mtime_as_utc(self._peek_events().last_activity) or record.created
+        return _local_mtime_as_utc(self._peek_events().last_activity_at) or record.created
 
     @property
     def case_transition_fail_count(self) -> int:

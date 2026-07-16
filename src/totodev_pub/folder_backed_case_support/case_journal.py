@@ -198,7 +198,7 @@ class CaseEventJournal:
         return "terminal" if self.is_terminal else "live"
 
     @property
-    def last_activity(self) -> Optional[datetime.datetime]:
+    def last_activity_at(self) -> Optional[datetime.datetime]:
         """Modification time of the most recent event, or None if the log is empty."""
         ev = next(self._log.events(), None)
         return ev.mtime if ev else None
@@ -290,8 +290,8 @@ class CaseEventJournalView:
         return self._journal.status
 
     @property
-    def last_activity(self) -> Optional[datetime.datetime]:
-        return self._journal.last_activity
+    def last_activity_at(self) -> Optional[datetime.datetime]:
+        return self._journal.last_activity_at
 
     def last_state_entered_mtime(self) -> Optional[datetime.datetime]:
         return self._journal.last_state_entered_mtime()
