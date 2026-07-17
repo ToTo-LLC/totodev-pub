@@ -375,6 +375,8 @@ class FolderBackedCaseInterface(ABC):
         background pulse keeps beating on its behalf. A case that is actively
         advancing never needs manual attention.
 
+        Cases that aren't concerned with concurrency issues can ignore this method.
+
         The one gap is a case you HOLD without advancing — parked in memory
         between steps, waiting on external input, sitting in a custom dwell
         loop. Left alone past the TTL, the lease lapses and another owner may
