@@ -224,6 +224,50 @@ class FolderBackedCaseInterface(ABC):
     unmatched file (privacy default). To keep one, call ``case_keep_files("logs/case.log")``
     — typically from ``on_terminating()``, judged per case — or set the process-global
     ``LogRetention.RETAIN`` knob so bind-time seeding adds that keep rule for you.
+
+    Assertions — declare what "correct" looks like, per state
+    ----------------------------------------------------------
+    An ASSERTION is a state-tied sanity check that runs automatically once per
+    entry into its state (whichever trigger produced the entry), after all
+    ``on_enter``/``after`` hooks — and, for a terminal state, before the file
+    purge. Name a plain synchronous method on your class:
+
+        def case_assert_<state>_<slug>(self, ltx) -> None | str:
+            ...
+
+    Return a FALSY value (``None``/``""``) to pass; return a message string to
+    FAIL. A raise inside an assertion also fails it (with the exception noted).
+    ``ltx`` is the last-transition snapshot (``from_state``, ``trigger``,
+    ``to_state``) — use it or ignore it. Example:
+
+        def case_assert_open_has_owner(self, ltx):
+            ticket = self.case_load_asset("ticket")
+            if not ticket.owner:
+                return "ticket reached 'open' without an owner"
+
+    Failures are OBSERVATIONAL: the case continues unaffected (nothing counts
+    toward ``@FAIL``), but each failure writes a ``CASE_ASSERT_FAILED`` journal
+    event and every sweep closes with a ``CASE_ASSERTED`` summary — so reviewers,
+    tests, and tooling can read pass/fail straight from the journal
+    (``case_event_journal.assert_failures()``). Write assertions for every state
+    whose entry has an expected shape; they are the executable statement of your
+    case type's invariants, and code review will look for adequate coverage.
+
+    Assertions must be light and synchronous (like ``on_terminating``): they run
+    at the transition boundary, so heavy verification belongs in a ``perform_``
+    step. A ``case_assert_*`` method that names no known state fails loudly at
+    bind with a fix-it message.
+
+    Per-case assertion files: any individual case FOLDER may also carry
+    ``assertions/*.py`` files defining the same convention as module-level
+    functions — ``def case_assert_<state>_<slug>(case_reader, ltx)`` — which
+    receive a read-only ``FolderBackedCaseReader`` instead of the live case.
+    That is the test-case channel: assemble a folder with custom assets plus a
+    bag of assertions, drive it with ``case_advance()``, and read the journal.
+    The folder purges at termination like any other unmatched files. A
+    process-global knob (``set_case_assertion_mode``) can restrict sweeps to
+    class methods only (``CLASS_ONLY``) or skip them (``SKIP``, still
+    summarized).
     """
 
     # =======================================================================
