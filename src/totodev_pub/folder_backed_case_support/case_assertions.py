@@ -268,12 +268,76 @@ class _CaseAssertionRunner:
                 "on_assertion_failed hook raised for case %s", self._case.case_id,
             )
 
-    # ---- file channel (Task 5 fills this in) ----
-
     def _sweep_files(
         self, state: str, ltx: Optional[CaseLastTransition],
     ) -> tuple[int, int]:
-        return 0, 0
+        """Discover and run assertions/*.py functions tied to ``state``. Files are
+        DATA: a broken file logs one import-failure CASE_ASSERT_FAILED and the sweep
+        continues; a function naming an unknown state warns once (per instance) and
+        is skipped. Returns (ran, failed) — import failures count in ``failed`` only
+        (nothing ran)."""
+        folder = self._case.case_folder / ASSERTS_DIR_NAME
+        if not folder.is_dir():
+            return 0, 0
+        from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+        reader = FolderBackedCaseReader(self._case.case_folder)
+        ran = 0
+        failed = 0
+        for path in sorted(folder.glob("*.py")):
+            module = self._load_module(path, state)
+            if module is None:
+                failed += 1                     # import failure already journaled
+                continue
+            functions = sorted(
+                (name, fn) for name, fn in vars(module).items()
+                if callable(fn) and name.startswith(ASSERT_METHOD_PREFIX)
+            )
+            for name, fn in functions:
+                parsed = match_assertion_name(name, self._states)
+                if parsed is None:
+                    key = f"{path.name}:{name}"
+                    if key not in self._warned_unknown:
+                        self._warned_unknown.add(key)
+                        self._case.log.warning(
+                            "assertion file %s defines %r, which matches no known "
+                            "state of %s (states: %s); it will never run",
+                            path.name, name, type(self._case).__name__,
+                            sorted(self._states),
+                        )
+                    continue
+                fn_state, slug = parsed
+                if fn_state != state:
+                    continue                    # tied to another (known) state
+                ran += 1
+                failed += self._run_one(
+                    state, slug, f"file:{path.name}", fn, (reader, ltx),
+                )
+        return ran, failed
+
+    def _load_module(self, path: Path, state: str):
+        """Import an assertion file, cached by (path, mtime). Returns the module,
+        or None after journaling an import failure. Modules are NOT placed in
+        sys.modules — they are private to this runner (no global registry growth,
+        matching the case-logger philosophy)."""
+        mtime = path.stat().st_mtime
+        cached = self._module_cache.get(path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"_case_assertions__{self._case.case_id}__{path.stem}", path,
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            self._record_failure(
+                state, None, f"file:{path.name}",
+                f"failed to import assertion file: {exc}", type(exc).__name__,
+            )
+            self._module_cache.pop(path, None)
+            return None
+        self._module_cache[path] = (mtime, module)
+        return module
 
 
 def msg_basename(source: str) -> str:

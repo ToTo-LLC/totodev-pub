@@ -337,3 +337,129 @@ def test_sweep_state_with_no_assertions_still_summarizes(tmp_path):
         }
     finally:
         case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: per-case assertion files (assertions/*.py)
+# ---------------------------------------------------------------------------
+
+PASSING_AND_FAILING_FILE = '''
+def case_assert_open_reader_sees_disk(case_reader, ltx):
+    # the reader must expose the on-disk record; ltx carries the swept state
+    if case_reader.case_id != "file-case":
+        return f"unexpected case_id {case_reader.case_id!r}"
+    return None
+
+def case_assert_open_always_fails(case_reader, ltx):
+    return "file says no"
+
+def case_assert_done_other_state(case_reader, ltx):
+    # tied to another KNOWN state: silently out of scope for an 'open' sweep
+    return "should not run during open sweep"
+'''
+
+UNKNOWN_STATE_FILE = '''
+def case_assert_nosuchstate_check(case_reader, ltx):
+    return "never runs"
+'''
+
+BROKEN_FILE = "this is not python ("
+
+
+def _make_file_case(tmp_path, files: dict):
+    case = SweepCase.create_case_in_folder(tmp_path / "c", case_id="file-case")
+    case.hook_calls = []
+    asserts_dir = case.case_folder / ASSERTS_DIR_NAME
+    asserts_dir.mkdir()
+    for fname, body in files.items():
+        (asserts_dir / fname).write_text(body)
+    return case
+
+
+def test_file_assertions_run_with_reader_and_state_scope(tmp_path):
+    case = _make_file_case(tmp_path, {"checks.py": PASSING_AND_FAILING_FILE})
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+
+        fails = case._journal.assert_failures(state="open")
+        values = {f.value for f in fails}
+        # class-channel fails (open.fails/open.raises) + the one file fail
+        assert "open.always_fails" in values
+        assert "open.other_state" not in values          # done-scoped fn did not run
+        file_fail = [f for f in fails if f.value == "open.always_fails"][0]
+        assert file_fail.contents().as_dict()["source"] == "file:checks.py"
+
+        summary = list(case._journal.primitive.events(label_glob=EV_ASSERTED))[0]
+        # 3 class assertions + 2 file assertions matched "open"
+        assert summary.contents().as_dict()["ran"] == 5
+    finally:
+        case.case_detach()
+
+
+def test_class_only_mode_never_imports_folder_code(tmp_path):
+    case = _make_file_case(tmp_path, {"checks.py": PASSING_AND_FAILING_FILE})
+    try:
+        set_case_assertion_mode(AssertionMode.CLASS_ONLY)
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+        values = {f.value for f in case._journal.assert_failures(state="open")}
+        assert "open.always_fails" not in values
+        summary = list(case._journal.primitive.events(label_glob=EV_ASSERTED))[0]
+        assert summary.contents().as_dict() == {"ran": 3, "failed": 2,
+                                                "mode": "class_only"}
+    finally:
+        case.case_detach()
+
+
+def test_broken_assertion_file_logs_import_failure_and_continues(tmp_path):
+    case = _make_file_case(
+        tmp_path, {"aaa_broken.py": BROKEN_FILE, "checks.py": PASSING_AND_FAILING_FILE},
+    )
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+        fails = case._journal.assert_failures(state="open")
+        broken = [f for f in fails if f.value == "aaa_broken.py"]
+        assert len(broken) == 1
+        d = broken[0].contents().as_dict()
+        assert d["name"] is None
+        assert d["source"] == "file:aaa_broken.py"
+        assert d["error"]                              # exception type captured
+        # the OTHER file still ran despite the broken sibling
+        assert any(f.value == "open.always_fails" for f in fails)
+    finally:
+        case.case_detach()
+
+
+def test_unknown_state_file_function_warns_and_skips(tmp_path):
+    case = _make_file_case(tmp_path, {"odd.py": UNKNOWN_STATE_FILE})
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+        runner.sweep("open")                           # second sweep: no double warn
+        assert all(
+            f.value != "nosuchstate.check"
+            for f in case._journal.assert_failures()
+        )
+        assert len(runner._warned_unknown) == 1
+    finally:
+        case.case_detach()
+
+
+def test_module_cache_reimports_on_mtime_change(tmp_path):
+    import os
+    case = _make_file_case(tmp_path, {"checks.py": PASSING_AND_FAILING_FILE})
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+        path = case.case_folder / ASSERTS_DIR_NAME / "checks.py"
+        cached_module_1 = runner._module_cache[path][1]
+        runner.sweep("open")
+        assert runner._module_cache[path][1] is cached_module_1   # cache hit
+        path.write_text(PASSING_AND_FAILING_FILE + "\n# touched\n")
+        os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
+        runner.sweep("open")
+        assert runner._module_cache[path][1] is not cached_module_1  # re-imported
+    finally:
+        case.case_detach()
