@@ -41,7 +41,7 @@ class FolderBackedCaseReader:
         # Deliberate memoization of asset alias specs / CaseAssets (variation from otherwise no-caching).
         self._assets: CaseAssets | None = None
         self._asset_book: AliasedAssetSpecs | None = None
-        self._events_view: CaseEventJournalView | None = None
+        self._event_journal_view: CaseEventJournalView | None = None
 
     @staticmethod
     def _folder_backed_case():
@@ -52,10 +52,10 @@ class FolderBackedCaseReader:
     def _peek_record(self) -> CaseRecord:
         return self._folder_backed_case().peek_case_record(self._folder)
 
-    def _peek_events(self) -> CaseEventJournalView:
-        if self._events_view is None:
-            self._events_view = self._folder_backed_case().peek_case_events(self._folder)
-        return self._events_view
+    def _peek_event_journal(self) -> CaseEventJournalView:
+        if self._event_journal_view is None:
+            self._event_journal_view = self._folder_backed_case().peek_case_event_journal(self._folder)
+        return self._event_journal_view
 
     def _resolve_asset_book(self) -> AliasedAssetSpecs:
         if self._asset_book is None:
@@ -99,29 +99,24 @@ class FolderBackedCaseReader:
 
     @property
     def case_state(self) -> str | None:
-        return self._peek_events().current_state
+        return self._peek_event_journal().current_state
 
     @property
     def case_is_terminal(self) -> bool:
-        return self._peek_events().is_terminal
+        return self._peek_event_journal().is_terminal
 
     @property
     def case_is_live(self) -> bool:
         return not self.case_is_terminal
 
     @property
-    def case_last_activity_at(self) -> datetime.datetime | None:
-        record = self._peek_record()
-        return _local_mtime_as_utc(self._peek_events().last_activity_at) or record.created
-
-    @property
     def case_transition_fail_count(self) -> int:
-        return self._peek_events().count_fails_this_dwell()
+        return self._peek_event_journal().count_fails_this_dwell()
 
     @property
     def case_dwell_secs(self) -> float:
         record = self._peek_record()
-        entered_at = _local_mtime_as_utc(self._peek_events().last_state_entered_mtime()) or record.created
+        entered_at = _local_mtime_as_utc(self._peek_event_journal().last_state_entered_mtime()) or record.created
         return (_utcnow() - entered_at).total_seconds()
 
     @property
@@ -142,8 +137,8 @@ class FolderBackedCaseReader:
         return self.case_assets.load_dataclass(alias)
 
     @property
-    def case_events(self) -> CaseEventJournalView:
-        return self._peek_events()
+    def case_event_journal(self) -> CaseEventJournalView:
+        return self._peek_event_journal()
 
     @property
     def case_lease_secs_left(self) -> float | None:
@@ -160,7 +155,7 @@ class FolderBackedCaseReader:
         lease_left = self.case_lease_secs_left
         if lease_left is None or lease_left <= 0:
             return None
-        ev = self._peek_events().unresolved_trigger_started
+        ev = self._peek_event_journal().unresolved_trigger_started
         if ev is None:
             return None
         started = _local_mtime_as_utc(ev.mtime)

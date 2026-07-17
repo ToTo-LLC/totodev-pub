@@ -72,10 +72,10 @@ def test_reader_state_after_transition(tmp_path):
     assert reader.case_state == "open"
     assert not reader.case_is_terminal
     assert reader.case_is_live
-    assert reader.case_events.current_state == "open"
+    assert reader.case_event_journal.current_state == "open"
     assert (
-        reader.case_events.current_state
-        == FolderBackedCase.peek_case_events(folder).current_state
+        reader.case_event_journal.current_state
+        == FolderBackedCase.peek_case_event_journal(folder).current_state
     )
 
 
@@ -123,8 +123,8 @@ def test_reader_assets_and_events(tmp_path):
     assert "note.txt" in reader.case_assets.list_assets()
     assert reader.case_assets.asset_path("note.txt").read_text() == "hi"
     assert (
-        reader.case_events.current_state
-        == FolderBackedCase.peek_case_events(folder).current_state
+        reader.case_event_journal.current_state
+        == FolderBackedCase.peek_case_event_journal(folder).current_state
     )
 
 
@@ -246,10 +246,9 @@ def test_live_case_prep_properties(tmp_path):
         assert record.case_object_type == "SimpleCase"
         assert record.created == case._record.created
         assert record.terminal is None
-        assert isinstance(case.case_events, CaseEventJournalView)
-        assert case.case_events is not case._journal
-        assert case.case_events is not case._journal.view()  # fresh view each access
-        assert case.case_last_event_at is not None
+        assert isinstance(case.case_event_journal, CaseEventJournalView)
+        assert case.case_event_journal is not case._journal
+        assert case.case_event_journal is not case._journal.view()  # fresh view each access
         asyncio.run(case.begin())
         assert case.case_state == "open"
 

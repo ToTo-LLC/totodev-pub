@@ -8,7 +8,7 @@
   - ``rehydrate(folder)`` — open as the correct class (acquires lease via ``__init__``)
   - ``peek_class(folder)`` — sniff type name or resolve registered class
 
-Static lock-free peeks (``peek_case_record``, ``peek_case_events``, etc.) live on
+Static lock-free peeks (``peek_case_record``, ``peek_case_event_journal``, etc.) live on
 ``FolderBackedCase``, not here.
 
 Use the module singleton ``case_type_registry`` in application code. Registry-free

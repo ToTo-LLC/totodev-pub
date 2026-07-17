@@ -23,7 +23,6 @@ customization seams or internal mechanics.
 
 from __future__ import annotations
 
-import datetime
 import logging
 from abc import ABC
 from pathlib import Path
@@ -290,7 +289,7 @@ class FolderBackedCaseInterface(ABC):
         nickname: str | None = None,
         **fields,
     ) -> Self:
-        """This is how you create a new case... in the filesystem
+        """This is how you create a new case... in the filesystem.
 
         This is the only built-in way to create a new case; the class's
         constructor loads an existing case from disk.
@@ -311,7 +310,7 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     def case_detach(self) -> None:
-        """Unbind this object from its folder: release the lease and mark detached.
+        """Unbinds this object from its folder: release the lease and mark detached.
 
         Call this when you are done acting on a live case (scripts, tests, handoff
         to ``CaseManager``, after harvesting a terminated case). After detach,
@@ -457,12 +456,7 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     @property
-    def case_last_event_at(self) -> datetime.datetime | None:
-        """Latest event-log activity, or record creation if none."""
-        ...
-
-    @property
-    def case_events(self) -> CaseEventJournalView:
+    def case_event_journal(self) -> CaseEventJournalView:
         """Read-only view of this case's event log."""
         ...
 
@@ -472,15 +466,10 @@ class FolderBackedCaseInterface(ABC):
 
     @property
     def case_assets(self) -> CaseAssets:
-        """The case's CaseAssets: the file playground under ``assets/``, plus a
-        READ-ONLY view onto the keep manifest.
+        """The case's CaseAssets: the file playground under ``assets/``.
 
-        Your working files live here. Use ``case.case_assets.folder``,
-        ``.asset_path(...)``, ``.relative_path(...)``, ``.write(...)``,
-        ``.list_assets()``, ``.keep_list()``, ``.is_kept(...)``, etc. Retention is
-        NOT decided here — declare ``AssetSpec(keep=True)`` (preferred) or call
-        ``case_keep_files()`` on the case object. Anything not matched by the
-        manifest is purged when the case terminates.
+        This object provides access to files in that directory and facilitates
+        loading of structured data files.
         """
         ...
 
@@ -582,7 +571,7 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     @staticmethod
-    def peek_case_events(folder: Path) -> CaseEventJournalView:
+    def peek_case_event_journal(folder: Path) -> CaseEventJournalView:
         """A CaseEventJournalView over the folder's event log — lock-free, no
         live case, no registry. Uniform across every case type (the log format is
         not subclassed). Exposes ``current_state``, ``is_terminal``,
@@ -596,7 +585,7 @@ class FolderBackedCaseInterface(ABC):
     ) -> CaseAssets:
         """A CaseAssets over the folder — lock-free, no live case, no registry.
         Uniform across every case type. Exposes ``list_assets()``,
-        ``keep_list()``, ``asset_path()``, etc. The peek analog of a live case's
+        ``asset_path()``, etc. The peek analog of a live case's
         ``.case_assets`` property.
 
         Loads via LazyLoadedFileData by default (no case class needed). Pass

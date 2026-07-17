@@ -19,7 +19,7 @@ Core pieces (for case authors)
 --------------------------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
 CaseEventJournalView    — read-only facade over the case event-log protocol.
-CaseAssets              — working-file playground + retention manifest (_keep.txt).
+CaseAssets              — working-file playground (assets/); retention-blind.
 FolderBackedCaseInterface — basic-usage contract (read this first).
 FolderBackedCase        — ABC you subclass to define a case type.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
@@ -304,15 +304,11 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return (_utcnow() - self._state_entered_at).total_seconds()
 
     @property
-    def case_last_event_at(self) -> datetime.datetime | None:
-        return _local_mtime_as_utc(self._journal.last_activity_at) or self._record.created
-
-    @property
-    def case_events(self) -> CaseEventJournalView:
+    def case_event_journal(self) -> CaseEventJournalView:
         # Writes go through CaseEventJournal, not this view.
         return self._journal.view()
 
-    # ---- assets (playground + retention), grouped on CaseAssets ----
+    # ---- assets playground, grouped on CaseAssets (retention is case-level) ----
 
     @property
     def case_assets(self) -> CaseAssets:
@@ -356,7 +352,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return record_cls.open(str(Path(folder) / RECORD_NAME), without_lock=True)
 
     @staticmethod
-    def peek_case_events(folder: Path) -> CaseEventJournalView:
+    def peek_case_event_journal(folder: Path) -> CaseEventJournalView:
         return CaseEventJournalView.for_folder(Path(folder))
 
     @staticmethod
@@ -939,7 +935,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
             self._folder,
             asset_specs=type(self)._resolve_asset_book().spec_map(),
             flexible_asset_alias_loading=cls.flexible_asset_alias_loading,
-            keep_manifest=self._keep_manifest,
         )
         # State is derived from the event log on load (most recent CASE_STATE_ENTERED);
         # transitions then caches it on _case_state (the machine's model_attribute),

@@ -156,6 +156,17 @@ def test_debug_logging_emits_per_purged_path(tmp_path, caplog):
     assert "purged ephemeral file: ephemeral-b.tmp" in caplog.text
 
 
+def test_remove_rules_drops_entry(tmp_path):
+    case_folder = tmp_path / "case-remove"
+    case_folder.mkdir()
+    manifest = CaseKeepManifest(case_folder)
+    manifest.add_rules("assets/reports/*.csv", "assets/keep.txt")
+
+    manifest.remove_rules("assets/reports/*.csv")
+
+    assert manifest.list_rules() == ["assets/keep.txt"]
+
+
 def test_add_rules_idempotent(tmp_path):
     case_folder = tmp_path / "case-idem"
     case_folder.mkdir()

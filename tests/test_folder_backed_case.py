@@ -192,7 +192,7 @@ def test_peek_record_and_events(tmp_path):
     assert record.case_id == "c-005"
     assert record.case_object_type == "SimpleCase"
 
-    events = FolderBackedCase.peek_case_events(folder)
+    events = FolderBackedCase.peek_case_event_journal(folder)
     assert events.current_state == "open"
     assert not events.is_terminal
 

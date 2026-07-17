@@ -241,8 +241,8 @@ def test_keep_true_seeds_manifest_at_create(tmp_path):
     folder = tmp_path / "ticket-keep"
     case = TicketCase.create_case_in_folder(folder)
     try:
-        assert "ticket.yaml" in case.case_assets.keep_list()
-        assert "assets/ticket.yaml" in case.case_assets.keep_manifest.list_rules()
+        assert "assets/ticket.yaml" in case._keep_manifest.list_rules()
+        assert case._keep_manifest.is_kept("assets/ticket.yaml")
         case.case_assets.write("ticket.yaml", b"title: kept\n")
         case.case_assets.write("scratch.txt", b"ephemeral")
         purged = case._keep_manifest.purge()
@@ -259,10 +259,10 @@ def test_reclassify_restamps_states_and_keep(tmp_path):
     case = ReclassSource.create_case_in_folder(folder)
     try:
         asyncio.run(case.go())
-        assert "old.yaml" in case.case_assets.keep_list()
+        assert "assets/old.yaml" in case._keep_manifest.list_rules()
         fresh = case.case_reclassify_to(ReclassTarget)
         assert fresh._record.asset_aliases["new"]["states"] == ["shared"]
-        assert "new.yaml" in fresh.case_assets.keep_list()
+        assert "assets/new.yaml" in fresh._keep_manifest.list_rules()
 
     finally:
         case.case_detach()

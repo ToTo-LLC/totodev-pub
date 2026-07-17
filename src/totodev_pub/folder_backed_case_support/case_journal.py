@@ -199,7 +199,9 @@ class CaseEventJournal:
 
     @property
     def last_activity_at(self) -> Optional[datetime.datetime]:
-        """Modification time of the most recent event, or None if the log is empty."""
+        """Modification time of the most recent event, or None if the log is empty.
+
+        Naive/local, like all event-log mtimes; the caller converts to aware UTC."""
         ev = next(self._log.events(), None)
         return ev.mtime if ev else None
 

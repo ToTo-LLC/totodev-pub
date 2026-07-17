@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -35,6 +34,10 @@ class CaseReadProtocol(Protocol):
       ``terminal``, ``terminal_state``) live on CaseRecord. The reader may wrap them
       for closed-case inspection; the live case does not — use
       ``case_record()`` / ``peek_case_record()`` instead.
+
+    * There is no last-activity timestamp here. A caller that needs "last touched"
+      can read ``case_event_journal.last_activity_at`` (naive-local mtime of the
+      newest event) and fall back to the record's ``created`` for an empty log.
     """
 
     @property
@@ -59,9 +62,6 @@ class CaseReadProtocol(Protocol):
     def case_dwell_secs(self) -> float: ...
 
     @property
-    def case_last_activity_at(self) -> datetime.datetime | None: ...
-
-    @property
     def case_transition_fail_count(self) -> int: ...
 
     @property
@@ -70,4 +70,4 @@ class CaseReadProtocol(Protocol):
     def case_load_asset(self, alias: str) -> object: ...
 
     @property
-    def case_events(self) -> CaseEventJournalView: ...
+    def case_event_journal(self) -> CaseEventJournalView: ...
