@@ -176,26 +176,27 @@ class _CaseAdvancer:
     ) -> AdvanceResult:
         """Run the chosen advance helper while harvesting CASE_ALERTED events into the result.
 
-        Temporarily overrides the instance's case_log_alert so each call both records the
-        message locally AND performs its normal on-disk logging, then restores the class
-        method (by deleting the instance attribute) and folds the collected messages into
-        the returned AdvanceResult's `alerts`. See advance() / AdvanceResult.alerts."""
+        Temporarily overrides the instance's case_emit_alert_event so each call both
+        records the message locally AND performs its normal on-disk write, then restores
+        the class method (by deleting the instance attribute) and folds the collected
+        messages into the returned AdvanceResult's `alerts`. See advance() /
+        AdvanceResult.alerts."""
         case = self._case
         collected: list[str] = []
-        underlying = case.case_log_alert
+        underlying = case.case_emit_alert_event
 
-        def _collecting_log_alert(short_msg: str = "", *, where: str | None = None) -> None:
+        def _collecting_emit_alert_event(short_msg: str = "", *, where: str | None = None) -> None:
             collected.append(short_msg)
             underlying(short_msg, where=where)
 
-        case.case_log_alert = _collecting_log_alert  # type: ignore[method-assign]
+        case.case_emit_alert_event = _collecting_emit_alert_event  # type: ignore[method-assign]
         try:
             if trigger is not None:
                 result = await self._advance_pinned(initial, trigger, trigger_kwargs)
             else:
                 result = await self._advance_auto_sweep(initial)
         finally:
-            del case.case_log_alert  # drop the instance override; class method shines through
+            del case.case_emit_alert_event  # drop the instance override; class method shines through
         if collected:
             result = replace(result, alerts=tuple(collected))
         return result
@@ -279,7 +280,7 @@ class _CaseAdvancer:
         is visible on disk without spamming the low-volume log on every case_advance() call."""
         case = self._case
         if not case._journal.has_event_since_enter(EV_ALERTED):
-            case.case_log_alert(
+            case.case_emit_alert_event(
                 f"auto-advance blocked in {case.case_state!r}", where=case.case_state
             )
         return AutoAdvanceBlocked(

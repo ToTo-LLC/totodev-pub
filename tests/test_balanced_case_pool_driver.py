@@ -125,7 +125,7 @@ class AlertProgressCase(FolderBackedCase):
     fsm_state_chains = ["^s0--step-->s1^"]
 
     async def perform_step(self, tctx):
-        self.case_log_alert("heads up")
+        self.case_emit_alert_event("heads up")
 
 
 class BlockingCase(FolderBackedCase):

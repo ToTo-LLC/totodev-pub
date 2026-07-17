@@ -118,7 +118,7 @@ def dashboard_summary(client: CaseManagerClient) -> dict[str, list[str]]:
 
         # Type-AGNOSTIC "look at this": alert_count is the one signal every case family
         # produces the same way (tutorial #1 §6), raised by the framework itself or by a
-        # hook calling case_log_alert(). A generic ops view can use this list without
+        # hook calling case_emit_alert_event(). A generic ops view can use this list without
         # knowing a single InquiryCase state name.
         "flagged": [r.case_id for r in rows.values() if r.alert_count > 0],
     }

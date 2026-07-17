@@ -6,7 +6,7 @@ FolderBackedCase: folder-anchored, file-first case lifecycle framework.
 
 OVERVIEW
 A case is a heavyweight, FSM-driven object whose entire state—record,
-event log, and working files—lives in a single folder on disk. No
+event journal, and working files—lives in a single folder on disk. No
 database required. Subclass ``FolderBackedCase`` to define a case type.
 **IMPORTANT**: Read ``FolderBackedCaseInterface`` first to understand
 how to subclass and use this class.
@@ -18,7 +18,7 @@ can find in commented SECTION 3 and SECTION 4 below.
 Core pieces (for case authors)
 --------------------------
 CaseRecord              — skinny Pydantic identity card (case_record.yaml).
-CaseEventJournalView    — read-only facade over the case event-log protocol.
+CaseEventJournalView    — read-only facade over the case event-journal protocol.
 CaseAssets              — working-file playground (assets/); retention-blind.
 FolderBackedCaseInterface — basic-usage contract (read this first).
 FolderBackedCase        — ABC you subclass to define a case type.
@@ -335,7 +335,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
 
     # ---- operator alert channel (type-agnostic escalation marker) ----
 
-    def case_log_alert(self, short_msg: str = "", *, where: str | None = None) -> None:
+    def case_emit_alert_event(self, short_msg: str = "", *, where: str | None = None) -> None:
         self._journal.log_alerted(
             where or self.case_state, msg=short_msg
         )
@@ -697,7 +697,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "case_is_live", "case_is_terminal", "case_terminal_states",
         "case_transition_fail_count", "case_id",
         "case_advance", "case_detach", "case_heartbeat", "case_record",
-        "case_log_alert", "case_run_blocking", "case_reclassify_to",
+        "case_emit_alert_event", "case_run_blocking", "case_reclassify_to",
     })
 
     # Public members deliberately absent from FolderBackedCaseInterface
@@ -856,7 +856,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         """Bind a live case object to an EXISTING on-disk case folder.
 
         This constructor is intentionally the load/bind path, not inception:
-        it expects `case_record.yaml` (and any existing event-log history) to
+        it expects `case_record.yaml` (and any existing event-journal history) to
         already exist on disk, then loads them, acquires the lease, and builds
         the in-memory FSM carrier. Call ``case_detach()`` when you are done with
         this live object. Two ways it fails fast and points elsewhere:
@@ -938,11 +938,11 @@ class FolderBackedCase(FolderBackedCaseInterface):
             asset_specs=type(self)._resolve_asset_book().spec_map(),
             flexible_asset_alias_loading=cls.flexible_asset_alias_loading,
         )
-        # State is derived from the event log on load (most recent CASE_STATE_ENTERED);
+        # State is derived from the event journal on load (most recent CASE_STATE_ENTERED);
         # transitions then caches it on _case_state (the machine's model_attribute),
         # exposed read-only via the case_state property defined in SECTION 3 above.
         self._case_state: str = self._journal.current_state or self._fsm.initial_state
-        # Event-log mtimes are LOCAL naive (datetime.fromtimestamp); _local_mtime_as_utc()
+        # Event-journal mtimes are LOCAL naive (datetime.fromtimestamp); _local_mtime_as_utc()
         # converts them to aware UTC. record.created is already aware UTC (CaseRecord
         # validator).
         self._last_activity_at: datetime.datetime = (

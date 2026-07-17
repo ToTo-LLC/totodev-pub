@@ -178,7 +178,7 @@ def test_reader_has_no_write_surface(tmp_path):
         "case_advance",
         "case_detach",
         "case_heartbeat",
-        "case_log_alert",
+        "case_emit_alert_event",
         "case_record",
     ):
         assert not hasattr(reader, name)

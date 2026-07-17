@@ -10,11 +10,13 @@ the way basic users should interact and use cases.
 
 GOVERNANCE
 ----------
-This class is contract only. It carries no policy, no implementation, and never
-will. Contract documentation (purpose, arguments, guarantees, usage) lives HERE
-and governs. Implementation commentary lives in ``folder_backed_case.py``.
-Do not add executable behavior (validators, descriptors, computed defaults) to
-this class; that is policy and belongs in ``FolderBackedCase``.
+This class is contract only. It carries no policy, no implementation,
+and never will. Contract documentation (purpose, arguments,
+guarantees, usage) lives HERE and governs. Implementation
+commentary and advanced features live in
+``folder_backed_case.py``. Do not add executable behavior
+(validators, descriptors, computed defaults) to this class;
+that is policy and belongs in ``FolderBackedCase``.
 
 Derive from ``FolderBackedCase`` (not this interface). Read this class to learn
 the everyday subclassing surface; open ``FolderBackedCase`` only when you need
@@ -65,7 +67,7 @@ class FolderBackedCaseInterface(ABC):
     """Basic-usage authoring surface for folder-backed case types.
 
     A case is a heavyweight, FSM-driven work item whose entire state — record,
-    event log, and working files — lives in a single folder on disk. No database
+    event journal, and working files — lives in a single folder on disk. No database
     required. The folder is self-describing and can be archived or moved
     atomically. Typical uses: a support ticket, an inbound document for
     processing, a contract bundle to review.
@@ -182,7 +184,7 @@ class FolderBackedCaseInterface(ABC):
     Creating hook methods — arguments to triggers
     ---------------------------------------------
     Every hook receives one trigger-context argument, conventionally
-    ``tctx: EventData`` (the ``transitions`` EventData object — not the event log).
+    ``tctx: EventData`` (the ``transitions`` EventData object — not the event journal).
 
       * Direct ``await case.<trigger>(**kwargs)`` bundles kwargs into ``tctx.kwargs``.
       * No-argument ``case_advance()`` sweeps leave ``tctx.kwargs`` empty.
@@ -212,7 +214,7 @@ class FolderBackedCaseInterface(ABC):
     ("some_name")`` gives it a namespaced logger that behaves normally and stays
     tee'd. You do not need to log a trigger/guard/hook exception yourself for it to
     reach ``logs/case.log`` — the base class already logs the full traceback there
-    (in addition to a terse fact in the event log) before re-raising; see
+    (in addition to a terse fact in the event journal) before re-raising; see
     ``on_transition_exception`` if you want to react to the failure, not just see it.
 
     ``logs/case.log`` is not a framework keep-rule: a purge deletes it like any other
@@ -344,7 +346,8 @@ class FolderBackedCaseInterface(ABC):
     async def case_advance(
         self, trigger: str | None = None, trigger_kwargs: dict | None = None,
     ) -> AdvanceResult:
-        """Advance one reported step of the case FSM.
+        """Attempts to advance one reported step of the case FSM.
+        This is an alternative to calling triggers directly.
 
         With no arguments, attempts the next auto-edge from the current state.
         With ``trigger`` (and optional ``trigger_kwargs``), attempts that named
@@ -361,12 +364,12 @@ class FolderBackedCaseInterface(ABC):
         validate_ownership: bool = True,
     ) -> None:
         """Refresh this case's heartbeat lease — the keepalive for a held-but-idle
-        case.
+        case.  For active cases, this is done automatically.
 
-        How the lease works (the short version): a live in-memory case owns its
+        How the lease works (the short version): a case objevt in-memory owns its
         folder by holding a lease — a small file whose timestamp encodes "spoken
         for until then". The window is short (a fixed crash-recovery TTL, ~30s);
-        staying the owner means re-stamping it before it lapses. Normal
+        staying the owner means re-stamping periodically before it lapses. Normal
         operation does this for you: ``case_advance()`` beats before each step
         and at every transition boundary, and while a trigger's work runs a
         background pulse keeps beating on its behalf. A case that is actively
@@ -497,7 +500,7 @@ class FolderBackedCaseInterface(ABC):
 
     @property
     def case_event_journal(self) -> CaseEventJournalView:
-        """Read-only view of this case's event log."""
+        """Read-only view of this case's event journal."""
         ...
 
     # =======================================================================
@@ -520,19 +523,29 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     def case_keep_files(self, *patterns: str | Path) -> None:
-        """Register glob patterns for files to keep when the case reaches
-        terminal status and its folder is otherwise purged.
+        """Register glob patterns or paths to NOT-purge when case folder 
+        contents are being purged at terminal status.
 
-        Patterns are case-relative (e.g. ``"reports/*.csv"``), including files
-        under ``assets/`` — this method is case-root scoped, not
-        assets-scoped, so an asset path needs its ``assets/`` prefix spelled
-        out. Absolute paths inside the case folder are normalized to
-        case-relative form.
+        Patterns are relative to the root of the case folder,
+        If passed an absolute path, it will be normalized to a case-relative 
+        path.
 
-        Prefer declaring ``AssetSpec(keep=True)`` for assets you already know
-        at class-definition time. Call this instead for a runtime keep
-        decision — e.g. from ``on_terminating()``, naming deliverables to
-        preserve as judged case-by-case.
+        Common patterns::
+
+            logs/*.log                  # all log files under logs/
+            assets/my_data_thing.yaml   # one specific asset file
+            assets/granular_data/**     # an entire asset subtree
+
+       Prefer declaring ``AssetSpec(keep=True)`` within your derived class's
+        ``asset_aliases`` at class-definition time for items you always want
+        kept. Call this for a runtime keep decision—e.g. from
+        ``on_terminating()``, naming deliverables to preserve as judged
+        case-by-case.
+   
+        NOTE: Case level log files are purged by default for security reasons. Using
+        "keep" on them is typically done only for debugging purposes and is 
+        generally not done in production environments.
+   
         """
         ...
 
@@ -544,6 +557,9 @@ class FolderBackedCaseInterface(ABC):
         Before touching disk, checks that the current FSM state is one where
         ``alias`` is trustworthy (per the spec's ``states``), raising
         ``AssetNotTrustedInStateError`` if not.
+
+        For assets not declared in ``asset_aliases`` use the ``case_assets``
+        method to find/load manually.
         """
         ...
 
@@ -552,7 +568,7 @@ class FolderBackedCaseInterface(ABC):
         skinny, stable set of facts about the case — what type it is, its id(s),
         its declared asset/FSM shape, and (once reached) its terminal facts. It is
         NOT where detailed, evolving instance data lives; that belongs in assets
-        or the event log. Correspondingly, a driver class will rarely have reason
+        or the event journal. Correspondingly, a driver class will rarely have reason
         to write to this record directly.
 
         Returns a detached deep-copy snapshot, so mutating the result has no
@@ -569,15 +585,15 @@ class FolderBackedCaseInterface(ABC):
     # Operator alert channel
     # =======================================================================
 
-    def case_log_alert(self, short_msg: str = "", *, where: str | None = None) -> None:
-        """Append a CASE_ALERTED entry to the event log — the "this case needs a
+    def case_emit_alert_event(self, short_msg: str = "", *, where: str | None = None) -> None:
+        """Append a CASE_ALERTED entry to the event journal — the "this case needs a
         human to look at it" marker. Purely conventional: nothing enforces a
         response, and it does not touch FSM state (no transition, no
         termination). Because CASE_ALERTED reads the same for every case type, a
         type-agnostic observer (dashboard, fleet scan) can surface flagged cases
         without knowing any of this case's internals.
 
-        Use SPARINGLY on this low-volume audit log — raise one for an integrity
+        Use SPARINGLY on this low-volume audit journal — raise one for an integrity
         risk or a substantial deviation from norms, NOT for a routine,
         recoverable defect the flow already absorbs (that belongs on
         ``self.log`` instead).
@@ -637,10 +653,10 @@ class FolderBackedCaseInterface(ABC):
 
     @staticmethod
     def peek_case_event_journal(folder: Path) -> CaseEventJournalView:
-        """A CaseEventJournalView over the folder's event log — lock-free, no
-        live case, no registry. Uniform across every case type (the log format is
-        not subclassed). Exposes ``current_state``, ``is_terminal``,
-        ``last_activity_at``, and ``.primitive`` for the raw log.
+        """A CaseEventJournalView over the folder's event journal — lock-free, no
+        live case, no registry. Uniform across every case type (the journal format
+        is not subclassed). Exposes ``current_state``, ``is_terminal``,
+        ``last_activity_at``, and ``.primitive`` for the raw journal.
         """
         ...
 
@@ -681,7 +697,7 @@ class FolderBackedCaseInterface(ABC):
         ``case_event_journal``, plus lease-aware extras like
         ``case_lease_secs_left`` and ``case_active_trigger``) as thin wrappers
         over the same ``peek_*`` static methods on this class. Each access
-        re-reads its source of truth (record, event log, or filesystem) rather
+        re-reads its source of truth (record, event journal, or filesystem) rather
         than caching, so expect more I/O cost per read than the equivalent
         in-memory property on a live case — a reasonable trade for
         correctness when you can't or don't want to hold the lease.

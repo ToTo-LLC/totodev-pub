@@ -324,10 +324,10 @@ class InquiryCase(FolderBackedCase):
         await send_email(...)
 
     async def perform_refer_out(self, tctx):
-        self.case_log_alert("intake failed 3x; referred for human handling")
+        self.case_emit_alert_event("intake failed 3x; referred for human handling")
 
     async def perform_escalate(self, tctx):
-        self.case_log_alert("expert answers overdue (3 days)")
+        self.case_emit_alert_event("expert answers overdue (3 days)")
 
     # ---- Guards: fast, side-effect-free data conditions ----
 
@@ -449,7 +449,7 @@ This folder *is* the runtime answer to the unwritten-requirements list from §1:
   real run: a `CASE_ALERTED` event — the family's universal, type-agnostic "a human should look at
   this" marker, which observers can surface without knowing anything about your case type. Here
   the framework raised it itself (a naive sweep found `waiting_for_approval` had no automated way
-  forward); your hooks raise their own via `case_log_alert()`, as `perform_refer_out` does.
+  forward); your hooks raise their own via `case_emit_alert_event()`, as `perform_refer_out` does.
 - **Confidentiality.** Termination is two-phase: your `on_terminating()` hook calls
   `case_keep_files()` to name the final artifacts to retain, then everything not matched in
   `_keep.txt` is **purged**. Customer attachments and intermediate scratch die with the live

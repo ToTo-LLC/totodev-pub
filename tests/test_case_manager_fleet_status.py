@@ -83,8 +83,8 @@ def test_enabled_board_replaces_sentinel(tmp_path):
 
 def test_collect_facts_counts_alerts_in_current_dwell(tmp_path):
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
-    case.case_log_alert("first")
-    case.case_log_alert("second")
+    case.case_emit_alert_event("first")
+    case.case_emit_alert_event("second")
     facts = collect_case_status_facts(case.case_folder)
     assert facts["alert_count"] == 2
     assert facts["fail_count"] == 0
@@ -216,7 +216,7 @@ def test_notify_appends_changed_row_last_wins(tmp_path):
     )
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
     assert writer.notify(case) is True
-    case.case_log_alert("ping")
+    case.case_emit_alert_event("ping")
     assert writer.notify(case) is True
     lines = _jsonl_data_lines(writer.board_path)
     assert len(lines) == 2  # two appends, not compacted
@@ -233,7 +233,7 @@ def test_notify_full_flushes_when_interval_elapsed(tmp_path):
     )
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
     assert writer.notify(case) is True
-    case.case_log_alert("one")
+    case.case_emit_alert_event("one")
     assert writer.notify(
         case,
         live_cases=[case],
