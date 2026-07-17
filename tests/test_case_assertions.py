@@ -463,3 +463,20 @@ def test_module_cache_reimports_on_mtime_change(tmp_path):
         assert runner._module_cache[path][1] is not cached_module_1  # re-imported
     finally:
         case.case_detach()
+
+
+def test_vanished_assertion_file_is_journaled_not_raised(tmp_path):
+    case = _make_file_case(tmp_path, {"checks.py": PASSING_AND_FAILING_FILE})
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        ghost = case.case_folder / ASSERTS_DIR_NAME / "ghost.py"
+        # simulate the glob-to-stat race: the path is enumerable no longer
+        assert runner._load_module(ghost, "open") is None      # must not raise
+        fails = case._journal.assert_failures(state="open")
+        ghost_fail = [f for f in fails if f.value == "ghost.py"]
+        assert len(ghost_fail) == 1
+        d = ghost_fail[0].contents().as_dict()
+        assert d["source"] == "file:ghost.py"
+        assert d["error"] in ("FileNotFoundError", "OSError")
+    finally:
+        case.case_detach()

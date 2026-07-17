@@ -319,11 +319,11 @@ class _CaseAssertionRunner:
         or None after journaling an import failure. Modules are NOT placed in
         sys.modules — they are private to this runner (no global registry growth,
         matching the case-logger philosophy)."""
-        mtime = path.stat().st_mtime
         cached = self._module_cache.get(path)
-        if cached is not None and cached[0] == mtime:
-            return cached[1]
         try:
+            mtime = path.stat().st_mtime
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
             spec = importlib.util.spec_from_file_location(
                 f"_case_assertions__{self._case.case_id}__{path.stem}", path,
             )
