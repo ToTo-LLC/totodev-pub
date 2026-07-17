@@ -67,7 +67,9 @@ from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_type_spec import CaseTypeSpec
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
-from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournal, CaseEventJournalView
+from totodev_pub.folder_backed_case_support.case_journal import (
+    CaseEventJournal, CaseEventJournalView, CaseLastTransition,
+)
 from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.case_keep_manifest import CaseKeepManifest
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
@@ -88,7 +90,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FolderBackedCase", "FolderBackedCaseInterface", "CaseReadProtocol", "AssetSpec",
-    "CaseRecord", "CaseEventJournalView", "CaseAssets", "AdvanceResult",
+    "CaseRecord", "CaseEventJournalView", "CaseLastTransition", "CaseAssets", "AdvanceResult",
     "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",

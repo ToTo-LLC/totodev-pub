@@ -761,7 +761,8 @@ class FolderBackedCaseInterface(ABC):
         """A CaseEventJournalView over the folder's event journal — lock-free, no
         live case, no registry. Uniform across every case type (the journal format
         is not subclassed). Exposes ``current_state``, ``is_terminal``,
-        ``last_activity_at``, and ``.primitive`` for the raw journal.
+        ``last_activity_at``, ``last_transition()``, and ``.primitive`` for the
+        raw journal.
         """
         ...
 

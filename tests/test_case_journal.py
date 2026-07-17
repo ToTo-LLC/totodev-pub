@@ -11,7 +11,9 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_BASE_EVENT_PREFIX,
     EV_ALERTED,
 )
-from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournal, CaseEventJournalView
+from totodev_pub.folder_backed_case_support.case_journal import (
+    CaseEventJournal, CaseEventJournalView, CaseLastTransition,
+)
 
 
 def _journal(tmp_path) -> CaseEventJournal:
@@ -185,6 +187,46 @@ def test_last_state_entered_mtime_none_when_empty(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# last_transition() snapshot
+# ---------------------------------------------------------------------------
+
+def test_last_transition_none_when_empty(tmp_path):
+    journal = _journal(tmp_path)
+    assert journal.last_transition() is None
+
+
+def test_last_transition_inception_has_no_trigger_or_from(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_state_entered("new")
+    snap = journal.last_transition()
+    assert snap is not None
+    assert isinstance(snap, CaseLastTransition)
+    assert snap.to_state == "new"
+    assert snap.trigger is None
+    assert snap.from_state is None
+    assert snap.mtime == journal.last_state_entered_mtime()
+
+
+def test_last_transition_after_real_transition(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_state_entered("new")
+    journal.log_state_entered("open", trigger="go", from_state="new")
+    snap = journal.last_transition()
+    assert snap is not None
+    assert snap.from_state == "new"
+    assert snap.trigger == "go"
+    assert snap.to_state == "open"
+    assert snap.mtime == journal.last_state_entered_mtime()
+
+
+def test_last_transition_view_parity(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_state_entered("open", trigger="go", from_state="new")
+    view = journal.view()
+    assert view.last_transition() == journal.last_transition()
+
+
+# ---------------------------------------------------------------------------
 # In-flight trigger detection (unresolved CASE_TRIGGER_STARTED)
 # ---------------------------------------------------------------------------
 
@@ -241,6 +283,8 @@ def test_view_delegates_reads(tmp_path):
     view = journal.view()
     assert view.current_state == "open"
     assert view.count_fails_this_dwell() == 0
+    assert view.last_transition() is not None
+    assert view.last_transition().to_state == "open"
 
 
 def test_view_has_no_write_surface(tmp_path):
