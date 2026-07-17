@@ -15,16 +15,18 @@ def _write_text(path: Path, content: str = "x") -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def test_add_keep_rules_accepts_absolute_exact_path(tmp_path):
+def test_keep_list_strips_assets_prefix(tmp_path):
+    # Retention is mutated via the manifest directly (FolderBackedCase's job, not
+    # CaseAssets's) — CaseAssets only offers a read-only, prefix-stripped view.
     assets = CaseAssets(tmp_path / "case-abs-exact")
     _write_text(assets.asset_path("keep/me.txt"))
     _write_text(assets.asset_path("drop/me.txt"))
 
-    absolute_keep = assets.asset_path("keep/me.txt")
-    assets.add_keep_rules(str(absolute_keep))
+    assets.keep_manifest.add_rules("assets/keep/me.txt")
 
     assert assets.keep_list() == ["keep/me.txt"]
-    assert "assets/keep/me.txt" in assets.keep_manifest.list_rules()
+    assert assets.is_kept("keep/me.txt")
+    assert not assets.is_kept("drop/me.txt")
     purged = assets.keep_manifest.purge()
 
     assert purged == ["assets/drop/me.txt"]
@@ -32,14 +34,13 @@ def test_add_keep_rules_accepts_absolute_exact_path(tmp_path):
     assert not assets.asset_path("drop/me.txt").exists()
 
 
-def test_add_keep_rules_accepts_absolute_glob_path(tmp_path):
+def test_keep_list_strips_assets_prefix_for_glob_rules(tmp_path):
     assets = CaseAssets(tmp_path / "case-abs-glob")
     _write_text(assets.asset_path("results/a.json"))
     _write_text(assets.asset_path("results/b.txt"))
     _write_text(assets.asset_path("other/c.json"))
 
-    absolute_glob = f"{assets.folder.as_posix()}/results/*.json"
-    assets.add_keep_rules(absolute_glob)
+    assets.keep_manifest.add_rules("assets/results/*.json")
 
     assert assets.keep_list() == ["results/*.json"]
     purged = assets.keep_manifest.purge()
@@ -50,12 +51,11 @@ def test_add_keep_rules_accepts_absolute_glob_path(tmp_path):
     assert not assets.asset_path("other/c.json").exists()
 
 
-def test_remove_keep_rules_normalizes_absolute_rules(tmp_path):
+def test_keep_list_empty_after_manifest_remove(tmp_path):
     assets = CaseAssets(tmp_path / "case-remove-abs")
-    assets.add_keep_rules("reports/*.csv")
-    absolute_glob = f"{assets.folder.as_posix()}/reports/*.csv"
+    assets.keep_manifest.add_rules("assets/reports/*.csv")
 
-    assets.remove_keep_rules(absolute_glob)
+    assets.keep_manifest.remove_rules("assets/reports/*.csv")
 
     assert assets.keep_list() == []
 

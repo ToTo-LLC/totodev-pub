@@ -11,7 +11,8 @@ Design goals (see docs/folder-backed-case-folder-logging-design.md):
   * No process-global growth — the per-instance logger is constructed DIRECTLY
     (never via getLogger), so it is garbage-collected with the case and never
     enters the global logger registry.
-  * Retention is a process-global, out-of-band knob defaulting to PURGE.
+  * Log-file survival across purge is keepfile-driven (delete unless kept).
+    A process-global LogRetention knob can seed a keep rule at bind time.
 
 This module owns all logging mechanics; FolderBackedCase only wires them in.
 """
@@ -20,22 +21,25 @@ from __future__ import annotations
 
 import enum
 import logging
-import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
-from totodev_pub.folder_backed_case_support.constants import LOG_PURGE_SENTINEL
-from totodev_pub.folder_backed_case_support.helpers import _utcnow
-
-
 # The per-case file line format. Static identity (case_id, case_object_type) and
 # the dynamic current state are injected onto each record by _CaseContextFilter,
-# so a tee'd file is self-identifying without the caller doing anything.
+# so a tee'd file is self-identifying without the caller doing anything. `process`
+# is a standard LogRecord field (no filter needed) — carrying pid here means
+# callers never have to embed it in message text (see write_attach_banner).
 _LOG_FORMAT = (
-    "%(asctime)s %(levelname)s "
+    "%(asctime)s.%(msecs)03dZ %(levelname)s pid=%(process)d "
     "[%(case_object_type)s %(case_id)s @%(case_state)s] "
     "%(name)s: %(message)s"
 )
+# Every other timestamp this framework produces is aware-UTC (see `_utcnow()`), but
+# `logging.Formatter.converter` defaults to `time.localtime`. Force UTC here so
+# `asctime` agrees with the rest of the codebase instead of silently drifting to
+# whatever timezone the host process happens to run in.
+_LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 
 # The shared, registry-backed parent of every per-instance case logger. Per-case
 # loggers chain to this (and thence to root) for propagation, but are NOT children
@@ -44,10 +48,15 @@ _CASE_LOGGER_PARENT_NAME = "totodev_pub.case"
 
 
 class LogRetention(enum.Enum):
-    """What happens to a case's `logs/case.log` when the case reaches a terminal state."""
+    """Whether bind-time framework seeding should keep ``logs/case.log`` across purge.
 
-    PURGE = "purge"     # rewrite the file with a single sentinel line (default)
-    RETAIN = "retain"   # keep the full contents (typical for dev/test)
+    Purge itself only deletes unmatched files — this enum does not invent a second
+    purge mode. ``RETAIN`` causes ``CaseKeepManifest.ensure_framework_rules()`` to
+    seed a keep rule for the log file; ``PURGE`` leaves it unmatched (deleted).
+    """
+
+    PURGE = "purge"     # default: do not seed a keep rule; purge deletes the log
+    RETAIN = "retain"   # seed CASE_LOG_KEEP_RULE at bind (typical for dev/test)
 
 
 # Process-global default. Deliberately PURGE for a privacy-conscious production
@@ -56,11 +65,13 @@ _RETENTION: LogRetention = LogRetention.PURGE
 
 
 def set_case_log_retention(policy: LogRetention) -> None:
-    """Set the process-global termination retention policy for per-case folder logs.
+    """Set the process-global bind-time log keep-rule seeding policy.
 
     This is a coarse, out-of-band developer-debugging knob — NOT a per-object or
     mainstream-API setting. Call it once at process startup (e.g. a dev/test
-    bootstrap calls `set_case_log_retention(LogRetention.RETAIN)` to keep logs).
+    bootstrap calls `set_case_log_retention(LogRetention.RETAIN)` so new/rebound
+    cases seed a keep rule for ``logs/case.log``). Per-case retention without the
+    global knob is just ``case_keep_files("logs/case.log")``.
     """
     global _RETENTION
     if not isinstance(policy, LogRetention):
@@ -69,9 +80,8 @@ def set_case_log_retention(policy: LogRetention) -> None:
 
 
 def get_case_log_retention() -> LogRetention:
-    """The current process-global termination retention policy (defaults to PURGE)."""
+    """The current process-global bind-time log keep-rule seeding policy (defaults to PURGE)."""
     return _RETENTION
-
 
 class _CaseFileLogHandler(logging.Handler):
     """A close-after-write file handler: holds NO persistent descriptor.
@@ -95,6 +105,40 @@ class _CaseFileLogHandler(logging.Handler):
                 fh.write(msg + "\n")
         except Exception:                       # never let logging crash the case
             self.handleError(record)
+
+
+class _CaseLogger(logging.Logger):
+    """A directly-constructed (never-registered) ``Logger`` whose ``getChild`` ALSO
+    constructs directly.
+
+    Plain ``logging.Logger.getChild`` routes through ``Manager.getLogger``, which
+    would resolve against the GLOBAL registry — landing the child on the registered
+    `totodev_pub.case` parent (see ``_CASE_LOGGER_PARENT_NAME``) instead of on this
+    per-instance tee, silently skipping the per-case file handler, and leaking one
+    registry entry per case per distinct child name (defeating the whole
+    no-process-global-growth point of building this class directly in the first
+    place). Overriding ``getChild`` here means a helper sub-logger a hook creates
+    (``self.log.getChild("payments")``) behaves like an ordinary child logger —
+    propagates, has no handlers of its own — while still tee-ing into the same
+    per-case file, transparently.
+
+    Children are memoized per suffix so repeated calls return the same object
+    (matching the registry-backed lookup semantics a caller would otherwise expect),
+    without the children themselves ever touching the registry.
+    """
+
+    def getChild(self, suffix: str) -> "_CaseLogger":
+        cache: dict[str, "_CaseLogger"] = self.__dict__.setdefault("_case_children", {})
+        child = cache.get(suffix)
+        if child is None:
+            child = _CaseLogger(f"{self.name}.{suffix}")
+            child.parent = self
+            child.propagate = True
+            # NOTSET: no opinion of its own — defers to the parent's effective level
+            # (DEBUG, per build_case_logger), same as an ordinary child logger would.
+            child.setLevel(logging.NOTSET)
+            cache[suffix] = child
+        return child
 
 
 class _CaseContextFilter(logging.Filter):
@@ -143,7 +187,7 @@ def build_case_logger(
     propagate up to root (the "default logging" half of the tee). A single
     close-after-write handler supplies the per-case-file half.
     """
-    lg = logging.Logger(f"{_CASE_LOGGER_PARENT_NAME}.{case_id}")
+    lg = _CaseLogger(f"{_CASE_LOGGER_PARENT_NAME}.{case_id}")
     lg.parent = logging.getLogger(_CASE_LOGGER_PARENT_NAME)
     lg.propagate = True
     # Capture verbose detail in the per-case file regardless of the app's root
@@ -152,7 +196,9 @@ def build_case_logger(
 
     handler = _CaseFileLogHandler(Path(log_path))
     handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    formatter = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+    formatter.converter = time.gmtime      # UTC, matching every other timestamp we emit
+    handler.setFormatter(formatter)
     handler.addFilter(_CaseContextFilter(case_id, case_object_type, state_provider))
     lg.addHandler(handler)
     return lg
@@ -160,19 +206,36 @@ def build_case_logger(
 
 def write_attach_banner(logger: logging.Logger) -> None:
     """Emit a one-line banner marking a fresh attach session, so multiple
-    open/close episodes are visually separable within the single appended file."""
-    logger.info("--- attached %s (pid %d) ---", _utcnow().isoformat(), os.getpid())
+    open/close episodes are visually separable within the single appended file.
+
+    Carries no timestamp or pid of its own — ``%(asctime)s`` and ``%(process)d``
+    in ``_LOG_FORMAT`` already supply both as ordinary, parseable record fields,
+    same as every other line in the file."""
+    logger.info("--- case attached ---")
 
 
-def purge_case_log(log_path: Path) -> None:
-    """Apply the PURGE policy: rewrite the log file with a single sentinel line.
+def write_detach_banner(logger: logging.Logger) -> None:
+    """Emit a one-line banner marking a closed attach session — the symmetric
+    bookend to ``write_attach_banner``. Call BEFORE ``disable_case_file_tee``
+    so the banner itself still lands in the per-case file as its closing line."""
+    logger.info("--- case detached ---")
 
-    The file is rewritten in place (never unlinked) and `logs/` is left intact,
-    so the case folder layout stays stable. Because the handler holds no open
-    descriptor, this is a plain write with no live-handle coordination. A missing
-    file is a no-op.
+
+def disable_case_file_tee(logger: logging.Logger) -> None:
+    """Remove and close this logger's per-case file handler(s); leaves the logger
+    otherwise usable (still propagates to root — the "default logging" half of the
+    tee keeps working) but no longer able to write into the case folder.
+
+    Call this on detach: a detached object no longer holds the folder's lease, so it
+    must never write into a folder another process may now own by then (the SAME
+    invariant that delays building this tee, at attach time, until AFTER the lease is
+    acquired — see FolderBackedCase._bind_existing_case_dir). Targets only
+    ``_CaseFileLogHandler`` instances, so any handler a caller added by hand (e.g.
+    ``case.log.addHandler(...)``) is left alone. Idempotent — a no-op past the first
+    call, including on repeat ``case_detach()`` calls.
     """
-    p = Path(log_path)
-    if not p.exists():
-        return
-    p.write_text(LOG_PURGE_SENTINEL + "\n", encoding="utf-8")
+    for handler in list(logger.handlers):
+        if isinstance(handler, _CaseFileLogHandler):
+            logger.removeHandler(handler)
+            handler.close()
+

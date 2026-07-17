@@ -4,9 +4,9 @@
 """Tests for the per-case folder-logging tee (logs/case.log).
 
 Covers: the tee itself, always-on across every live-instance path, the reserved
-artifact guard, the default-PURGE / RETAIN closure policy, layout isolation from
-the asset playground, and resource frugality (no idle file descriptors, no
-process-global logger-registry growth).
+artifact guard, keepfile-driven log retention (delete unless kept), layout
+isolation from the asset playground, and resource frugality (no idle file
+descriptors, no process-global logger-registry growth).
 """
 
 import asyncio
@@ -21,10 +21,10 @@ from totodev_pub.folder_backed_case import (
     set_case_log_retention,
 )
 from totodev_pub.folder_backed_case_support import get_case_log_retention
+from totodev_pub.folder_backed_case_support.case_keep_manifest import CaseKeepManifest
 from totodev_pub.folder_backed_case_support.constants import (
     LOGS_DIR_NAME,
     LOG_FILE_NAME,
-    LOG_PURGE_SENTINEL,
 )
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
@@ -45,6 +45,28 @@ class LogReclassTarget(FolderBackedCase):
     fsm_trigger_chokes = {}
     """Shares the 'new' state with LogCase so reclassify from a fresh case is legal."""
     fsm_state_chains = ["^new==go-->finished^"]
+
+
+class FailingHookCase(FolderBackedCase):
+    """A manual trigger whose perform_ hook always raises, for exception-tee tests."""
+
+    asset_aliases = []
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^new==begin-->open^"]
+
+    async def perform_begin(self, tctx) -> None:
+        raise RuntimeError("boom-in-hook")
+
+
+class KeepLogsOnTerminateCase(FolderBackedCase):
+    """Opts into log retention from on_terminating() via the keep manifest."""
+
+    asset_aliases = []
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^new==finish-->done^"]
+
+    def on_terminating(self) -> None:
+        self.case_keep_files(f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}")
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +118,29 @@ def test_tee_to_both_root_and_file(tmp_path, caplog):
         assert "tee-1" in contents
         assert "LogCase" in contents
 
+    finally:
+        case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# Trigger/guard/hook exceptions are tee'd automatically (full traceback)
+# ---------------------------------------------------------------------------
+
+
+def test_trigger_exception_teed_with_traceback(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    folder = tmp_path / "exc"
+    case = FailingHookCase.create_case_in_folder(folder, case_id="exc-1")
+    try:
+        with pytest.raises(RuntimeError, match="boom-in-hook"):
+            asyncio.run(case.begin())
+        # Full traceback in the per-case file — NOT just the journal's terse fact.
+        contents = _log_path(folder).read_text(encoding="utf-8")
+        assert "boom-in-hook" in contents
+        assert "Traceback" in contents
+        assert "RuntimeError" in contents
+        # And propagated to root, same as any other self.log record.
+        assert any("boom-in-hook" in r.getMessage() for r in caplog.records)
     finally:
         case.case_detach()
 
@@ -162,11 +207,14 @@ def test_logs_dir_is_reserved_artifact(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Closure retention policy
+# Closure retention: keepfile delete-or-keep (no truncation)
 # ---------------------------------------------------------------------------
 
 
-def test_purge_default_on_close(tmp_path):
+def test_purge_default_deletes_log_on_close(tmp_path):
+    """Default: logs/case.log is not a framework keep rule, so purge deletes it.
+    Detach may recreate a short session-banner file afterward — pre-purge content
+    must still be gone."""
     folder = tmp_path / "purge"
     case = LogCase.create_case_in_folder(folder, case_id="c-5")
     try:
@@ -176,12 +224,11 @@ def test_purge_default_on_close(tmp_path):
         assert case.case_is_terminal
     finally:
         case.case_detach()
-    contents = _log_path(folder).read_text(encoding="utf-8")
-    assert contents.strip() == LOG_PURGE_SENTINEL
-    assert "should-be-purged-marker" not in contents
+    assert "should-be-purged-marker" not in _log_path(folder).read_text(encoding="utf-8")
 
 
-def test_retain_preserves_contents_on_close(tmp_path):
+def test_global_retain_preserves_log_on_close(tmp_path):
+    """LogRetention.RETAIN seeds a keep rule at bind time; purge then keeps the file."""
     set_case_log_retention(LogRetention.RETAIN)
     folder = tmp_path / "retain"
     case = LogCase.create_case_in_folder(folder, case_id="c-6")
@@ -194,7 +241,79 @@ def test_retain_preserves_contents_on_close(tmp_path):
         case.case_detach()
     contents = _log_path(folder).read_text(encoding="utf-8")
     assert "should-survive-marker" in contents
-    assert LOG_PURGE_SENTINEL not in contents
+
+
+def test_case_keep_files_keeps_log_across_termination_purge(tmp_path):
+    """Per-case opt-in is just an ordinary keep rule."""
+    folder = tmp_path / "retain-logs"
+    case = LogCase.create_case_in_folder(folder, case_id="rl-1")
+    try:
+        case.log.info("keep-me-marker")
+        case.case_keep_files(f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}")
+        assert get_case_log_retention() is LogRetention.PURGE
+        asyncio.run(case.begin())
+        asyncio.run(case.finish())
+        assert case.case_is_terminal
+    finally:
+        case.case_detach()
+    contents = _log_path(folder).read_text(encoding="utf-8")
+    assert "keep-me-marker" in contents
+
+
+def test_keep_logs_from_on_terminating(tmp_path):
+    """Judged at wind-down via case_keep_files() in on_terminating()."""
+    folder = tmp_path / "retain-on-terminate"
+    case = KeepLogsOnTerminateCase.create_case_in_folder(folder, case_id="rot-1")
+    try:
+        case.log.info("keep-me-too-marker")
+        asyncio.run(case.finish())
+        assert case.case_is_terminal
+    finally:
+        case.case_detach()
+    contents = _log_path(folder).read_text(encoding="utf-8")
+    assert "keep-me-too-marker" in contents
+
+
+# ---------------------------------------------------------------------------
+# Direct CaseKeepManifest.purge() — same keepfile rules, no special log path
+# ---------------------------------------------------------------------------
+
+
+def test_direct_manifest_purge_deletes_log_by_default(tmp_path):
+    folder = tmp_path / "direct-purge"
+    case = LogCase.create_case_in_folder(folder, case_id="dp-1")
+    try:
+        case.log.info("direct-purge-marker")
+    finally:
+        case.case_detach()
+    CaseKeepManifest(folder).purge()
+    assert not _log_path(folder).exists()
+
+
+def test_direct_manifest_purge_keeps_log_with_keep_rule(tmp_path):
+    folder = tmp_path / "direct-purge-retain"
+    case = LogCase.create_case_in_folder(folder, case_id="dp-2")
+    try:
+        case.log.info("direct-purge-retain-marker")
+        case.case_keep_files(f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}")
+    finally:
+        case.case_detach()
+    CaseKeepManifest(folder).purge()
+    contents = _log_path(folder).read_text(encoding="utf-8")
+    assert "direct-purge-retain-marker" in contents
+
+
+def test_direct_manifest_purge_keeps_log_under_global_retain(tmp_path):
+    set_case_log_retention(LogRetention.RETAIN)
+    folder = tmp_path / "direct-purge-global-retain"
+    case = LogCase.create_case_in_folder(folder, case_id="dp-3")
+    try:
+        case.log.info("global-retain-marker")
+    finally:
+        case.case_detach()
+    CaseKeepManifest(folder).purge()
+    contents = _log_path(folder).read_text(encoding="utf-8")
+    assert "global-retain-marker" in contents
 
 
 # ---------------------------------------------------------------------------
@@ -212,10 +331,9 @@ def test_logs_isolated_from_assets(tmp_path):
         assert all(
             not rel.startswith(LOGS_DIR_NAME) for rel in case.case_assets.list_assets()
         )
-        # Case-wide purge must not touch the log file (baseline keeps logs/case.log).
+        # Default purge deletes the log file like any other unmatched path.
         case._keep_manifest.purge()
-        assert _log_path(folder).exists()
-        assert "isolation-marker" in _log_path(folder).read_text(encoding="utf-8")
+        assert not _log_path(folder).exists()
 
     finally:
         case.case_detach()
@@ -287,3 +405,105 @@ def test_per_case_loggers_do_not_pollute_registry(tmp_path):
     finally:
         for c in cases:
             c.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# self.log.getChild(): stays tee'd, stays out of the registry
+# ---------------------------------------------------------------------------
+
+
+def test_get_child_stays_teed(tmp_path):
+    folder = tmp_path / "getchild"
+    case = LogCase.create_case_in_folder(folder, case_id="gc-1")
+    try:
+        helper_log = case.log.getChild("helper")
+        helper_log.info("child-marker-xyz")
+        contents = _log_path(folder).read_text(encoding="utf-8")
+        assert "child-marker-xyz" in contents
+        # Self-identifying like any tee'd record (same filter, same case identity).
+        assert "gc-1" in contents
+    finally:
+        case.case_detach()
+
+
+def test_get_child_is_memoized_and_registry_clean(tmp_path):
+    registry = logging.Logger.manager.loggerDict
+    folder = tmp_path / "getchild-registry"
+    case = LogCase.create_case_in_folder(folder, case_id="gc-2")
+    try:
+        child_a = case.log.getChild("helper")
+        child_b = case.log.getChild("helper")
+        assert child_a is child_b  # same suffix -> same object, ordinary getChild semantics
+        assert "totodev_pub.case.gc-2.helper" not in registry
+    finally:
+        case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# Detach: closing banner + tee disabled (post-detach records still propagate to
+# root, but never reach the case folder again)
+# ---------------------------------------------------------------------------
+
+
+def test_detach_writes_banner_then_disables_tee(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    folder = tmp_path / "detach"
+    case = LogCase.create_case_in_folder(folder, case_id="det-1")
+    log = case.log
+    case.case_detach()
+
+    contents_after_detach = _log_path(folder).read_text(encoding="utf-8")
+    assert "detached" in contents_after_detach
+
+    caplog.clear()
+    log.info("post-detach-marker")
+    # Still an ordinary logger — still propagates to root...
+    assert any("post-detach-marker" in r.getMessage() for r in caplog.records)
+    # ...but the file handler is gone, so the folder is never written to again.
+    contents_unchanged = _log_path(folder).read_text(encoding="utf-8")
+    assert contents_unchanged == contents_after_detach
+    assert "post-detach-marker" not in contents_unchanged
+
+
+def test_detach_is_idempotent(tmp_path):
+    folder = tmp_path / "detach-twice"
+    case = LogCase.create_case_in_folder(folder, case_id="det-2")
+    case.case_detach()
+    contents_once = _log_path(folder).read_text(encoding="utf-8")
+    case.case_detach()  # must not raise, must not write a second banner
+    contents_twice = _log_path(folder).read_text(encoding="utf-8")
+    assert contents_once == contents_twice
+
+
+def test_detach_on_terminal_case_writes_banner_after_purge(tmp_path):
+    """Purge deletes the log; detach then recreates a short session-banner file.
+    Pre-purge content must not reappear."""
+    folder = tmp_path / "detach-terminal"
+    case = LogCase.create_case_in_folder(folder, case_id="det-3")
+    case.log.info("pre-purge-marker")
+    asyncio.run(case.begin())
+    asyncio.run(case.finish())
+    assert case.case_is_terminal
+    case.case_detach()
+    contents = _log_path(folder).read_text(encoding="utf-8")
+    assert "pre-purge-marker" not in contents
+    assert "detached" in contents
+
+
+def test_rehydrate_of_terminal_case_writes_attach_banner(tmp_path):
+    """Reopening an already-terminal case still gets a fresh attach banner."""
+    folder = tmp_path / "rehydrate-terminal"
+    case = LogCase.create_case_in_folder(folder, case_id="det-4")
+    case.log.info("pre-purge-marker")
+    asyncio.run(case.begin())
+    asyncio.run(case.finish())
+    case.case_detach()
+    sealed = _log_path(folder).read_text(encoding="utf-8")
+    assert "pre-purge-marker" not in sealed
+    assert "attached" not in sealed  # only this case's closing banner so far
+
+    reopened = LogCase(folder)
+    contents = _log_path(folder).read_text(encoding="utf-8")
+    assert "attached" in contents
+    assert "pre-purge-marker" not in contents
+    reopened.case_detach()

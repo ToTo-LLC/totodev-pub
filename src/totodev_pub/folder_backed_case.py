@@ -39,14 +39,14 @@ from totodev_pub.folder_backed_case_support.folder_backed_case_interface import 
     FolderBackedCaseInterface, _raises_when_detached,
 )
 from totodev_pub.folder_backed_case_support.constants import (
-    RECORD_NAME, LEASE_NAME, LOGS_DIR_NAME, LOG_FILE_NAME,
+    RECORD_NAME, LEASE_NAME, LOGS_DIR_NAME, LOG_FILE_NAME, ASSETS_DIR_NAME,
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
     DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
     EV_TERMINATED, SIG_TERMINATING,
 )
 from totodev_pub.folder_backed_case_support.helpers import (
-    _utcnow, _local_mtime_as_utc,
+    _utcnow, _local_mtime_as_utc, _norm_rel,
 )
 from totodev_pub.folder_backed_case_support.case_id_generation import (
     CaseIDGenerator, TimeSlugCaseIDGenerator, DEFAULT_CASE_ID_GENERATOR,
@@ -72,8 +72,8 @@ from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser, FsmChainSpec,)
 from totodev_pub.folder_backed_case_support.case_machine_factory import _CaseMachineFactory
 from totodev_pub.folder_backed_case_support.case_logging import (
-    LogRetention, set_case_log_retention, get_case_log_retention,
-    build_case_logger, write_attach_banner, purge_case_log,
+    LogRetention, set_case_log_retention,
+    build_case_logger, write_attach_banner, write_detach_banner, disable_case_file_tee,
 )
 from totodev_pub.folder_backed_case_support.case_read_protocol import CaseReadProtocol
 
@@ -206,13 +206,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # cls.__name__ here, so it satisfies the _flush_record type-name guard.
         record.save(str(case_folder / RECORD_NAME))
         case = cls(case_folder)
-        keep_paths = [
-            spec.relative_path
-            for spec in book.spec_map().values()
-            if spec.keep
-        ]
-        if keep_paths:
-            case.case_assets.add_keep_rules(*keep_paths)
+        cls._seed_keep_rules(case._keep_manifest)
         case._journal.log_created(
             cls.__name__,
             case_id=record.case_id,
@@ -226,7 +220,21 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # are documented in SECTION 4 (__init__) and the CaseTypeRegistry, respectively.
 
     def case_detach(self) -> None:
-        if self._lease is not None:
+        # Guarded on is_active() (not just "is not None"), so this runs exactly ONCE per
+        # live attach — idempotent against a repeat explicit call, __del__ calling it
+        # again, or mid-reclassify's internal call. Banner + tee-disable happen BEFORE
+        # release(): we must still legitimately own the folder to write either.
+        #
+        # Always written, even on a terminal case: attach/detach banners are SESSION
+        # markers for this in-memory instance, not a claim about the log FILE's
+        # lifecycle. A terminal case can still be legitimately rehydrated later (nothing
+        # gates __init__ on case_is_terminal), and that rehydrate unconditionally writes
+        # its own attach banner — so pretending detach could "reseal" a purged file was
+        # already false. Keeping both bookends symmetric and unconditional is simpler and
+        # doesn't claim a guarantee ("never touched again") the code can't actually make.
+        if self._lease is not None and self._lease.is_active():
+            write_detach_banner(self.log)
+            disable_case_file_tee(self.log)
             self._lease.release()
 
     @_raises_when_detached
@@ -310,10 +318,11 @@ class FolderBackedCase(FolderBackedCaseInterface):
     @property
     def case_assets(self) -> CaseAssets:
         # Kept off this class's own namespace so asset concerns stay grouped in
-        # one place. For non-asset files, use `case_keep_assets()` instead.
+        # one place. For non-asset files (or a runtime keep decision at any scope,
+        # assets included), use `case_keep_files()` instead.
         return self._assets
 
-    def case_keep_assets(self, *patterns: str | Path) -> None:
+    def case_keep_files(self, *patterns: str | Path) -> None:
         self._keep_manifest.add_rules(*patterns)
 
     def case_load_asset(self, alias: str) -> object:
@@ -408,15 +417,19 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return cls._asset_book
 
     @classmethod
-    def _seed_keep_rules(cls, assets: CaseAssets) -> None:
-        """Append keep rules for every declaration with keep=True (idempotent)."""
+    def _seed_keep_rules(cls, keep_manifest: CaseKeepManifest) -> None:
+        """Append keep rules for every declaration with keep=True (idempotent).
+
+        Writes directly into the case-root manifest, applying the ``assets/`` prefix
+        HERE — retention is a case-level decision, not something CaseAssets manages on
+        its own behalf (see the ``CaseAssets`` class docstring)."""
         paths = [
             spec.relative_path
             for spec in cls._resolve_asset_book().spec_map().values()
             if spec.keep
         ]
         if paths:
-            assets.add_keep_rules(*paths)
+            keep_manifest.add_rules(*(f"{ASSETS_DIR_NAME}/{_norm_rel(p)}" for p in paths))
 
     @classmethod
     def _require_fsm_trigger_chokes_declared(cls) -> None:
@@ -510,11 +523,13 @@ class FolderBackedCase(FolderBackedCaseInterface):
 
     def on_terminating(self) -> None:
         """Overridable hook fired in phase 1 (pre-finalization): assets still exist,
-        record not yet stamped. Override to retain/extract final artifacts before the
-        ephemeral purge — call ``case_keep_assets()`` for non-asset paths or
-        ``case_assets.add_keep_rules()`` for assets. Default: no-op. Heavy async work
-        belongs in an async ``before_`` hook on the terminating transition; this hook is
-        synchronous."""
+        record not yet stamped. Override to retain final artifacts before the
+        ephemeral purge — a RUNTIME keep decision that can't be made declaratively via
+        ``AssetSpec(keep=True)`` (e.g. "keep the draft only if it got this far"). Call
+        ``case_keep_files()`` with the full case-relative path (``"assets/..."`` for an
+        asset, since this method is case-root scoped, not assets-scoped). Default:
+        no-op. Heavy async work belongs in an async ``before_`` hook on the
+        terminating transition; this hook is synchronous."""
 
     def case_ext_status_info(self) -> dict[str, Any]:
         """Overridable hook for extended status when a case runs under ``CaseManager``.
@@ -648,7 +663,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         fresh._record.asset_aliases = type(fresh)._resolve_asset_book().to_record()
         fresh._record.fsm_state_chains = list(type(fresh).fsm_state_chains)
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
-        type(fresh)._seed_keep_rules(fresh.case_assets)
+        type(fresh)._seed_keep_rules(fresh._keep_manifest)
         for fn in self._listeners:
             fresh.case_add_transition_listener(fn)
         return fresh
@@ -864,8 +879,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
 
         Retention at close is manifest-driven: ``_keep.txt`` at the case root lists
         every file that survives purge. Framework artifacts are seeded automatically;
-        subclasses must call ``case_keep_assets()`` (or ``case_assets.add_keep_rules()``
-        for assets) for any custom files they want retained."""
+        for assets, prefer declaring ``AssetSpec(keep=True)`` (seeded automatically
+        too); for any other runtime keep decision, call ``case_keep_files()``."""
         self._bind_existing_case_dir(case_folder, check_type=True)
 
     def _bind_existing_case_dir(
@@ -1069,11 +1084,9 @@ class FolderBackedCase(FolderBackedCaseInterface):
             self.on_terminating()
             self._notify(SIG_TERMINATING, src=src, dest=dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
+            # ONE purge process for everything ephemeral: unmatched keepfile paths
+            # are deleted (logs included unless a keep rule covers them).
             self._keep_manifest.purge()
-            # The case logically ends here; apply the termination log-retention policy alongside
-            # the asset purge. PURGE rewrites logs/case.log with a single sentinel line.
-            if get_case_log_retention() is LogRetention.PURGE:
-                purge_case_log(self._folder / LOGS_DIR_NAME / LOG_FILE_NAME)
             self._record.terminal = self._last_activity_at
             self._record.terminal_state = dest
             self._flush_record(force=True)
@@ -1162,6 +1175,18 @@ class FolderBackedCase(FolderBackedCaseInterface):
             self._journal.log_entry_exception(dest or src, detail)
         else:
             self._journal.log_transition_failed(trigger or src, detail)
+
+        # 3b. Tee the full traceback into the case's own log (and, via propagation, the
+        # main log) — the journal fact above is terse-by-design (type name + truncated
+        # message), so this is the ONLY place a subclass's own trigger/guard/hook
+        # exceptions get a full stack trace in logs/case.log. Safe to reach this far down:
+        # both early returns above (OwnershipLostError, CaseTransitionInFlightError) raise
+        # BEFORE this point, so we never log — or otherwise touch the folder — on behalf
+        # of a call that no longer legitimately owns it.
+        self.log.error(
+            "trigger %r raised %s during transition %s -> %s",
+            trigger, type(err).__name__, src, dest, exc_info=err,
+        )
 
         # 4. Let the case react. final_state reflects where we actually ended up.
         final_state = dest if post_commit else src

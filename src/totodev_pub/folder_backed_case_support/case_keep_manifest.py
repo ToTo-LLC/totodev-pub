@@ -8,7 +8,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path, PurePosixPath
 
+from totodev_pub.folder_backed_case_support.case_logging import (
+    LogRetention, get_case_log_retention,
+)
 from totodev_pub.folder_backed_case_support.constants import (
+    CASE_LOG_KEEP_RULE,
     FRAMEWORK_KEEP_RULES,
     KEEP_LIST_NAME,
     LEASE_NAME,
@@ -82,14 +86,25 @@ class CaseKeepManifest:
             self._write_rules(kept)
 
     def ensure_framework_rules(self) -> None:
-        """Idempotently seed baseline framework keep rules."""
-        self.add_rules(*FRAMEWORK_KEEP_RULES)
+        """Idempotently seed baseline framework keep rules.
+
+        When the process-global log-retention policy is ``LogRetention.RETAIN``,
+        also seeds ``CASE_LOG_KEEP_RULE`` so purge keeps ``logs/case.log``.
+        """
+        rules: list[str] = list(FRAMEWORK_KEEP_RULES)
+        if get_case_log_retention() is LogRetention.RETAIN:
+            rules.append(CASE_LOG_KEEP_RULE)
+        self.add_rules(*rules)
 
     def purge(self) -> list[str]:
         """Delete every case file matching no keep rule; prune empty dirs.
 
-        Returns sorted case-relative paths removed. Hard skip paths and the case
-        root itself are never deleted."""
+        ONE purge process for ALL case ephemera — this is the single chokepoint every
+        caller (termination, the CaseManager's redundant purge sweep, ad hoc test/ops
+        cleanup) goes through. Returns sorted case-relative paths of files DELETED.
+
+        Hard skip paths and the case root itself are never deleted. Log files are not
+        special: they survive only when a keep rule matches them."""
         root = self._case_folder
         if not root.exists():
             return []

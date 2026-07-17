@@ -124,7 +124,6 @@ def test_guarded_load_allowed_in_listed_state(tmp_path):
         case.case_assets.write(
             "ticket.yaml",
             b"title: hello\n",
-            keep=False,
         )
         obj = case.case_load_asset("ticket")
         assert isinstance(obj, TicketForm)
@@ -247,7 +246,9 @@ def test_keep_true_seeds_manifest_at_create(tmp_path):
         case.case_assets.write("ticket.yaml", b"title: kept\n")
         case.case_assets.write("scratch.txt", b"ephemeral")
         purged = case._keep_manifest.purge()
-        assert purged == ["assets/scratch.txt"]
+        # logs/case.log is purged too — one chokepoint for ALL case ephemera, logs
+        # included, unless a keep rule covers them (not the concern of this test).
+        assert purged == ["assets/scratch.txt", "logs/case.log"]
         assert case.case_assets.asset_path("ticket.yaml").exists()
     finally:
         case.case_detach()
@@ -281,14 +282,14 @@ def test_bypass_via_case_assets_ignores_gate(tmp_path):
         case.case_detach()
 
 
-def test_case_keep_assets_retains_custom_file(tmp_path):
+def test_case_keep_files_retains_custom_file(tmp_path):
     folder = tmp_path / "custom-keep"
     case = TicketCase.create_case_in_folder(folder)
     try:
         export = folder / "exports" / "summary.pdf"
         export.parent.mkdir(parents=True)
         export.write_bytes(b"%PDF-summary")
-        case.case_keep_assets("exports/summary.pdf")
+        case.case_keep_files("exports/summary.pdf")
         case.case_assets.write("scratch.txt", b"ephemeral")
         purged = case._keep_manifest.purge()
         assert "assets/scratch.txt" in purged

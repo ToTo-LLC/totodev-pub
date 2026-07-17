@@ -47,11 +47,26 @@ def test_framework_rules_protect_standard_artifacts(tmp_path):
     purged = manifest.purge()
 
     assert "scratch.tmp" in purged
+    assert f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}" in purged
     assert (case_folder / RECORD_NAME).exists()
     assert (case_folder / "events" / "evt.json").exists()
-    assert (case_folder / LOGS_DIR_NAME / LOG_FILE_NAME).exists()
+    assert not (case_folder / LOGS_DIR_NAME / LOG_FILE_NAME).exists()
     assert (case_folder / "assets" / "kept.txt").exists()
     assert not (case_folder / "scratch.tmp").exists()
+
+
+def test_keep_rule_retains_case_log(tmp_path):
+    case_folder = tmp_path / "case-keep-log"
+    case_folder.mkdir()
+    _write_text(case_folder / LOGS_DIR_NAME / LOG_FILE_NAME, "keep-me\n")
+
+    manifest = CaseKeepManifest(case_folder)
+    manifest.ensure_framework_rules()
+    manifest.add_rules(f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}")
+    purged = manifest.purge()
+
+    assert f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}" not in purged
+    assert (case_folder / LOGS_DIR_NAME / LOG_FILE_NAME).read_text(encoding="utf-8") == "keep-me\n"
 
 
 def test_purge_deletes_ephemeral_assets(tmp_path):

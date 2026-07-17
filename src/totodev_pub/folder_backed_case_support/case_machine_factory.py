@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import operator
 import time
 from typing import TYPE_CHECKING
@@ -35,8 +34,6 @@ from totodev_pub.folder_backed_case_support.state_chain_parser import (
 
 if TYPE_CHECKING:
     from totodev_pub.folder_backed_case import FolderBackedCase
-
-logger = logging.getLogger(__name__)
 
 # Comparator name -> callable, for compiling `@FACT<op>N` factual guards into condition
 # functions. Equality is intentionally absent (the DSL forbids ==/!=).
@@ -89,9 +86,13 @@ class _LeaseKeepalive:
                     # as OwnershipLostError on a later beat, or at the next boundary/pre-step
                     # beat — we deliberately do not abort the (succeeding) work over it. The
                     # leading sleep paces retries, so this cannot busy-spin.
-                    logger.warning(
-                        "Case %s: in-flight lease beat failed; retrying on next cadence.",
-                        getattr(self._case, "case_id", "?"), exc_info=True,
+                    # Tee'd on the case's OWN log (not the module logger): this is a fact
+                    # about this case's health, and the case unambiguously still owns the
+                    # folder at this point (we are mid in-flight work, lease presumed live —
+                    # OwnershipLostError, handled above, is the only case that says otherwise).
+                    self._case.log.warning(
+                        "in-flight lease beat failed; retrying on next cadence.",
+                        exc_info=True,
                     )
         except asyncio.CancelledError:
             return
@@ -193,12 +194,14 @@ class _CaseMachineFactory:
             # (its `~<dur>` warning, doubled to the kill ceiling) is visible against the TTL.
             if kill > DEFAULT_LEASE_TTL_SECS and state not in ttl_warned_states:
                 ttl_warned_states.add(state)
-                logger.warning(
-                    "Case %s: trigger %r in state %r has a kill ceiling (%.1fs) above the "
+                # Tee'd on the case's own log: an advisory about THIS case's trigger
+                # budget, and the case owns its folder throughout normal dispatch.
+                case.log.warning(
+                    "trigger %r in state %r has a kill ceiling (%.1fs) above the "
                     "lease TTL (%.1fs). The in-flight keepalive will refresh the lease for "
                     "well-behaved async work, but a step that blocks the event loop could "
                     "still let the lease lapse; consider a shorter trigger_warn_secs.",
-                    case.case_id, trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
+                    trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
                 )
             # CASE_TRIGGER_STARTED before work (see CaseEventJournal.log_trigger_started).
             journal.log_trigger_started(trigger, state=state, warn=warn, kill=kill)

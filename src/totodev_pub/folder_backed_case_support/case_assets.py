@@ -1,7 +1,9 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""CaseAssets: the case's working-file playground plus the retention manifest."""
+"""CaseAssets: the case's working-file playground, plus a read-only view onto the
+case-level retention manifest (mutating it is FolderBackedCase's job, not this
+class's — see the CaseAssets class docstring)."""
 
 from __future__ import annotations
 
@@ -19,21 +21,20 @@ _ASSETS_PREFIX = f"{ASSETS_DIR_NAME}/"
 
 
 class CaseAssets:
-    """Owns the case's working files and the retention decision, grouping all asset
-    operations OUT of the FolderBackedCase namespace. Reach it via `case.case_assets`.
+    """Owns the case's working-file PLAYGROUND, grouping asset I/O out of the
+    FolderBackedCase namespace. Reach it via `case.case_assets`.
 
-    Two deliberately separated locations:
-      * <case_folder>/assets/          — the PLAYGROUND. Entirely under downstream code's
-        control: this class never moves, renames, or silently injects files there, so a
-        caller can organize subfolders however it likes and trust what it put there.
-      * <case_folder>/_keep.txt        — the retention MANIFEST at the case root. Rules
-        are case-relative; asset keep rules are stored with an ``assets/`` prefix.
+    Retention (deciding what survives the termination purge) is deliberately NOT this
+    class's job — that's a case-level policy decision, not an assets-playground one.
+    The preferred way to keep an asset is declarative: ``AssetSpec(keep=True)`` at
+    class-definition time, seeded into the manifest automatically at create/bind/
+    reclassify. For a one-off, runtime decision (including for an asset, by its full
+    ``assets/...``-prefixed path), use ``case.case_keep_files()`` on the case object.
 
-    Retention is recorded as RULES in the manifest (exact relative paths or globs). An
-    asset survives close only if at least one keep rule matches it. ``keep_list()`` on
-    this class returns the asset-facing view (``assets/`` prefix stripped); inspect
-    ``_keep.txt`` directly for the full case-wide policy. Blank lines and ``#`` comments
-    in the manifest are ignored."""
+    This class only offers a READ-ONLY, asset-facing VIEW onto that manifest:
+    ``keep_list()`` / ``keep_set()`` / ``is_kept()`` return case-relative asset paths
+    with the ``assets/`` prefix stripped for convenience; inspect ``_keep.txt`` (or
+    ``keep_manifest.list_rules()``) directly for the full case-wide policy."""
 
     def __init__(self, case_folder: Path, *,
                  asset_specs: dict[str, AssetSpec] | None = None,
@@ -125,25 +126,17 @@ class CaseAssets:
         rel = self.relative_path(relative_path)
         return self._keep.is_kept(f"{_ASSETS_PREFIX}{rel}")
 
-    def add_keep_rules(self, *rules: str | Path) -> None:
-        """Add asset retention rules (exact relative path or glob under assets/).
-        Append-only and idempotent."""
-        self._keep.add_rules(*(self._asset_rule(rule) for rule in rules))
-
-    def remove_keep_rules(self, *rules: str | Path) -> None:
-        """Remove asset rules from the manifest. Does not delete files."""
-        self._keep.remove_rules(*(self._asset_rule(rule) for rule in rules))
-
     # ---- convenience I/O (thin; the assets dir is the caller's playground) ----
 
-    def write(self, relative_path: str, data: bytes, *, keep: bool = False) -> Path:
-        """Write bytes to an asset path, creating parent dirs. keep=True also records it
-        in the retention manifest. Returns the absolute path."""
+    def write(self, relative_path: str, data: bytes) -> Path:
+        """Write bytes to an asset path, creating parent dirs. Returns the absolute path.
+
+        To retain the file across the termination purge, prefer declaring
+        ``AssetSpec(keep=True)`` (the class-level, declarative mechanism); for a
+        runtime decision, call ``case.case_keep_files(f"assets/{relative_path}")``."""
         target = self.asset_path(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if keep:
-            self.add_keep_rules(relative_path)
         return target
 
     def read(self, relative_path: str) -> bytes:
@@ -237,21 +230,6 @@ class CaseAssets:
         return loader(path)
 
     # ---- internal helpers ----
-
-    def _asset_rule(self, rule: str | Path) -> str:
-        """Normalize an asset-relative rule and prefix for the case manifest."""
-        p = Path(rule)
-        if p.is_absolute():
-            assets_folder = self.folder.resolve()
-            absolute = p.resolve()
-            try:
-                rel = absolute.relative_to(assets_folder)
-            except ValueError:
-                raise ValueError(
-                    f"path {p!r} is not inside assets folder {assets_folder!r}"
-                ) from None
-            return f"{_ASSETS_PREFIX}{_norm_rel(rel.as_posix())}"
-        return f"{_ASSETS_PREFIX}{_norm_rel(p.as_posix())}"
 
     @staticmethod
     def _rule_matches(relative_path: str, rule: str) -> bool:

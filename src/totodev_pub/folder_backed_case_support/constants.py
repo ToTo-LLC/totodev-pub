@@ -21,11 +21,19 @@ LOG_FILE_NAME   = "case.log"         # the single appended per-case log file ins
 # that matches no keep rule. KEEP_LIST_NAME and LEASE_NAME are NOT listed here — both
 # are unconditionally hard-skipped by CaseKeepManifest, so they never need to appear
 # in their own rule list.
+#
+# logs/case.log is deliberately NOT seeded: the privacy default is that purge deletes
+# the log like any other unmatched file. Callers who want it retained add an ordinary
+# keep rule (e.g. case_keep_files("logs/case.log")), or set LogRetention.RETAIN so
+# ensure_framework_rules() seeds CASE_LOG_KEEP_RULE at bind time.
 FRAMEWORK_KEEP_RULES = (
     RECORD_NAME,
     f"{EVENTS_DIR_NAME}/**",
-    f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}",
 )
+
+# Keep-rule path for the per-case log file. Seeded by ensure_framework_rules() when the
+# process-global LogRetention is RETAIN; otherwise callers add it via case_keep_files().
+CASE_LOG_KEEP_RULE = f"{LOGS_DIR_NAME}/{LOG_FILE_NAME}"
 
 # Reserved case-owned artifacts at the case root; create_case_in_folder() rejects targets
 # that already contain any of these names to avoid colliding with a prior case.
@@ -37,11 +45,6 @@ CASE_RESERVED_ARTIFACT_NAMES = (
     LEASE_NAME,
     LOGS_DIR_NAME,
 )
-
-# Single line written in place of the log contents when the termination retention policy
-# is PURGE (the file is rewritten, never unlinked, so the folder layout stays stable).
-LOG_PURGE_SENTINEL = "Log auto-truncated by FolderBackedCase termination policy."
-
 # Event-log labels written by the FolderBackedCase base class. Every label is
 # CASE_-prefixed so an observer can isolate the family's lifecycle events with a
 # single CASE_* glob; subclasses are free to log their own labels alongside.

@@ -41,7 +41,8 @@ if TYPE_CHECKING:
 
 
 def _raises_when_detached(fn):
-    """Mark a method whose contract forbids operation on a detached case.
+    """Decorator that marks a public method whose contract forbids operation
+    on a detached case.
 
     Detachment relinquishes the case's authority to alter its state on disk, so
     marked operations are conceptually incapable of proceeding and must raise
@@ -73,21 +74,27 @@ class FolderBackedCaseInterface(ABC):
       (see ``fsm_state_chains``). Triggers may be preceded by gates.
     - States are Live or Terminal. Automatic cleanup runs soon after entering a
       terminal state.
-    - Triggers are automated or manual. Automated triggers are driven by
+    - Triggers are automated or manual. Automated triggers can be triggered by
       ``case_advance()`` (no arguments). Manual triggers are called directly and
       may take arguments.
     - Keep ALL state in the assets folder. Files purge unless added to a keep
-      list (``case_keep_assets()`` / ``case_assets.add_keep_rules()``). Prefer
+      list — prefer declaring ``AssetSpec(keep=True)`` (declarative, seeded
+      automatically); for a runtime decision use ``case_keep_files()``. Prefer
       FileMappedPydanticMixin-derived classes for structured assets
       (``case_load_asset()``).
+    - Use ``self.log`` (not ``logging.getLogger(__name__)``) for anything
+      case-scoped — it tees into this case's ``logs/case.log``. Like assets,
+      that file purges on termination unless you opt in to keep it (see
+      "Logging" below).
     - The journal is the authoritative source of truth about state. Change state
       ONLY through triggers — never mutate state directly.
     - Rehydrate from disk via ``case_type_registry.rehydrate(folder)``.
-    - The case record is a skinny identity card; put most data in assets.
-    - Do not use ``FolderBackedCase`` / this interface directly — define a
+    - The case record is a skinny identity card; put your data in assets.
+    - Don't instantiate ``FolderBackedCase``. Define a
       subclass.
-    - An in-memory case holds a heartbeat lease on its folder. Simple programs
-      can ignore the lease; it exists for concurrency scenarios.
+    - An in-memory case holds a heartbeat lease on its filesystem folder. 
+      Simple programs with no fear of concurrent access can ignore the lease.
+      Other progrems should make sure the lease is fresh.
 
     Quick start
     -----------
@@ -112,6 +119,7 @@ class FolderBackedCaseInterface(ABC):
             ##### END CLASS CONFIG #####
 
             async def perform_open_ticket(self, tctx) -> None:
+                self.log.info("opening ticket %s", self.case_id)
                 ...
 
             async def perform_close_ticket(self, tctx) -> None:
@@ -186,10 +194,32 @@ class FolderBackedCaseInterface(ABC):
     that monopolizes the loop starves other cases and its own heartbeat. The
     keepalive protects only the trigger's work slot (``perform_``/``before``);
     guards and ``on_enter``/``on_exit``/``after`` are expected to be light.
+
+    Logging — use ``self.log``, not ``getLogger(__name__)``
+    --------------------------------------------------------
+    ``self.log`` (see the ``log`` attribute below) is an ordinary logger that ALSO
+    mirrors every record into this case's own ``logs/case.log`` — the easy-to-find,
+    time-sorted story of just this one case, even with hundreds of others running
+    concurrently. Use it for anything case-scoped: routine progress
+    (``self.log.info(...)``), a caught-and-handled problem worth a full traceback
+    (``self.log.exception(...)`` / ``exc_info=``), warnings, whatever. A module-level
+    ``logging.getLogger(__name__)`` call still reaches the main log as always, but
+    NEVER the per-case file — so anything you want attributable to a specific case
+    belongs on ``self.log`` instead. Passing work off to a helper? ``self.log.getChild
+    ("some_name")`` gives it a namespaced logger that behaves normally and stays
+    tee'd. You do not need to log a trigger/guard/hook exception yourself for it to
+    reach ``logs/case.log`` — the base class already logs the full traceback there
+    (in addition to a terse fact in the event log) before re-raising; see
+    ``on_transition_exception`` if you want to react to the failure, not just see it.
+
+    ``logs/case.log`` is not a framework keep-rule: a purge deletes it like any other
+    unmatched file (privacy default). To keep one, call ``case_keep_files("logs/case.log")``
+    — typically from ``on_terminating()``, judged per case — or set the process-global
+    ``LogRetention.RETAIN`` knob so bind-time seeding adds that keep rule for you.
     """
 
     # =======================================================================
-    # Declaration attributes — set these on your subclass
+    # Declaration attributes — set class attributes on your subclass
     # =======================================================================
 
     fsm_state_chains: list[str] | None = None
@@ -237,8 +267,13 @@ class FolderBackedCaseInterface(ABC):
     """
 
     log: logging.Logger
-    """Per-case folder-logging tee, assigned at bind time. Use ``self.log`` inside
-    hooks for case-scoped logging that lands in ``logs/case.log``.
+    """Per-case folder-logging tee, assigned at bind time. An ordinary ``logging.Logger``
+    that ALSO mirrors every record into this case's own ``logs/case.log`` — use it (not
+    a module-level ``getLogger(__name__)``) for anything attributable to THIS case.
+
+    Full contract — routing vs. main log, ``getChild``, automatic exception teeing,
+    and the purge-by-default retention policy — lives in the class docstring's
+    "Logging" section above; this is just the quick-reference version.
     """
 
     # =======================================================================
@@ -255,7 +290,7 @@ class FolderBackedCaseInterface(ABC):
         nickname: str | None = None,
         **fields,
     ) -> Self:
-        """First-time inception of a brand-new case.
+        """This is how you create a new case... in the filesystem
 
         This is the only built-in way to create a new case; the class's
         constructor loads an existing case from disk.
@@ -285,6 +320,20 @@ class FolderBackedCaseInterface(ABC):
 
         If you forget, the lease self-expires after a crash-recovery window;
         explicit detach is still preferred so other owners need not wait.
+        Note that many informational properties of this object will respond
+        with their last-known in-memory values after detach. For guaranteed-current
+        status without holding the lease, use ``get_case_reader(case_folder)``
+        instead.
+
+        Also writes a closing banner to ``self.log`` and disables its per-case file
+        tee (records keep propagating to the main log; the case folder is simply no
+        longer written to, since we no longer legitimately own it). This is always
+        written, even on an already-terminal case: the banner marks the end of THIS
+        in-memory instance's session, not a claim that the log file itself is done —
+        nothing prevents a terminal case from being reopened later (diagnostics, an
+        audit tool, etc.), and that reopen gets its own attach banner just like any
+        other case, appended right after whatever the termination purge left behind.
+        Idempotent — harmless to call more than once on an already-detached object.
         """
         ...
 
@@ -423,33 +472,37 @@ class FolderBackedCaseInterface(ABC):
 
     @property
     def case_assets(self) -> CaseAssets:
-        """The case's CaseAssets: file playground under assets/ plus the keep
-        manifest.
+        """The case's CaseAssets: the file playground under ``assets/``, plus a
+        READ-ONLY view onto the keep manifest.
 
         Your working files live here. Use ``case.case_assets.folder``,
         ``.asset_path(...)``, ``.relative_path(...)``, ``.write(...)``,
-        ``.add_keep_rules(...)``, ``.list_assets()``, etc. Asset keep rules are
-        stored in ``_keep.txt`` with an ``assets/`` prefix. Anything not matched
-        by the manifest is purged when the case terminates. For non-asset files,
-        use ``case_keep_assets()`` instead.
+        ``.list_assets()``, ``.keep_list()``, ``.is_kept(...)``, etc. Retention is
+        NOT decided here — declare ``AssetSpec(keep=True)`` (preferred) or call
+        ``case_keep_files()`` on the case object. Anything not matched by the
+        manifest is purged when the case terminates.
         """
         ...
 
-    def case_keep_assets(self, *patterns: str | Path) -> None:
+    def case_keep_files(self, *patterns: str | Path) -> None:
         """Register case files to survive the post-termination purge.
 
         Closing a case deletes everything under its folder except paths listed in
         ``_keep.txt``. Call this to add retention patterns — case-relative exact
-        paths or globs (e.g. ``exports/summary.pdf``, ``reports/*.csv``).
+        paths or globs (e.g. ``exports/summary.pdf``, ``reports/*.csv``), including
+        under ``assets/`` (e.g. ``"assets/reply_draft.md"``) — this method is
+        case-root scoped, not assets-scoped, so an asset path needs its ``assets/``
+        prefix spelled out.
 
-        Typical use: override ``on_terminating()`` and name the deliverables you
-        want preserved after the case winds down. Patterns are append-only and
-        idempotent; duplicates are ignored. Absolute paths inside the case folder
-        are normalized to case-relative form.
-
-        For files under ``assets/``, prefer ``case_assets.add_keep_rules()`` or
-        ``case_assets.write(..., keep=True)`` — those helpers manage the
-        ``assets/`` prefix for you.
+        Typical use: a RUNTIME keep decision that can't be made declaratively —
+        override ``on_terminating()`` and name the deliverables to preserve after
+        the case winds down, judged case-by-case. For an asset you already know at
+        class-definition time you'll want kept, prefer declaring
+        ``AssetSpec(keep=True)`` instead (seeded automatically, no procedural call
+        needed). Patterns are append-only and idempotent; duplicates are ignored.
+        Absolute paths inside the case folder are normalized to case-relative form.
+        To keep the per-case log across purge, pass ``"logs/case.log"`` (or a
+        covering glob) here.
         """
         ...
 
