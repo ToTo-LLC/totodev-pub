@@ -556,8 +556,12 @@ class FolderBackedCaseInterface(ABC):
         to write to this record directly.
 
         Returns a detached deep-copy snapshot, so mutating the result has no
-        effect on the case. Pass ``force=True`` to re-read from disk first when
-        another process may have changed the file.
+        effect on the case. Prefer this over ``peek_case_record`` when you
+        already hold a live case: the record is already typed to this class, and
+        the default path uses the in-memory copy (``force=True`` only reloads
+        disk into that cache first — useful if you distrust it, not as a
+        lock-free concurrent-read path). Without a live instance, use
+        ``peek_case_record`` or ``get_case_reader``.
         """
         ...
 
@@ -610,7 +614,9 @@ class FolderBackedCaseInterface(ABC):
         case_cls: type | None = None,
     ) -> CaseRecord:
         """Read the identity record from disk — lock-free, no live case, no
-        registry.
+        registry. For a live, lease-holding case, prefer ``case_record()``
+        instead — it returns a typed snapshot of the owned in-memory record
+        without you supplying ``record_cls`` / ``case_cls``.
 
         Inspect a case's record without taking the lease or building an object
         (safe even while another owner holds the case). YOU supply the typed
