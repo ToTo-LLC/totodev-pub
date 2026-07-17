@@ -43,7 +43,6 @@ from totodev_pub.folder_backed_case_support.constants import (
     CASE_RESERVED_ARTIFACT_NAMES, CASE_BASE_EVENT_PREFIX,
     DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
     DEFAULT_LEASE_TTL_SECS, LEASE_HEARTBEAT_THROTTLE_SECS,
-    EV_TERMINATED, SIG_TERMINATING,
 )
 from totodev_pub.folder_backed_case_support.helpers import (
     _utcnow, _local_mtime_as_utc, _norm_rel,
@@ -283,9 +282,9 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return self._lease is None or not self._lease.is_active()
 
     @property
-    def case_advanceable(self) -> bool:
-        # See `_CaseAdvancer.advanceable`.
-        return _CaseAdvancer(self).advanceable
+    def case_is_advanceable(self) -> bool:
+        # See `_CaseAdvancer.is_advanceable`.
+        return _CaseAdvancer(self).is_advanceable
 
     @property
     def case_was_blocked(self) -> bool:
@@ -499,19 +498,25 @@ class FolderBackedCase(FolderBackedCaseInterface):
             .apply_implicit_fail_cap()
         )
 
-    # ---- Recovery / lifecycle hooks ----
+    # ---- Overridable event handlers (on_<event> lifecycle notifications) ----
+    # Fired by the framework at well-defined lifecycle moments. All default to
+    # no-op; override only the ones your case type needs.  These provide an 
+    # an opportunity to handle trigger exceptions or do pre-closeout handling.
+
 
     def on_transition_exception(self, begin_state, trigger, final_state, exc) -> None:
         """Overridable recovery hook, fired (before the exception re-raises) whenever a
         transition's dispatch raised. Default: no-op.
 
-        Advanced:
-          `begin_state == final_state` ⇒ a PRE-commit failure (the work raised, the case
-          never left its state — the retryable "no progress" kind). `begin_state !=
-          final_state` ⇒ a POST-commit failure (the state DID change, then an entry/after
-          hook raised; the case is in `final_state` carrying the baggage of a failed
-          side-effect).
+        Compare `begin_state` to `final_state` to tell which half of the dispatch failed:
+          `begin_state == final_state` ⇒ a PRE-commit failure — a guard or the trigger's
+          own work (`before`/`perform_<trigger>`) raised, the case never left its state
+          (the retryable "no progress" kind). `begin_state != final_state` ⇒ a POST-commit
+          failure — an `on_exit`/`on_enter`/`after` hook raised AFTER the state already
+          changed; the case is in `final_state` carrying the baggage of a failed
+          side-effect.
 
+        Advanced:
           Use it to compensate from inside the case (which, unlike a generic driver, knows
           its own data): mark a record field, schedule a fix-up, set a flag a later guard
           reads.
@@ -530,6 +535,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
         asset, since this method is case-root scoped, not assets-scoped). Default:
         no-op. Heavy async work belongs in an async ``before_`` hook on the
         terminating transition; this hook is synchronous."""
+
+    # ---- Extended-status hook (polled, not event-driven) ----
 
     def case_ext_status_info(self) -> dict[str, Any]:
         """Overridable hook for extended status when a case runs under ``CaseManager``.
@@ -562,7 +569,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
           shouldn't need one for a best-effort progress signal like this."""
         return {}
 
-    # Auto-ID seam used by create_case_in_folder() when case_id is omitted (or is
+    # ---- Auto-ID seam ----
+    # Used by create_case_in_folder() when case_id is omitted (or is
     # itself a CaseIDGenerator, overriding this for just that call). Override on a
     # subclass to share one generator across case types, run multiple namespaces, or
     # encode limited type info into the id. Default: short, sortable, base-36
@@ -664,26 +672,14 @@ class FolderBackedCase(FolderBackedCaseInterface):
         fresh._record.fsm_state_chains = list(type(fresh).fsm_state_chains)
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
         type(fresh)._seed_keep_rules(fresh._keep_manifest)
-        for fn in self._listeners:
-            fresh.case_add_transition_listener(fn)
         return fresh
-
-    # ---- lifecycle-signal subscription ----
-
-    def case_add_transition_listener(self, fn) -> None:
-        """Subscribe to post-transition notifications: ``fn(case, event_name, info)``.
-
-        Planned ``CaseManager`` (draft: notebooks/DEVDAVE/case_manager_classes/CaseManager
-        Model.md) uses this for archival without the case knowing the manager.
-        """
-        self._listeners.append(fn)
 
     # =======================================================================
     # SECTION 4 — Internal mechanics (maintainers)
     # -----------------------------------------------------------------------
     # Construction/binding, the FSM state-change and exception choke points,
     # record flush, and other private machinery. One-step advance orchestration
-    # lives in `_CaseAdvancer` (see case_advance() / case_advanceable façades).
+    # lives in `_CaseAdvancer` (see case_advance() / case_is_advanceable façades).
     # Read this to MAINTAIN the class; you should not need it to USE it.
     # =======================================================================
 
@@ -707,7 +703,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "case_transition_fail_count", "case_id",
         "case_advance", "case_detach", "case_heartbeat", "case_record",
         "case_log_alert", "case_run_blocking", "case_reclassify_to",
-        "case_add_transition_listener",
     })
 
     # Public members deliberately absent from FolderBackedCaseInterface
@@ -718,9 +713,10 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "case_type_spec",
         "compile_fsm",
         "case_id_generator",
-        # recovery / lifecycle hooks
+        # overridable event handlers
         "on_transition_exception",
         "on_terminating",
+        # extended-status hook (polled)
         "case_ext_status_info",
         # runtime seams & rare operations
         "case_heartbeat",
@@ -728,7 +724,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "archive_grouping_label",
         "case_run_blocking",
         "case_reclassify_to",
-        "case_add_transition_listener",
     })
 
     @staticmethod
@@ -946,7 +941,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
             flexible_asset_alias_loading=cls.flexible_asset_alias_loading,
             keep_manifest=self._keep_manifest,
         )
-        self._listeners: list = []        # fn(case, event_name, info)
         # State is derived from the event log on load (most recent CASE_STATE_ENTERED);
         # transitions then caches it on _case_state (the machine's model_attribute),
         # exposed read-only via the case_state property defined in SECTION 3 above.
@@ -999,10 +993,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # Instance-time machine binding is delegated to _CaseMachineFactory.
         self._machine = _CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
 
-    def _notify(self, event_name: str, **info) -> None:
-        for fn in self._listeners:
-            fn(self, event_name, info)
-
     # ---- FSM attachment via transitions (async-first composition pattern) ----
     # Machine construction + callback wiring live in _CaseMachineFactory; the case keeps
     # the override seams the factory reads back (trigger_warn_secs, case_dwell_secs) and the
@@ -1053,19 +1043,18 @@ class FolderBackedCase(FolderBackedCaseInterface):
         state-change entry, then on non-terminating transitions throttled-flushes the record
         and beats the lease. On the non-terminal → terminal EDGE, runs the two-phase termination.
 
-        Two-phase termination (CASE_TERMINATING / CASE_TERMINATED distinction):
+        Two-phase termination:
           Phase 1 — PRE-FINALIZATION (assets still exist):
             1. Log CASE_TERMINATED event
             2. on_terminating() — subclass retains/extracts final artifacts
-            3. _notify("CASE_TERMINATING") — pre-purge observers (audit, test harness)
           Phase 2 — POST-FINALIZATION (immutable, still BOUND):
-            4. _keep_manifest.purge() — drop everything not matched in _keep.txt
-            5. _record.terminal + _record.terminal_state stamped + FORCE-flushed
+            3. _keep_manifest.purge() — drop everything not matched in _keep.txt
+            4. _record.terminal + _record.terminal_state stamped + FORCE-flushed
                (authoritative seal)
-            6. heartbeat(force) — keep the lock fresh; termination does NOT detach (the
-               object stays bound so owners can harvest before calling case_detach())
-            7. _notify("CASE_TERMINATED") — finalized-but-still-bound; the "safe to move"
-               signal is case_detach(), not this. Standalone: no-op.
+            5. heartbeat(force) — keep the lock fresh; termination does NOT detach (the
+               object stays bound so owners can harvest before calling case_detach());
+               the "safe to move" signal is case_detach(). External observers get
+               TERMINATED from the pool driver's event framework, or the journal.
         """
         src, dest = event.transition.source, event.transition.dest
         trigger = event.event.name if event.event is not None else None
@@ -1082,7 +1071,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
             # --- phase 1: pre-finalization --- assets still present ---
             self._journal.log_terminated(dest, from_state=src)
             self.on_terminating()
-            self._notify(SIG_TERMINATING, src=src, dest=dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
             # ONE purge process for everything ephemeral: unmatched keepfile paths
             # are deleted (logs included unless a keep rule covers them).
@@ -1094,7 +1082,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
             # (un-advanced) terminal case holds a full-TTL grace window for owners to harvest
             # before they call case_detach(). A crash still lapses the lock via the TTL.
             self.case_heartbeat(min_update_secs=0)
-            self._notify(EV_TERMINATED, src=src, dest=dest)
 
     async def _on_fsm_exception(self, event) -> None:
         """Machine-level `on_exception` hook (wired by the machine factory): the SINGLE chokepoint

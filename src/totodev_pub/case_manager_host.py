@@ -83,7 +83,7 @@ async def serve(
     "stop when manager.is_idle" (job-manager hosts, §8); mutually exclusive
     with an explicit ``stop_when``.
     """
-    if manager.recovered or manager.running:
+    if manager.is_recovered or manager.is_running:
         raise ValueError(
             "serve() requires a freshly constructed CaseManager (not recovered "
             "or started); it owns the recover()/start() sequencing itself."

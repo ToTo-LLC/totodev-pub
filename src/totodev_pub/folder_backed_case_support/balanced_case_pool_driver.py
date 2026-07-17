@@ -118,7 +118,7 @@ class _TierPolicy:
     def admission_tier(self, case: FolderBackedCase) -> Tier:
         """Initial tier for a freshly added (live) case: default HOT, but a structural
         dead-end (no auto exits) starts WARM. (Terminal cases never enter rotation.)"""
-        return Tier.HOT if case.case_advanceable else Tier.WARM
+        return Tier.HOT if case.case_is_advanceable else Tier.WARM
 
     def reclassify(self, slot: "_Slot", result: AdvanceResult) -> None:
         """Mutate ``slot`` (tier / reset_multiple / streaks) from the latest result.
@@ -144,7 +144,7 @@ class _TierPolicy:
         # a structural dead-end (no auto exits at all) demotes on the accelerated thresholds.
         slot.fail_streak = 0
         slot.noop_streak += 1
-        accelerated = not slot.case.case_advanceable
+        accelerated = not slot.case.case_is_advanceable
         self._apply_noop_ladder(slot, accelerated=accelerated)
 
     def _apply_noop_ladder(self, slot: "_Slot", *, accelerated: bool) -> None:
@@ -845,7 +845,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
     def blocked_cases(self) -> list[FolderBackedCase]:
         out: list[FolderBackedCase] = []
         for slot in self._by_folder.values():
-            if slot.case.case_was_blocked or not slot.case.case_advanceable:
+            if slot.case.case_was_blocked or not slot.case.case_is_advanceable:
                 out.append(slot.case)
         return out
 

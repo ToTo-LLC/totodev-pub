@@ -414,7 +414,7 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     @property
-    def case_advanceable(self) -> bool:
+    def case_is_advanceable(self) -> bool:
         """Whether the current state has an auto exit that ``case_advance()``
         could attempt.
         """
@@ -426,7 +426,7 @@ class FolderBackedCaseInterface(ABC):
         proved auto-advance blocked (``AutoAdvanceBlocked``).
 
         Process-lifetime only: ``False`` after create/open; not journal-backed.
-        Orthogonal to ``case_advanceable`` (structural). Cleared when a restricted
+        Orthogonal to ``case_is_advanceable`` (structural). Cleared when a restricted
         advance, a direct trigger call, or an unrestricted progress/fail supersedes
         the observation; left unchanged on a plain unrestricted no-op.
 

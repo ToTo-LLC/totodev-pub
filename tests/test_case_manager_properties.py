@@ -8,14 +8,14 @@ from case_manager_test_utils import TicketCase, adopt_into_live, provision_manag
 @pytest.mark.asyncio
 async def test_lifecycle_properties(tmp_path):
     manager = provision_manager(tmp_path)
-    assert manager.recovered is False
-    assert manager.running is False
+    assert manager.is_recovered is False
+    assert manager.is_running is False
     await manager.recover()
-    assert manager.recovered is True
+    assert manager.is_recovered is True
     await manager.start()
-    assert manager.running is True
+    assert manager.is_running is True
     await manager.stop()
-    assert manager.running is False
+    assert manager.is_running is False
 
 
 @pytest.mark.asyncio

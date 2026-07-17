@@ -5,7 +5,7 @@
 
 Internal by convention (leading underscore on the class): not part of any public
 surface and not re-exported from the support package. The public façade remains
-``FolderBackedCase.case_advance()`` / ``case_advanceable``.
+``FolderBackedCase.case_advance()`` / ``case_is_advanceable``.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class _CaseAdvancer:
         self._case = case
 
     @property
-    def advanceable(self) -> bool:
+    def is_advanceable(self) -> bool:
         """True when the CURRENT state has at least one auto-advanceable (`--`) exit, i.e.
         an unattended `case_advance()` could fire here (subject to guards). False for a
         terminal state or a state left only by MANUAL (`==`) edges.

@@ -52,7 +52,6 @@ CASE_RESERVED_ARTIFACT_NAMES = (
 # CASE_BASE_EVENT_PREFIX is the class-family INVARIANT: every event label the base
 # class auto-generates (now funneled through CaseEventJournal) MUST start with it, so a
 # derived class can cleanly separate its own custom events from base lifecycle ones.
-# SIG_TERMINATING reuses the prefix but is an in-memory listener signal, never logged.
 CASE_BASE_EVENT_PREFIX = "CASE_"
 
 EV_STATE_ENTERED     = "CASE_STATE_ENTERED"     # current fine-grained state (value = state name)
@@ -68,10 +67,6 @@ EV_TRIGGER_STARTED   = "CASE_TRIGGER_STARTED"   # a trigger's work slot began (v
                                             # resolved by the next STATE_ENTERED / TRANSITION_FAILED /
                                             # TRIGGER_TIMED_OUT / ENTRY_EXCEPTION — a dangling one
                                             # means in-flight (lease live) or crashed (lease gone)
-
-# In-memory listener signal (passed to add_transition_listener callbacks, not logged).
-# The terminal signal reuses EV_TERMINATED; only the phase-1 terminating signal is distinct.
-SIG_TERMINATING = "CASE_TERMINATING"   # phase-1 termination: assets still present
 
 # Trigger timeout policy shared by FolderBackedCase and _CaseMachineFactory.
 DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0

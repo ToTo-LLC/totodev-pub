@@ -258,12 +258,12 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     @property
-    def recovered(self) -> bool:
+    def is_recovered(self) -> bool:
         """True once recover() has completed (start() precondition)."""
         return self._recovered
 
     @property
-    def running(self) -> bool:
+    def is_running(self) -> bool:
         """True between start() and stop()."""
         return self._running
 

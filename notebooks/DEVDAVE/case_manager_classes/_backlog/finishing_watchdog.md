@@ -60,7 +60,7 @@ async def test_loop_failure_through_serve_exits_watchdog(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "_maintenance_tick", bad_tick)
 
     for _ in range(300):
-        if manager.running:
+        if manager.is_running:
             break
         await asyncio.sleep(0.02)
 
@@ -213,15 +213,15 @@ not a correctness bug. Add a one-line note to the `is_idle` property docstring:
 > Does not include the shutdown mailbox — a shutdown file may arrive after an idle check
 > but before the process exits.
 
-### `recovered` after `stop()`
+### `is_recovered` after `stop()`
 
-`test_lifecycle_properties` does not assert `manager.recovered is True` after `stop()`.
-Task 9's precondition guard depends on `recovered` staying true once set. Add:
+`test_lifecycle_properties` does not assert `manager.is_recovered is True` after `stop()`.
+Task 9's precondition guard depends on `is_recovered` staying true once set. Add:
 
 ```python
 await manager.stop()
-assert manager.running is False
-assert manager.recovered is True
+assert manager.is_running is False
+assert manager.is_recovered is True
 ```
 
 ### `CaseManager.serve()` delegator

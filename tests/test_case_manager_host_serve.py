@@ -59,14 +59,14 @@ async def test_sigterm_is_a_clean_exit_zero_stop(tmp_path):
     manager = provision_manager(tmp_path)
     task = asyncio.ensure_future(serve(manager, stop_grace_secs=5.0))
     for _ in range(300):
-        if manager.running:
+        if manager.is_running:
             break
         await asyncio.sleep(0.02)
-    assert manager.running
+    assert manager.is_running
     assert any(t.name == "manager-watchdog" for t in threading.enumerate())
     os.kill(os.getpid(), signal.SIGTERM)
     await asyncio.wait_for(task, timeout=10.0)   # returns None → process exit 0
-    assert manager.running is False
+    assert manager.is_running is False
     assert _stopped_at(manager) is not None
 
 
@@ -75,7 +75,7 @@ async def test_serve_respects_watchdog_enabled_false(tmp_path):
     manager = provision_manager(tmp_path, watchdog_enabled=False)
     task = asyncio.ensure_future(serve(manager, stop_grace_secs=5.0))
     for _ in range(300):
-        if manager.running:
+        if manager.is_running:
             break
         await asyncio.sleep(0.02)
     assert not any(t.name == "manager-watchdog" for t in threading.enumerate())
@@ -88,7 +88,7 @@ async def test_graceful_mailbox_shutdown_acks_then_exits_75(tmp_path, hard_exit_
     manager = provision_manager(tmp_path)
     task = asyncio.ensure_future(serve(manager, stop_grace_secs=5.0))
     for _ in range(300):
-        if manager.running:
+        if manager.is_running:
             break
         await asyncio.sleep(0.02)
     client = CaseManagerClient(tmp_path / "cache")
@@ -108,7 +108,7 @@ async def test_immediate_mailbox_shutdown_exits_75_and_teaches(tmp_path, hard_ex
     manager = provision_manager(tmp_path)
     task = asyncio.ensure_future(serve(manager, stop_grace_secs=5.0))
     for _ in range(300):
-        if manager.running:
+        if manager.is_running:
             break
         await asyncio.sleep(0.02)
     client = CaseManagerClient(tmp_path / "cache")
@@ -128,7 +128,7 @@ async def test_stop_when_empty_self_completes_exit_zero(tmp_path):
     await asyncio.wait_for(
         serve(manager, stop_grace_secs=5.0, stop_when_empty=True), timeout=10.0
     )
-    assert manager.running is False
+    assert manager.is_running is False
     assert _stopped_at(manager) is not None      # clean stopped_at, like a signal stop
 
 
@@ -145,4 +145,4 @@ async def test_stop_when_custom_predicate(tmp_path):
         serve(manager, stop_grace_secs=5.0, stop_when=done_after_five), timeout=10.0
     )
     assert polls["n"] >= 5
-    assert manager.running is False
+    assert manager.is_running is False
