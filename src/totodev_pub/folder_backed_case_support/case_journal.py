@@ -39,6 +39,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     EV_TRIGGER_SLOW,
     EV_TRIGGER_TIMED_OUT,
     EV_TRIGGER_STARTED,
+    EV_INVOKED_PROCESS_FAILED,
     EVENTS_DIR_NAME,
 )
 
@@ -177,6 +178,26 @@ class CaseEventJournal:
             EV_TRIGGER_SLOW, str(round(elapsed)),
             {"trigger": trigger, "elapsed_secs": round(elapsed, 3),
              "warn_secs": warn, "state": state},
+        )
+
+    def log_invoked_process_failed(
+        self,
+        program: str,
+        *,
+        returncode: int,
+        stderr: str = "",
+    ) -> PrimitiveEventProxy:
+        """A ``case_invoke_process`` child exited non-zero (CASE_INVOKED_PROCESS_FAILED).
+
+        Value is a short executable label (typically the basename — event values
+        become filename text and must not contain ``/``). Data carries returncode
+        and stderr for diagnosis — never argv or environment (secrets). Does not
+        resolve CASE_TRIGGER_STARTED; the surrounding perform_ failure still logs
+        that."""
+        return self._append_base(
+            EV_INVOKED_PROCESS_FAILED,
+            program,
+            {"returncode": returncode, "stderr": stderr},
         )
 
     # ---- domain reads (case-specific interpretations of the generic log) ----

@@ -28,10 +28,16 @@ AdvanceResult           — outcome of case_advance() (non-throwing reporter).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import functools
 import logging
+import os
+import signal
+import subprocess
+import sys
 import weakref
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +61,8 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     CaseTypeMismatchError, RecordTypeMismatchError,
     IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
     AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError, MissingTriggerChokesError,
-    CaseTransitionInFlightError,)
+    CaseTransitionInFlightError, CaseInvokedProcessError,
+)
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
 from totodev_pub.folder_backed_case_support.case_type_spec import CaseTypeSpec
@@ -86,11 +93,62 @@ __all__ = [
     "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
+    "CaseInvokedProcessError",
     "MissingAssetSchemaError", "MissingTriggerChokesError",
     "CaseIDGenerator", "TimeSlugCaseIDGenerator",
     "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
 ]
+
+# Stderr payload cap for CASE_INVOKED_PROCESS_FAILED journal entries.
+_INVOKED_PROCESS_STDERR_EVENT_MAX = 4096
+
+
+async def _kill_subprocess_tree(
+    proc: asyncio.subprocess.Process, *, grace_secs: float,
+) -> None:
+    """Terminate then kill a child started by case_invoke_process; reap it.
+
+    Unix: the child is started with start_new_session=True so we can signal its
+    process group (grandchildren included). Windows: no equivalent process-group
+    kill in v1 — we terminate/kill only the direct child; detached grandchildren
+    may survive. See case_invoke_process contract docs.
+    """
+    if proc.returncode is not None:
+        return
+
+    def _terminate() -> None:
+        if sys.platform == "win32":
+            proc.terminate()
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+
+    def _kill() -> None:
+        if sys.platform == "win32":
+            proc.kill()
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+
+    with contextlib.suppress(ProcessLookupError):
+        _terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_secs)
+        return
+    except asyncio.TimeoutError:
+        pass
+    with contextlib.suppress(ProcessLookupError):
+        _kill()
+    with contextlib.suppress(Exception):
+        await proc.wait()
+
 
 # ---------------------------------------------------------------------------
 # FolderBackedCase — the logic base class
@@ -245,6 +303,72 @@ class FolderBackedCase(FolderBackedCaseInterface):
 
     # Why no run_to_completion()/drive loop lives here: see `_CaseAdvancer.advance`.
 
+    async def case_invoke_threaded(self, fn, /, *args, **kwargs):
+        # Contract: FolderBackedCaseInterface.case_invoke_threaded
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+    async def case_invoke_process(
+        self,
+        program: str | os.PathLike[str],
+        *args: str | os.PathLike[str],
+        env: Mapping[str, str],
+        cwd: str | os.PathLike[str] | None = None,
+        allow_nonzero_retval: bool = False,
+        kill_grace_secs: float = 5.0,
+    ) -> subprocess.CompletedProcess[str]:
+        # Contract: FolderBackedCaseInterface.case_invoke_process
+        if env is None:
+            raise TypeError(
+                "case_invoke_process: env is required; pass a full mapping or {} "
+                "(None is not allowed — there is no implicit os.environ inherit)"
+            )
+        prog = str(program)
+        argv = [prog, *[str(a) for a in args]]
+        work_cwd = str(cwd) if cwd is not None else str(self.case_assets.folder)
+        # start_new_session: Unix process-group kill on cancel. On Windows this flag
+        # is accepted but grandchildren may still outlive a terminate/kill of `proc`
+        # — see _kill_subprocess_tree.
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=work_cwd,
+            env=dict(env),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout_b, stderr_b = await proc.communicate()
+        except asyncio.CancelledError:
+            await _kill_subprocess_tree(proc, grace_secs=kill_grace_secs)
+            with contextlib.suppress(Exception):
+                await proc.communicate()
+            raise
+
+        stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+        stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+        completed = subprocess.CompletedProcess(
+            args=argv, returncode=proc.returncode or 0, stdout=stdout, stderr=stderr,
+        )
+        if completed.returncode != 0:
+            err_for_event = stderr
+            if len(err_for_event) > _INVOKED_PROCESS_STDERR_EVENT_MAX:
+                err_for_event = err_for_event[:_INVOKED_PROCESS_STDERR_EVENT_MAX] + "…(truncated)"
+            # Event *value* is filename text — use basename only (paths contain '/').
+            self._journal.log_invoked_process_failed(
+                Path(prog).name or prog,
+                returncode=completed.returncode,
+                stderr=err_for_event,
+            )
+            if not allow_nonzero_retval:
+                raise CaseInvokedProcessError(
+                    prog,
+                    returncode=completed.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+        return completed
+
     # ---- Identity & status (read-only snapshots) ----
 
     @property
@@ -326,6 +450,10 @@ class FolderBackedCase(FolderBackedCaseInterface):
     def case_load_asset(self, alias: str) -> object:
         type(self)._resolve_asset_book().assert_trusted(alias, self.case_state)
         return self.case_assets.load_dataclass(alias)
+
+    def case_load_assets(self, alias: str) -> list:
+        type(self)._resolve_asset_book().assert_trusted(alias, self.case_state)
+        return self.case_assets.load_dataclasses(alias)
 
     # ---- record read accessor ----
 
@@ -612,33 +740,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         (``YYYY-MM``). Override to key on creation date, fiscal period, tenant, etc."""
         return _utcnow().strftime("%Y-%m")
 
-    async def case_invoke_threaded(self, fn, /, *args, **kwargs):
-        """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `perform_`.
-
-        Submits ``fn(*args, **kwargs)`` to the event loop's default **thread-pool**
-        executor and awaits the result, so the call does NOT freeze the shared loop
-        (which would stall every other case). The worker thread runs ``fn`` to
-        completion; it is not periodically paused. Use ONLY when a library gives you
-        no async API:
-
-            async def perform_fetch(self, tctx):
-                resp = await self.case_invoke_threaded(requests.get, url)
-
-        SECOND-CLASS by design, with caveats vs. an async-native client:
-          * Concurrency is bounded by the executor's thread pool (not the ~unbounded
-            concurrency of real async I/O), so blocking calls do not scale the same way.
-          * The hard-abort (TriggerTimeout) cancels the AWAIT, but a running thread
-            cannot be killed — the worker keeps going until ``fn`` returns on its own.
-            So a true hang here frees the case but leaks the thread. Prefer an async
-            client for anything that can hang.
-          * Threads share the process and the GIL: fine for typical sync I/O (which
-            usually releases the GIL while waiting); not a multi-core speedup for
-            pure-Python CPU work. For CPU-bound isolation, hand-roll a
-            ``ProcessPoolExecutor`` (pickling constraints apply) or prefer a
-            stand-alone CLI via a process helper when available."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
-
     # ---- reclassify ("call an audible" to a different subclass) ----
 
     def case_reclassify_to(
@@ -705,7 +806,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "case_is_live", "case_is_terminal", "case_terminal_states",
         "case_transition_fail_count", "case_id",
         "case_advance", "case_detach", "case_heartbeat", "case_record",
-        "case_emit_alert_event", "case_invoke_threaded", "case_reclassify_to",
+        "case_emit_alert_event", "case_invoke_threaded", "case_invoke_process",
+        "case_reclassify_to",
     })
 
     # Public members deliberately absent from FolderBackedCaseInterface
@@ -724,7 +826,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # runtime seams & rare operations
         "trigger_warn_secs",
         "archive_grouping_label",
-        "case_invoke_threaded",
         "case_reclassify_to",
         # lease-machinery peeks (fleet observers / recovery sweeps, not owners —
         # the owner's facility is case_heartbeat, on the interface)

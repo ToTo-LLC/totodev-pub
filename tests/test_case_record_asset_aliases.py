@@ -45,6 +45,29 @@ def test_asset_aliases_states_round_trip(tmp_path):
     assert reloaded.asset_aliases == entry
 
 
+def test_asset_aliases_many_and_path_loader_round_trip(tmp_path):
+    path = tmp_path / "case_record.yaml"
+    entry = {
+        "attachments": {
+            "path": "attachments/*",
+            "loader": "Path",
+            "states": ["open"],
+            "many": True,
+        },
+    }
+    rec = CaseRecord(**_kwargs(asset_aliases=entry))
+    rec.save(str(path))
+    reloaded = CaseRecord.open(str(path), without_lock=True)
+    assert reloaded.asset_aliases == entry
+
+
+def test_asset_aliases_rejects_bad_many_type():
+    with pytest.raises(ValidationError, match="many"):
+        CaseRecord(
+            **_kwargs(asset_aliases={"x": {"path": "x.json", "many": "yes"}}),
+        )
+
+
 def test_asset_aliases_rejects_unknown_key():
     with pytest.raises(ValidationError, match="unknown key"):
         CaseRecord(

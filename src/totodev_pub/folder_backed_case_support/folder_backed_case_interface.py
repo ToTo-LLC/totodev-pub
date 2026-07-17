@@ -26,9 +26,12 @@ customization seams or internal mechanics.
 from __future__ import annotations
 
 import logging
+import subprocess
 from abc import ABC
+from collections.abc import Mapping
+from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Callable, Self
 
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
@@ -103,6 +106,11 @@ class FolderBackedCaseInterface(ABC):
 
     Quick start
     -----------
+        from totodev_pub.folder_backed_case_support.case_type_registry import (
+            case_type_registry,
+        )
+
+        @case_type_registry.register  # allows later use of registry.rehydrate()
         class TroubleTicketCase(FolderBackedCase):
 
             ##### CLASS CONFIG FOR CASE CLASSES #####
@@ -117,8 +125,11 @@ class FolderBackedCaseInterface(ABC):
                 AssetSpec(alias="ticket", relative_path="ticket_info.yaml",
                           loader=TicketInfo, states={"new", "open", "closed"},
                           keep=True),
-                AssetSpec(relative_path="resolution-log/customer--convo.md",
+                AssetSpec(alias="conversation",
+                          relative_path="resolution-log/customer--convo.md",
                           loader=ChatLog, states={"open"}),
+                AssetSpec(alias="attachments", relative_path="attachments/*",
+                          loader=Path, states={"open"}, many=True),
             ]
             fsm_trigger_chokes = {"open_ticket": {"cpu"}}
             ##### END CLASS CONFIG #####
@@ -136,27 +147,18 @@ class FolderBackedCaseInterface(ABC):
             async def on_enter_closed(self, tctx) -> None:
                 ...
 
-        from totodev_pub.folder_backed_case_support.case_type_registry import (
-            case_type_registry,
-        )
-        case_type_registry.register_case_types(TroubleTicketCase)
-
         case = TroubleTicketCase.create_case_in_folder(
             Path("/data/cases/t-001"), case_id="t-001",
         )
         try:
             await case.open_ticket()
+            attachments:list[Path] = case.case_load_assets("attachments")
             await case.case_advance() # might trigger mark_as_duplicate()
             if case.case_is_live:
                 await case.close_ticket()
         finally:
-            case.case_detach()
+            case.case_detach()  # good practice but in simple cases unneeded
 
-        case = case_type_registry.rehydrate(Path("/data/cases/t-001"))
-        try:
-            ...
-        finally:
-            case.case_detach()
 
     Hooks and guards
     ----------------
@@ -194,11 +196,12 @@ class FolderBackedCaseInterface(ABC):
 
     Contract — hooks must be well-behaved async. The lease keepalive depends on
     a trigger's work actually yielding the event loop: await at reasonable
-    intervals and offload blocking/CPU-bound work via ``case_invoke_threaded()``
-    (an advanced member on ``FolderBackedCase``) or your own executor. A hook
-    that monopolizes the loop starves other cases and its own heartbeat. The
-    keepalive protects only the trigger's work slot (``perform_``/``before``);
-    guards and ``on_enter``/``on_exit``/``after`` are expected to be light.
+    intervals and offload blocking or long-running work via
+    ``case_invoke_threaded()`` / ``case_invoke_process()`` (or your own
+    executor). A hook that monopolizes the loop starves other cases and its
+    own heartbeat. The keepalive protects only the trigger's work slot
+    (``perform_``/``before``); guards and ``on_enter``/``on_exit``/``after``
+    are expected to be light.
 
     Logging — use ``self.log``, not ``getLogger(__name__)``
     --------------------------------------------------------
@@ -395,6 +398,92 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     # =======================================================================
+    # Long-running work offload (perform_ / trigger hooks)
+    # =======================================================================
+
+    async def case_invoke_threaded(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """Run a synchronous/blocking callable on a thread pool without freezing the
+        shared event loop. Use when a library has no async API.
+
+        Example::
+
+            async def perform_fetch(self, tctx):
+                resp = await self.case_invoke_threaded(requests.get, url)
+
+        The worker thread runs ``fn`` to completion (it is not time-sliced). Prefer
+        a real async client when available.
+
+        Caveats vs async-native I/O:
+          * Concurrency is bounded by the thread pool.
+          * Hard-abort (``TriggerTimeout``) cancels the await only — the thread
+            cannot be killed and may leak until ``fn`` returns.
+          * Threads share the process and the GIL: fine for typical sync I/O;
+            not a multi-core speedup for pure-Python CPU. For CPU isolation,
+            hand-roll a ``ProcessPoolExecutor``, or prefer
+            ``case_invoke_process`` for a stand-alone CLI.
+        """
+        ...
+
+    async def case_invoke_process(
+        self,
+        program: str | PathLike[str],
+        *args: str | PathLike[str],
+        env: Mapping[str, str],
+        cwd: str | PathLike[str] | None = None,
+        allow_nonzero_retval: bool = False,
+        kill_grace_secs: float = 5.0,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a stand-alone CLI/program as a subprocess without freezing the loop.
+
+        Intended for architecturally separate tools (OCR binaries, converters,
+        batch workers) that speak argv and files. Often more fault-recoverable
+        than in-process work for error-prone pipelines: hard-abort can
+        terminate/kill the child (unlike ``case_invoke_threaded``).
+
+        Example::
+
+            async def perform_ocr(self, tctx):
+                result = await self.case_invoke_process(
+                    "tesseract", "inbox/page.png", "work/page", "-l", "eng",
+                    env={"PATH": "/usr/bin", "LANG": "C"},
+                )
+                text = result.stdout
+
+        Args:
+            program: Executable to run (argv[0]).
+            *args: Remaining argv elements (no shell).
+            env: **Full** environment mapping (required). Pass ``{}`` for an
+                empty environment. ``None`` is rejected — there is no implicit
+                inherit/`os.environ` merge (avoids leaking secrets or surprising
+                PATH/locale dependencies).
+            cwd: Working directory; default is this case's ``assets/`` playground
+                (``case_assets.folder``). Case-root peers are base-mediated —
+                override only deliberately.
+            allow_nonzero_retval: When ``False`` (default), a non-zero exit
+                writes a journal event and raises ``CaseInvokedProcessError``.
+                When ``True``, still journals the failure but returns the
+                ``CompletedProcess`` (for CLIs that use non-zero as a soft
+                outcome, e.g. ``grep``/``diff``).
+            kill_grace_secs: On cancel/hard-abort, send terminate, wait this
+                long, then kill.
+
+        Returns:
+            ``subprocess.CompletedProcess`` with ``str`` ``stdout``/``stderr``
+            always captured (UTF-8, replacement on decode errors). Binary-on-
+            stdout is out of scope — write files under ``assets/`` or hand-roll
+            a subprocess.
+
+        On non-zero exit a ``CASE_INVOKED_PROCESS_FAILED`` event is written with
+        the executable basename (filename-safe), return code, and stderr only
+        (never argv or env).
+
+        Windows note: process-tree teardown is weaker than Unix (no process-group
+        kill equivalent in v1); the direct child is terminated/killed, but
+        grandchildren may survive.
+        """
+        ...
+
+    # =======================================================================
     # Identity & status (read-only snapshots)
     # =======================================================================
 
@@ -552,16 +641,30 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     def case_load_asset(self, alias: str) -> object:
-        """Load the asset declared under ``alias`` in ``asset_aliases``, returning
-        the object its ``loader`` produces.  You must declare the asset in 
-        ``asset_aliases`` in order to use this method.
+        """Load the singular asset declared under ``alias`` in ``asset_aliases``,
+        returning the object its ``loader`` produces.  You must declare the
+        asset in ``asset_aliases`` in order to use this method.
 
         Before touching disk, checks that the current FSM state is one where
         ``alias`` is trustworthy (per the spec's ``states``), raising
         ``AssetNotTrustedInStateError`` if not.
 
-        For assets not declared in ``asset_aliases`` use the ``case_assets``
-        method to find/load manually.
+        For ``many=True`` aliases use ``case_load_assets``. For assets not
+        declared in ``asset_aliases`` use ``case_assets`` to find/load manually.
+        ``loader=Path`` returns the absolute ``Path`` of the matched file.
+        """
+        ...
+
+    def case_load_assets(self, alias: str) -> list:
+        """Load a ``many=True`` asset alias, returning a list of objects its
+        ``loader`` produces (one per matching file, sorted). Empty list when
+        nothing matches — not an error; the caller decides.
+
+        Trust-checked like ``case_load_asset``. Raises ``ValueError`` if the
+        alias is not ``many=True``. Typical declaration::
+
+            AssetSpec(alias="attachments", relative_path="attachments/*",
+                      loader=Path, states={"open"}, many=True)
         """
         ...
 

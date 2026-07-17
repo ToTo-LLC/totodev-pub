@@ -1,4 +1,6 @@
 import json
+from pathlib import Path
+
 import pytest
 from pydantic import BaseModel
 
@@ -41,6 +43,17 @@ def test_load_dataclass_callable(tmp_path):
     assert assets.load_dataclass("raw") == '{"k": 1}'
 
 
+def test_load_dataclass_path_loader(tmp_path):
+    assets = CaseAssets(
+        tmp_path / "c2b",
+        asset_specs={
+            "page": AssetSpec(alias="page", relative_path="inbox/page.png", loader=Path),
+        },
+    )
+    path = assets.write("inbox/page.png", b"png")
+    assert assets.load_dataclass("page") == path
+
+
 def test_load_dataclass_missing_file_raises(tmp_path):
     assets = CaseAssets(
         tmp_path / "c3",
@@ -59,7 +72,11 @@ def test_unknown_alias_raises_keyerror(tmp_path):
 def test_glob_paths_and_file_loading(tmp_path):
     assets = CaseAssets(
         tmp_path / "c5",
-        asset_specs={"scans": AssetSpec(alias="scans", relative_path="scans/*.json", loader=_Doc)},
+        asset_specs={
+            "scans": AssetSpec(
+                alias="scans", relative_path="scans/*.json", loader=_Doc,
+            ),
+        },
     )
     _write_json(assets, "scans/a.json", {"name": "a"})
     _write_json(assets, "scans/b.json", {"name": "b"})
@@ -69,6 +86,45 @@ def test_glob_paths_and_file_loading(tmp_path):
         assets.dataclass_path("scans")
     loaded = [assets.load_dataclass_file(p.relative_to(assets.folder).as_posix()) for p in paths]
     assert sorted(d.name for d in loaded) == ["a", "b"]
+
+
+def test_load_dataclasses_many_returns_list(tmp_path):
+    assets = CaseAssets(
+        tmp_path / "c5b",
+        asset_specs={
+            "scans": AssetSpec(
+                alias="scans", relative_path="scans/*.json", loader=_Doc, many=True,
+            ),
+        },
+    )
+    _write_json(assets, "scans/a.json", {"name": "a"})
+    _write_json(assets, "scans/b.json", {"name": "b"})
+    loaded = assets.load_dataclasses("scans")
+    assert [d.name for d in loaded] == ["a", "b"]
+    with pytest.raises(ValueError, match="many=True"):
+        assets.load_dataclass("scans")
+
+
+def test_load_dataclasses_empty_when_no_matches(tmp_path):
+    assets = CaseAssets(
+        tmp_path / "c5c",
+        asset_specs={
+            "attachments": AssetSpec(
+                alias="attachments", relative_path="attachments/*", loader=Path,
+                many=True,
+            ),
+        },
+    )
+    assert assets.load_dataclasses("attachments") == []
+
+
+def test_load_dataclasses_rejects_singular_alias(tmp_path):
+    assets = CaseAssets(
+        tmp_path / "c5d",
+        asset_specs={"doc": AssetSpec(alias="doc", relative_path="doc.json", loader=_Doc)},
+    )
+    with pytest.raises(ValueError, match="not many=True"):
+        assets.load_dataclasses("doc")
 
 
 def test_flexible_loading_returns_lazy(tmp_path):

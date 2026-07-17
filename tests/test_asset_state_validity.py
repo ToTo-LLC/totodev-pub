@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -29,15 +30,24 @@ class TicketCase(FolderBackedCase):
     fsm_state_chains = ["^new==open_ticket-->open==close_ticket-->closed^"]
     asset_aliases = [
         AssetSpec(
+            alias="ticket",
             relative_path="ticket.yaml",
             loader=TicketForm,
             states={"new", "open", "closed"},
             keep=True,
         ),
         AssetSpec(
+            alias="conversation",
             relative_path="customer--conversation.json",
             loader=ChatLog,
             states={"open"},
+        ),
+        AssetSpec(
+            alias="attachments",
+            relative_path="attachments/*",
+            loader=Path,
+            states={"new", "open"},
+            many=True,
         ),
     ]
     fsm_trigger_chokes = {}
@@ -53,8 +63,11 @@ class FlexibleCase(FolderBackedCase):
     flexible_asset_alias_loading = True
     fsm_state_chains = ["^new==go-->done^"]
     asset_aliases = [
-        AssetSpec(relative_path="unguarded.json"),
-        AssetSpec(relative_path="guarded.json", loader=TicketForm, states={"new"}),
+        AssetSpec(alias="unguarded", relative_path="unguarded.json"),
+        AssetSpec(
+            alias="guarded", relative_path="guarded.json", loader=TicketForm,
+            states={"new"},
+        ),
     ]
     fsm_trigger_chokes = {}
 
@@ -66,6 +79,7 @@ class ReclassSource(FolderBackedCase):
     fsm_state_chains = ["^new==go-->shared^"]
     asset_aliases = [
         AssetSpec(
+            alias="old",
             relative_path="old.yaml",
             loader=TicketForm,
             states={"new", "shared"},
@@ -81,7 +95,10 @@ class ReclassSource(FolderBackedCase):
 class ReclassTarget(FolderBackedCase):
     fsm_state_chains = ["^new==go-->shared^"]
     asset_aliases = [
-        AssetSpec(relative_path="new.yaml", loader=ChatLog, states={"shared"}, keep=True),
+        AssetSpec(
+            alias="new", relative_path="new.yaml", loader=ChatLog,
+            states={"shared"}, keep=True,
+        ),
     ]
     fsm_trigger_chokes = {}
 
@@ -108,7 +125,10 @@ def test_build_time_validation_at_class_definition():
 
         class BadStateCase(FolderBackedCase):
             asset_aliases = [
-                AssetSpec(relative_path="a.json", loader=TicketForm, states={"opne"}),
+                AssetSpec(
+                    alias="a", relative_path="a.json", loader=TicketForm,
+                    states={"opne"},
+                ),
             ]
             fsm_trigger_chokes = {}
             fsm_state_chains = ["^new--begin-->done^"]
@@ -278,6 +298,21 @@ def test_bypass_via_case_assets_ignores_gate(tmp_path):
         obj = case.case_assets.load_dataclass("conversation")
         assert isinstance(obj, ChatLog)
         assert obj.lines == 9
+    finally:
+        case.case_detach()
+
+
+def test_case_load_assets_many_path_loader(tmp_path):
+    folder = tmp_path / "attachments-case"
+    case = TicketCase.create_case_in_folder(folder)
+    try:
+        assert case.case_load_assets("attachments") == []
+        a = case.case_assets.write("attachments/a.txt", b"a")
+        b = case.case_assets.write("attachments/b.txt", b"b")
+        paths = case.case_load_assets("attachments")
+        assert paths == [a, b]
+        with pytest.raises(ValueError, match="many=True"):
+            case.case_load_asset("attachments")
     finally:
         case.case_detach()
 

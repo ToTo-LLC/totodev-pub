@@ -1523,7 +1523,12 @@ def test_guard_releases_after_failed_transition(tmp_path):
 
 class _StampCase(FolderBackedCase):
     flexible_asset_alias_loading = True
-    asset_aliases = [AssetSpec(relative_path="receipts/rlist.json", loader=lambda p: p.read_text())]
+    asset_aliases = [
+        AssetSpec(
+            alias="rlist", relative_path="receipts/rlist.json",
+            loader=lambda p: p.read_text(),
+        ),
+    ]
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--begin-->done^"]
 
@@ -1545,7 +1550,12 @@ def test_missing_asset_schema_raises_at_class_definition():
 def test_resolve_asset_book_projects_strings():
     class DeclCase(FolderBackedCase):
         flexible_asset_alias_loading = True
-        asset_aliases = [AssetSpec(relative_path="receipts/Overall--rlist.json", loader=lambda p: p)]
+        asset_aliases = [
+            AssetSpec(
+                alias="rlist", relative_path="receipts/Overall--rlist.json",
+                loader=lambda p: p,
+            ),
+        ]
         fsm_trigger_chokes = {}
         fsm_state_chains = ["^new--begin-->done^"]
 

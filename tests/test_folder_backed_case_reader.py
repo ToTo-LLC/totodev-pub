@@ -258,7 +258,12 @@ def test_live_case_prep_properties(tmp_path):
 
 class ReceiptCase(FolderBackedCase):
     flexible_asset_alias_loading = True
-    asset_aliases = [AssetSpec(relative_path="receipts/rlist.json", loader=lambda p: p.read_text())]
+    asset_aliases = [
+        AssetSpec(
+            alias="rlist", relative_path="receipts/rlist.json",
+            loader=lambda p: p.read_text(),
+        ),
+    ]
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--begin-->done^"]
 
@@ -289,7 +294,12 @@ class ReceiptListRecord(BaseModel, FileMappedPydanticMixin):
 
 class TypedReceiptCase(FolderBackedCase):
     flexible_asset_alias_loading = True
-    asset_aliases = [AssetSpec(relative_path="receipts/rlist.json", loader=ReceiptListRecord)]
+    asset_aliases = [
+        AssetSpec(
+            alias="rlist", relative_path="receipts/rlist.json",
+            loader=ReceiptListRecord,
+        ),
+    ]
     fsm_trigger_chokes = {}
     fsm_state_chains = ["^new--begin-->done^"]
 

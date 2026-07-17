@@ -67,6 +67,9 @@ EV_TRIGGER_STARTED   = "CASE_TRIGGER_STARTED"   # a trigger's work slot began (v
                                             # resolved by the next STATE_ENTERED / TRANSITION_FAILED /
                                             # TRIGGER_TIMED_OUT / ENTRY_EXCEPTION — a dangling one
                                             # means in-flight (lease live) or crashed (lease gone)
+EV_INVOKED_PROCESS_FAILED = "CASE_INVOKED_PROCESS_FAILED"  # case_invoke_process: non-zero exit
+                                            # (value = program/executable only; data has returncode +
+                                            # stderr — never argv or env)
 
 # Trigger timeout policy shared by FolderBackedCase and _CaseMachineFactory.
 DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0

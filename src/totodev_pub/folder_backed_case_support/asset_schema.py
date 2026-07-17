@@ -11,14 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case_support.exceptions import AssetSchemaError
-from totodev_pub.folder_backed_case_support.helpers import _norm_rel
 
-DEFAULT_ALIAS_DELIMITER = "--"
 _GLOB_CHARS = "*?["
 
 # Persisted sentinel for a loader that is a plain callable (not a
@@ -26,31 +24,35 @@ _GLOB_CHARS = "*?["
 # was NOT a resolvable Pydantic type, so a reader cannot reconstruct it by name.
 CALLABLE_SENTINEL = "Callable"
 
+# Persisted name for the identity Path loader (``loader=Path``).
+PATH_LOADER_SENTINEL = "Path"
+
 
 @dataclass(frozen=True, kw_only=True)
 class AssetSpec:
     """One declared on-disk data object: a `relative_path` under assets/ (an exact
-    path OR a glob pattern), a lookup `alias`, and a `loader` that is either a
-    FileMappedPydanticMixin subclass, any Callable[[Path], Any], or None (load
-    generically via LazyLoadedFileData when flexible loading is enabled).
+    path OR a glob pattern), a required lookup `alias`, and a `loader` that is
+    either a FileMappedPydanticMixin subclass, ``Path`` (identity — return path
+    objects), any Callable[[Path], Any], or None (load generically via
+    LazyLoadedFileData when flexible loading is enabled).
 
     All fields are keyword-only — construct as
-    ``AssetSpec(relative_path=..., loader=..., states=..., keep=...)``.
+    ``AssetSpec(alias=..., relative_path=..., loader=..., states=..., keep=...,
+    many=...)``.
 
-    `alias` may be omitted in a class-level `asset_aliases` declaration; the alias
-    is then inferred from the path's basename (see `infer_alias`), except for glob
-    paths, which require an explicit alias. Specs normalized by AliasedAssetSpecs
-    always carry a resolved alias.
+    `alias` is always required. `states` names the FSM states in which this asset
+    is trustworthy (semantics #3); None means unconstrained (guard is a no-op).
+    `keep` is declaration-only sugar for retention seeding at create — it is not
+    persisted on the case record. `many=True` means the path is a glob and
+    ``case_load_assets`` returns a list (empty when nothing matches); it requires
+    a glob `relative_path`."""
 
-    `states` names the FSM states in which this asset is trustworthy (semantics #3);
-    None means unconstrained (guard is a no-op). `keep` is declaration-only sugar
-    for retention seeding at create — it is not persisted on the case record."""
-
+    alias: str
     relative_path: str
-    alias: str | None = None
     loader: type | Callable[[Path], Any] | None = None
     states: frozenset[str] | None = None
     keep: bool = False
+    many: bool = False
 
 
 def _is_glob(path: str) -> bool:
@@ -60,24 +62,15 @@ def _is_glob(path: str) -> bool:
 def loader_name(loader) -> str | None:
     """Project a loader to its persisted value: the bare class __name__ for a
     FileMappedPydanticMixin subclass (resolvable by a reader via the asset-dataclass
-    registry), CALLABLE_SENTINEL for a plain callable, or None when no loader was
-    declared."""
+    registry), PATH_LOADER_SENTINEL for ``Path``, CALLABLE_SENTINEL for a plain
+    callable, or None when no loader was declared."""
     if loader is None:
         return None
+    if loader is Path:
+        return PATH_LOADER_SENTINEL
     if isinstance(loader, type) and issubclass(loader, FileMappedPydanticMixin):
         return loader.__name__
     return CALLABLE_SENTINEL
-
-
-def infer_alias(key: str, *, delimiter: str = DEFAULT_ALIAS_DELIMITER) -> str:
-    """Derive an alias from a path's basename: the stem, or (if the delimiter appears)
-    the token after the LAST delimiter. The result is always a literal substring of the
-    filename."""
-    base = PurePosixPath(key).name
-    stem = base.rsplit(".", 1)[0] if "." in base else base
-    if delimiter and delimiter in stem:
-        return stem.rsplit(delimiter, 1)[1]
-    return stem
 
 
 def validate_alias(alias: str, *, context: str) -> None:

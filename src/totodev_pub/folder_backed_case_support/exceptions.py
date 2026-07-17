@@ -210,7 +210,8 @@ class TriggerTimeout(Exception):
     NOTE: aborting an async-native await cancels it cleanly; a call offloaded via
     case_invoke_threaded() cannot truly be killed (the thread runs on), so the abort
     frees the case but may leak the worker — prefer async-native clients for anything
-    that can hang."""
+    that can hang. A call offloaded via case_invoke_process() attempts terminate/kill
+    on the child (and its process group on Unix) before the cancel propagates."""
     def __init__(self, case_id: str, trigger: Optional[str], state: str, *,
                  elapsed: float, ceiling: float):
         super().__init__(
@@ -222,6 +223,31 @@ class TriggerTimeout(Exception):
         self.state = state
         self.elapsed = elapsed
         self.ceiling = ceiling
+
+
+class CaseInvokedProcessError(Exception):
+    """A ``case_invoke_process`` child exited with a non-zero return code while
+    ``allow_nonzero_retval`` was false. Ordinary ``Exception`` so perform_ failures
+    absorb through the usual transition-failure path.
+
+    Carries stdout/stderr for programmatic handling. The default message names the
+    executable and return code only — never argv or environment (secrets)."""
+
+    def __init__(
+        self,
+        program: str,
+        *,
+        returncode: int,
+        stdout: str = "",
+        stderr: str = "",
+    ):
+        self.program = program
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(
+            f"case_invoke_process: {program!r} exited with return code {returncode}"
+        )
 
 
 class MissingFsmError(Exception):
@@ -246,10 +272,10 @@ class MissingFsmError(Exception):
 class AssetSchemaError(Exception):
     """Raised when a FolderBackedCase subclass's `asset_aliases` declaration is malformed,
     or when a declared alias fails FSM-state validation at first instantiation: a non-list
-    declaration, a non-AssetSpec list entry, a glob path with no explicit alias (alias
-    cannot be inferred from a glob), an empty or invalid alias, a duplicate alias, unknown
-    state names, missing loader/states in strict mode, or valid-in-terminal without
-    keep=True. The message names the specific offence and how to fix it."""
+    declaration, a non-AssetSpec list entry, an empty or invalid alias, ``many=True``
+    without a glob path, a duplicate alias, unknown state names, missing loader/states
+    in strict mode, or valid-in-terminal without keep=True. The message names the
+    specific offence and how to fix it."""
 
 
 class MissingAssetSchemaError(Exception):

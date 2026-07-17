@@ -126,24 +126,50 @@ class CaseAssets:
 
     def dataclass_path(self, alias: str) -> Path:
         """The single existing file for an alias. FileNotFoundError if none,
-        ValueError if a glob matched more than one (use dataclass_paths/load_dataclass_file)."""
+        ValueError if a glob matched more than one (use dataclass_paths /
+        load_dataclasses / load_dataclass_file)."""
+        spec = self._require_spec(alias)
+        if spec.many:
+            raise ValueError(
+                f"Asset {alias!r} is many=True; use dataclass_paths() or "
+                "load_dataclasses()."
+            )
         paths = self.dataclass_paths(alias)
         if not paths:
-            spec = self._require_spec(alias)
             raise FileNotFoundError(
                 f"Asset {alias!r} ({spec.relative_path!r}) not found under {self.folder}."
             )
         if len(paths) > 1:
             raise ValueError(
-                f"Asset {alias!r} matched {len(paths)} files; use dataclass_paths() + "
+                f"Asset {alias!r} matched {len(paths)} files; declare many=True and "
+                "use load_dataclasses(), or use dataclass_paths() + "
                 "load_dataclass_file() to load each."
             )
         return paths[0]
 
     def load_dataclass(self, alias: str):
-        """Resolve an alias to exactly one file and deserialize it."""
+        """Resolve a singular alias to exactly one file and deserialize it.
+
+        Raises ``ValueError`` when the alias is ``many=True`` (use
+        ``load_dataclasses``)."""
         spec = self._require_spec(alias)
+        if spec.many:
+            raise ValueError(
+                f"Asset {alias!r} is many=True; use load_dataclasses()."
+            )
         return self._load(spec, self.dataclass_path(alias))
+
+    def load_dataclasses(self, alias: str) -> list:
+        """Resolve a ``many=True`` alias to zero or more files and deserialize each.
+
+        Returns an empty list when nothing matches. Raises ``ValueError`` when
+        the alias is not ``many=True`` (use ``load_dataclass``)."""
+        spec = self._require_spec(alias)
+        if not spec.many:
+            raise ValueError(
+                f"Asset {alias!r} is not many=True; use load_dataclass()."
+            )
+        return [self._load(spec, path) for path in self.dataclass_paths(alias)]
 
     def load_dataclass_file(self, relative_path: str | Path):
         """Deserialize ONE explicit file, using the loader of the spec whose pattern
@@ -178,6 +204,8 @@ class CaseAssets:
                     f"alias {spec.alias!r} has no loader and flexible loading is off."
                 )
             return LazyLoadedFileData(str(path))
+        if loader is Path:
+            return path
         if isinstance(loader, type) and issubclass(loader, FileMappedPydanticMixin):
             return loader.load(str(path), acquire_lock=False)
         return loader(path)

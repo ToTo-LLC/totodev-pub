@@ -13,7 +13,7 @@ from pydantic import BaseModel, field_validator
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case_support.helpers import _to_utc
 
-_RECORD_ALIAS_KEYS = frozenset({"path", "loader", "states"})
+_RECORD_ALIAS_KEYS = frozenset({"path", "loader", "states", "many"})
 
 
 class CaseRecord(BaseModel, FileMappedPydanticMixin):
@@ -42,9 +42,11 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
 
     `asset_aliases` mirrors the in-code AssetSpec on disk: each alias maps to a dict of
     {"path": <relative path under assets/, may be a glob>, "loader": <bare class
-    __name__ for a FileMappedPydanticMixin subclass, null when none declared, or
-    "Callable" for a plain callable that a reader cannot resolve by name>,
-    "states": <optional sorted list of FSM state names in which the asset is trustworthy>}.
+    __name__ for a FileMappedPydanticMixin subclass, "Path" for the identity Path
+    loader, null when none declared, or "Callable" for a plain callable that a
+    reader cannot resolve by name>, "states": <optional sorted list of FSM state
+    names in which the asset is trustworthy>, "many": <optional bool; True when
+    the alias loads as a list via case_load_assets>}.
 
     `fsm_state_chains` mirrors the concrete class's `fsm_state_chains` DSL declaration on
     disk (the raw chain strings, verbatim). It is stamped ONCE at create (and re-stamped
@@ -61,7 +63,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     created: datetime.datetime         # immutable
     terminal: Optional[datetime.datetime] = None  # stamped once on terminal entry
     terminal_state: Optional[str] = None  # the terminal FSM state name, stamped with `terminal`
-    asset_aliases: dict[str, dict[str, Any]]  # alias -> {path, loader, states?}
+    asset_aliases: dict[str, dict[str, Any]]  # alias -> {path, loader, states?, many?}
     fsm_state_chains: list[str]        # the concrete class's raw state-chain DSL, verbatim
 
     @field_validator("asset_aliases")
@@ -101,6 +103,10 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
                             f"asset_aliases[{alias!r}]['states'] must be a list of "
                             "strings or null."
                         )
+            if "many" in entry and not isinstance(entry["many"], bool):
+                raise ValueError(
+                    f"asset_aliases[{alias!r}]['many'] must be a bool."
+                )
         return v
 
     @field_validator("created", "terminal")

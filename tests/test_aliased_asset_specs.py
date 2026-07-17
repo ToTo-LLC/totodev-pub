@@ -1,5 +1,7 @@
 """Unit tests for AliasedAssetSpecs."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import BaseModel
 
@@ -8,7 +10,11 @@ from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAs
 from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (
     AssetDataclassRegistry,
 )
-from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec, CALLABLE_SENTINEL
+from totodev_pub.folder_backed_case_support.asset_schema import (
+    AssetSpec,
+    CALLABLE_SENTINEL,
+    PATH_LOADER_SENTINEL,
+)
 from totodev_pub.folder_backed_case_support.exceptions import (
     AssetNotTrustedInStateError,
     AssetSchemaError,
@@ -28,10 +34,14 @@ def test_from_declaration_strict_list_of_assetspec():
     book = AliasedAssetSpecs.from_declaration(
         [
             AssetSpec(
+                alias="ticket",
                 relative_path="ticket.yaml", loader=_Rec,
                 states={"new", "open", "closed"}, keep=True,
             ),
-            AssetSpec(relative_path="customer--chat.md", loader=_Rec, states={"open"}),
+            AssetSpec(
+                alias="chat", relative_path="customer--chat.md", loader=_Rec,
+                states={"open"},
+            ),
         ],
         flexible=False,
     )
@@ -43,12 +53,9 @@ def test_from_declaration_strict_list_of_assetspec():
     assert spec.keep is True
 
 
-def test_from_declaration_glob_requires_explicit_alias():
-    with pytest.raises(AssetSchemaError, match="glob"):
-        AliasedAssetSpecs.from_declaration(
-            [AssetSpec(relative_path="receipts/*.json", loader=_Rec, states={"open"})],
-            flexible=False,
-        )
+def test_from_declaration_requires_explicit_alias():
+    with pytest.raises(TypeError):
+        AssetSpec(relative_path="receipts/*.json", loader=_Rec, states={"open"})
 
 
 def test_from_declaration_glob_with_alias():
@@ -62,6 +69,34 @@ def test_from_declaration_glob_with_alias():
         flexible=False,
     )
     assert book.spec("receipts").relative_path == "receipts/*.json"
+    assert book.spec("receipts").many is False
+
+
+def test_from_declaration_many_requires_glob():
+    with pytest.raises(AssetSchemaError, match="many=True"):
+        AliasedAssetSpecs.from_declaration(
+            [
+                AssetSpec(
+                    alias="one", relative_path="a.json", loader=_Rec,
+                    states={"open"}, many=True,
+                ),
+            ],
+            flexible=False,
+        )
+
+
+def test_from_declaration_many_with_glob():
+    book = AliasedAssetSpecs.from_declaration(
+        [
+            AssetSpec(
+                alias="attachments", relative_path="attachments/*", loader=Path,
+                states={"open"}, many=True,
+            ),
+        ],
+        flexible=False,
+    )
+    assert book.spec("attachments").many is True
+    assert book.spec("attachments").loader is Path
 
 
 def test_from_declaration_empty_list():
@@ -85,15 +120,7 @@ def test_from_declaration_plain_dict_entry_rejected():
         )
 
 
-def test_from_declaration_assetspec_alias_inferred_with_delimiter():
-    book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="log/customer--convo.md", loader=_Rec, states={"open"})],
-        flexible=False,
-    )
-    assert book.aliases() == ["convo"]
-
-
-def test_from_declaration_assetspec_explicit_alias_wins():
+def test_from_declaration_assetspec_explicit_alias():
     book = AliasedAssetSpecs.from_declaration(
         [AssetSpec(alias="tkt", relative_path="ticket.yaml", loader=_Rec, states={"open"})],
         flexible=False,
@@ -103,7 +130,7 @@ def test_from_declaration_assetspec_explicit_alias_wins():
 
 def test_from_declaration_assetspec_states_normalized_from_plain_set():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec, states={"open", "new"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"open", "new"})],
         flexible=False,
     )
     assert book.spec("a").states == frozenset({"open", "new"})
@@ -113,8 +140,8 @@ def test_from_declaration_duplicate_alias():
     with pytest.raises(AssetSchemaError, match="duplicate"):
         AliasedAssetSpecs.from_declaration(
             [
-                AssetSpec(relative_path="a/x.json", loader=_Rec, states={"new"}),
-                AssetSpec(relative_path="b/x.json", loader=_Rec, states={"new"}),
+                AssetSpec(alias="x", relative_path="a/x.json", loader=_Rec, states={"new"}),
+                AssetSpec(alias="x", relative_path="b/x.json", loader=_Rec, states={"new"}),
             ],
             flexible=False,
         )
@@ -123,7 +150,7 @@ def test_from_declaration_duplicate_alias():
 def test_from_declaration_empty_states_rejected():
     with pytest.raises(AssetSchemaError, match="non-empty"):
         AliasedAssetSpecs.from_declaration(
-            [AssetSpec(relative_path="a/x.json", loader=_Rec, states=[])],
+            [AssetSpec(alias="x", relative_path="a/x.json", loader=_Rec, states=[])],
             flexible=False,
         )
 
@@ -131,11 +158,19 @@ def test_from_declaration_empty_states_rejected():
 def test_to_record_and_from_record_round_trip():
     book = AliasedAssetSpecs.from_declaration(
         [
-            AssetSpec(relative_path="typed.json", loader=_Rec, states={"open", "new"}),
             AssetSpec(
-                relative_path="raw.json", loader=(lambda p: p.read_text()), states={"new"},
+                alias="typed", relative_path="typed.json", loader=_Rec,
+                states={"open", "new"},
             ),
-            AssetSpec(relative_path="lazy.json", loader=None, states={"new"}),
+            AssetSpec(
+                alias="raw", relative_path="raw.json",
+                loader=(lambda p: p.read_text()), states={"new"},
+            ),
+            AssetSpec(alias="lazy", relative_path="lazy.json", loader=None, states={"new"}),
+            AssetSpec(
+                alias="attachments", relative_path="attachments/*", loader=Path,
+                states={"open"}, many=True,
+            ),
         ],
         flexible=True,
     )
@@ -145,11 +180,16 @@ def test_to_record_and_from_record_round_trip():
     assert record["raw"]["loader"] == CALLABLE_SENTINEL
     assert record["lazy"]["loader"] is None
     assert "states" not in record["lazy"] or record["lazy"].get("states") == ["new"]
+    assert record["attachments"]["loader"] == PATH_LOADER_SENTINEL
+    assert record["attachments"]["many"] is True
+    assert "many" not in record["typed"]
 
     rebuilt = AliasedAssetSpecs.from_record(record, resolve_types=False)
     assert rebuilt.spec("typed").states == frozenset({"new", "open"})
     assert rebuilt.spec("raw").loader is None
     assert rebuilt.spec("lazy").loader is None
+    assert rebuilt.spec("attachments").loader is Path
+    assert rebuilt.spec("attachments").many is True
 
 
 def test_from_record_absent_states_is_unconstrained():
@@ -173,11 +213,11 @@ def test_from_record_with_type_resolution():
 
 def test_is_trusted_truth_table():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec, states={"open"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"open"})],
         flexible=False,
     )
     unconstrained = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="b.json", loader=_Rec)], flexible=True,
+        [AssetSpec(alias="b", relative_path="b.json", loader=_Rec)], flexible=True,
     )
     assert unconstrained.is_trusted("b", None)
     assert unconstrained.is_trusted("b", "anything")
@@ -188,7 +228,7 @@ def test_is_trusted_truth_table():
 
 def test_assert_trusted_raises_with_attributes():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec, states={"open"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"open"})],
         flexible=False,
     )
     with pytest.raises(AssetNotTrustedInStateError) as exc:
@@ -208,8 +248,8 @@ def test_unknown_alias_raises_keyerror_before_trust_check():
 def test_trusted_aliases():
     book = AliasedAssetSpecs.from_declaration(
         [
-            AssetSpec(relative_path="a.json", loader=_Rec, states={"new"}),
-            AssetSpec(relative_path="b.json", loader=_Rec, states={"open"}),
+            AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"new"}),
+            AssetSpec(alias="b", relative_path="b.json", loader=_Rec, states={"open"}),
         ],
         flexible=False,
     )
@@ -219,7 +259,7 @@ def test_trusted_aliases():
 
 def test_get_path_and_loader_skips_guard_when_cur_state_omitted():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec, states={"open"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"open"})],
         flexible=False,
     )
     path, loader = book.get_path_and_loader("a")
@@ -229,7 +269,7 @@ def test_get_path_and_loader_skips_guard_when_cur_state_omitted():
 
 def test_get_path_and_loader_enforces_guard_when_cur_state_given():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec, states={"open"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"open"})],
         flexible=False,
     )
     with pytest.raises(AssetNotTrustedInStateError):
@@ -238,7 +278,7 @@ def test_get_path_and_loader_enforces_guard_when_cur_state_given():
 
 def test_validate_against_fsm_unknown_state():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec, states={"opne"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"opne"})],
         flexible=False,
     )
     with pytest.raises(AssetSchemaError, match="opne"):
@@ -247,7 +287,7 @@ def test_validate_against_fsm_unknown_state():
 
 def test_validate_against_fsm_strict_missing_loader():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=None, states={"new"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=None, states={"new"})],
         flexible=True,
     )
     with pytest.raises(AssetSchemaError, match="no loader"):
@@ -256,7 +296,7 @@ def test_validate_against_fsm_strict_missing_loader():
 
 def test_validate_against_fsm_strict_missing_states():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec)],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec)],
         flexible=True,
     )
     with pytest.raises(AssetSchemaError, match="no states"):
@@ -265,7 +305,7 @@ def test_validate_against_fsm_strict_missing_states():
 
 def test_validate_against_fsm_flexible_permits_omissions():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=None)],
+        [AssetSpec(alias="a", relative_path="a.json", loader=None)],
         flexible=True,
     )
     book.validate_against_fsm(_fsm(), flexible=True)
@@ -273,7 +313,7 @@ def test_validate_against_fsm_flexible_permits_omissions():
 
 def test_validate_against_fsm_terminal_without_keep():
     book = AliasedAssetSpecs.from_declaration(
-        [AssetSpec(relative_path="a.json", loader=_Rec, states={"closed"})],
+        [AssetSpec(alias="a", relative_path="a.json", loader=_Rec, states={"closed"})],
         flexible=False,
     )
     with pytest.raises(AssetSchemaError, match="keep"):
@@ -284,6 +324,7 @@ def test_validate_against_fsm_terminal_with_keep():
     book = AliasedAssetSpecs.from_declaration(
         [
             AssetSpec(
+                alias="a",
                 relative_path="a.json", loader=_Rec, states={"closed"}, keep=True,
             ),
         ],

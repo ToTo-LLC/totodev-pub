@@ -9,17 +9,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (
     AssetDataclassRegistry,
     asset_dataclass_registry,
 )
 from totodev_pub.folder_backed_case_support.asset_schema import (
     CALLABLE_SENTINEL,
-    DEFAULT_ALIAS_DELIMITER,
+    PATH_LOADER_SENTINEL,
     AssetSpec,
     _is_glob,
-    infer_alias,
     loader_name,
     validate_alias,
 )
@@ -62,7 +60,6 @@ class AliasedAssetSpecs:
         raw,
         *,
         flexible: bool,
-        delimiter: str = DEFAULT_ALIAS_DELIMITER,
     ) -> AliasedAssetSpecs:
         """Normalize a class-level `asset_aliases` declaration: a list (or tuple) of
         AssetSpec instances, `[]` when the case has no protocol-elevated data objects.
@@ -91,19 +88,16 @@ class AliasedAssetSpecs:
                 raise AssetSchemaError(
                     "asset_aliases list entries must be AssetSpec instances; got "
                     f"{type(entry).__name__} at index {index}. Construct with "
-                    "AssetSpec(relative_path=..., loader=..., states=..., ...)."
+                    "AssetSpec(alias=..., relative_path=..., loader=..., states=..., ...)."
                 )
             rel = _norm_rel(entry.relative_path)
-            if entry.alias is not None:
-                alias = entry.alias
-            else:
-                if _is_glob(rel):
-                    raise AssetSchemaError(
-                        f"asset_aliases[{index}] ({rel!r}) is a glob; "
-                        "provide an explicit 'alias' on the AssetSpec."
-                    )
-                alias = infer_alias(rel, delimiter=delimiter)
+            alias = entry.alias
             validate_alias(alias, context=f"AssetSpec({entry.relative_path!r})")
+            if entry.many and not _is_glob(rel):
+                raise AssetSchemaError(
+                    f"alias {alias!r}: many=True requires a glob relative_path; "
+                    f"got {rel!r}."
+                )
             states = _normalize_states(entry.states, context=f"alias {alias!r}")
             _add(
                 AssetSpec(
@@ -112,6 +106,7 @@ class AliasedAssetSpecs:
                     loader=entry.loader,
                     states=states,
                     keep=bool(entry.keep),
+                    many=bool(entry.many),
                 )
             )
         return cls(specs)
@@ -129,18 +124,23 @@ class AliasedAssetSpecs:
         for alias, entry in asset_aliases.items():
             path = entry["path"]
             loader: type | Callable[[Path], Any] | None = None
-            if resolve_types:
-                name = entry.get("loader")
-                if name and name != CALLABLE_SENTINEL:
-                    resolved = reg.resolve(name)
-                    if resolved is not None:
-                        loader = resolved
+            name = entry.get("loader")
+            if name == PATH_LOADER_SENTINEL:
+                loader = Path
+            elif resolve_types and name and name != CALLABLE_SENTINEL:
+                resolved = reg.resolve(name)
+                if resolved is not None:
+                    loader = resolved
             states_raw = entry.get("states")
             states = (
                 frozenset(states_raw) if states_raw is not None else None
             )
             specs[alias] = AssetSpec(
-                alias=alias, relative_path=path, loader=loader, states=states,
+                alias=alias,
+                relative_path=path,
+                loader=loader,
+                states=states,
+                many=bool(entry.get("many", False)),
             )
         return cls(specs)
 
@@ -153,6 +153,8 @@ class AliasedAssetSpecs:
             }
             if spec.states is not None:
                 entry["states"] = sorted(spec.states)
+            if spec.many:
+                entry["many"] = True
             result[alias] = entry
         return result
 
@@ -212,7 +214,7 @@ class AliasedAssetSpecs:
                 if spec.loader is None:
                     raise AssetSchemaError(
                         f"alias {alias!r} ({spec.relative_path!r}) has no loader. "
-                        "Give it a FileMappedPydanticMixin subclass or a "
+                        "Give it a FileMappedPydanticMixin subclass, Path, or a "
                         "Callable[[Path], Any], or enable flexible_asset_alias_loading."
                     )
                 if spec.states is None:

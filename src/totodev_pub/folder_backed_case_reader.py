@@ -129,12 +129,23 @@ class FolderBackedCaseReader:
         return self._assets
 
     def case_load_asset(self, alias: str) -> object:
-        """Load alias after persisted state trust check.
+        """Load a singular alias after persisted state trust check.
 
         Raises ``AssetNotTrustedInStateError`` before disk I/O when not trusted.
+        For ``many=True`` aliases use ``case_load_assets``.
         """
         self._resolve_asset_book().assert_trusted(alias, self.case_state)
         return self.case_assets.load_dataclass(alias)
+
+    def case_load_assets(self, alias: str) -> list:
+        """Load a ``many=True`` alias after persisted state trust check.
+
+        Returns an empty list when nothing matches. Raises
+        ``AssetNotTrustedInStateError`` before disk I/O when not trusted.
+        For singular aliases use ``case_load_asset``.
+        """
+        self._resolve_asset_book().assert_trusted(alias, self.case_state)
+        return self.case_assets.load_dataclasses(alias)
 
     @property
     def case_event_journal(self) -> CaseEventJournalView:

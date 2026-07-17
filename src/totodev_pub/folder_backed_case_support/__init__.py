@@ -33,6 +33,7 @@ from .exceptions import (
     FsmBindingError,
     AutoAdvanceBlocked,
     TriggerTimeout,
+    CaseInvokedProcessError,
     UnconfiguredChokeError,
 )
 from .case_record import CaseRecord
@@ -82,6 +83,7 @@ __all__ = [
     "FsmBindingError",
     "AutoAdvanceBlocked",
     "TriggerTimeout",
+    "CaseInvokedProcessError",
     "UnconfiguredChokeError",
     "CaseRecord",
     "CaseReadProtocol",
