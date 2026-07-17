@@ -405,6 +405,9 @@ class FsmBindingError(Exception):
         (e.g. `case_state`, `case_advance`). These names back core behavior and must not be
         shadowed; a subclass that wrote `def case_state(self)` has silently broken the base,
         so we reject it at construction with the offending name and the class that redefined it.
+      * BAD_ASSERTION — a `case_assert_*` method violates the assertion convention
+        (unknown state, missing slug, `async def`, or missing the `ltx` parameter).
+        See validate_case_assertion_methods in case_assertions.py.
 
     The whole point is a loud, early, unambiguous failure: future developers WILL write a sync
     guard, misspell a method name, forget the `tctx` parameter, or clobber a base member, and
@@ -427,7 +430,7 @@ class FsmBindingError(Exception):
 
     def __init__(
         self, carrier_name: str, *, missing=None, sync=None, orphaned=None, bad_arity=None,
-        sealed=None,
+        sealed=None, bad_assertions=None,
     ):
         self.carrier_name = carrier_name
         self.missing = list(missing or [])
@@ -435,6 +438,7 @@ class FsmBindingError(Exception):
         self.orphaned = list(orphaned or [])
         self.bad_arity = list(bad_arity or [])
         self.sealed = list(sealed or [])
+        self.bad_assertions = list(bad_assertions or [])
         lines = [f"{carrier_name!r} is not a valid carrier for its FSM:"]
         for name, slot, trigger in self.missing:
             label = self._SLOT_LABEL.get(slot, slot)
@@ -473,4 +477,6 @@ class FsmBindingError(Exception):
                 "backs core FolderBackedCase behavior and must not be redefined — rename your "
                 "member"
             )
+        for name, reason in self.bad_assertions:
+            lines.append(f"  - assertion method {name!r}: {reason}")
         super().__init__("\n".join(lines))

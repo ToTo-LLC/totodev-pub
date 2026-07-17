@@ -118,3 +118,90 @@ def test_match_assertion_name_rejections():
     assert match_assertion_name("case_assert_open", states) is None      # empty slug
     assert match_assertion_name("case_assert_open_", states) is None     # empty slug
     assert match_assertion_name("unrelated_method", states) is None      # no prefix
+
+
+from totodev_pub.folder_backed_case_support.case_assertions import (
+    discover_class_assertions, validate_case_assertion_methods,
+)
+from totodev_pub.folder_backed_case_support.exceptions import FsmBindingError
+
+
+# ---------------------------------------------------------------------------
+# Task 3: bind-time validation + class-method discovery
+# ---------------------------------------------------------------------------
+
+STATES = ["new", "open", "open_ticket", "done"]
+
+
+def test_validate_accepts_wellformed_sync_assertions():
+    class Good:
+        def case_assert_open_has_owner(self, ltx):
+            return None
+
+        def case_assert_open_ticket_check(self, ltx):
+            return None
+
+    validate_case_assertion_methods(Good, STATES)   # must not raise
+
+
+def test_validate_rejects_unknown_state_with_teaching_message():
+    class BadState:
+        def case_assert_oepn_has_owner(self, ltx):  # typo'd state
+            return None
+
+    with pytest.raises(FsmBindingError) as ei:
+        validate_case_assertion_methods(BadState, STATES)
+    msg = str(ei.value)
+    assert "case_assert_oepn_has_owner" in msg
+    assert "case_assert_<state>_<slug>" in msg      # teaches the convention
+    assert "open" in msg                            # lists known states
+    assert ei.value.bad_assertions
+
+
+def test_validate_rejects_missing_slug():
+    class NoSlug:
+        def case_assert_open(self, ltx):
+            return None
+
+    with pytest.raises(FsmBindingError):
+        validate_case_assertion_methods(NoSlug, STATES)
+
+
+def test_validate_rejects_async_assertion():
+    class BadAsync:
+        async def case_assert_open_has_owner(self, ltx):
+            return None
+
+    with pytest.raises(FsmBindingError) as ei:
+        validate_case_assertion_methods(BadAsync, STATES)
+    assert "synchronous" in str(ei.value)
+
+
+def test_validate_rejects_bad_arity():
+    class BadArity:
+        def case_assert_open_has_owner(self):       # missing ltx
+            return None
+
+    with pytest.raises(FsmBindingError) as ei:
+        validate_case_assertion_methods(BadArity, STATES)
+    assert "ltx" in str(ei.value)
+
+
+def test_discover_class_assertions_groups_and_sorts():
+    class Multi:
+        def case_assert_open_b_second(self, ltx):
+            return None
+
+        def case_assert_open_a_first(self, ltx):
+            return None
+
+        def case_assert_done_final(self, ltx):
+            return None
+
+    found = discover_class_assertions(Multi, STATES)
+    assert found["open"] == [
+        ("a_first", "case_assert_open_a_first"),
+        ("b_second", "case_assert_open_b_second"),
+    ]
+    assert found["done"] == [("final", "case_assert_done_final")]
+    assert "new" not in found
