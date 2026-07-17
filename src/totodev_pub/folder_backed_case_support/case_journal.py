@@ -41,6 +41,8 @@ from totodev_pub.folder_backed_case_support.constants import (
     EV_TRIGGER_TIMED_OUT,
     EV_TRIGGER_STARTED,
     EV_INVOKED_PROCESS_FAILED,
+    EV_ASSERT_FAILED,
+    EV_ASSERTED,
     EVENTS_DIR_NAME,
 )
 
@@ -216,6 +218,35 @@ class CaseEventJournal:
             {"returncode": returncode, "stderr": stderr},
         )
 
+    def log_assert_failed(
+        self,
+        value: str,
+        *,
+        state: str,
+        name: Optional[str],
+        source: str,
+        msg: str,
+        error: Optional[str] = None,
+    ) -> PrimitiveEventProxy:
+        """An assertion failed (CASE_ASSERT_FAILED). Observational only — NOT counted
+        by @FAIL. ``value`` is "<state>.<slug>" (glob-scannable), or the file's
+        basename for an assertion file that failed to import (``name`` None there).
+        ``source`` is "method" or "file:<filename>"; ``error`` carries the exception
+        type name when the assertion raised (or the import failed)."""
+        data: dict = {"state": state, "name": name, "source": source, "msg": msg}
+        if error is not None:
+            data["error"] = error
+        return self._append_base(EV_ASSERT_FAILED, value, data)
+
+    def log_asserted(
+        self, state: str, *, ran: int, failed: int, mode: str
+    ) -> PrimitiveEventProxy:
+        """Sweep summary (CASE_ASSERTED), exactly one per state entry — written even
+        under SKIP mode so observers can distinguish "all passed" from "never ran"."""
+        return self._append_base(
+            EV_ASSERTED, state, {"ran": ran, "failed": failed, "mode": mode}
+        )
+
     # ---- domain reads (case-specific interpretations of the generic log) ----
 
     @property
@@ -312,6 +343,18 @@ class CaseEventJournal:
                 return True
         return False
 
+    def assert_failures(
+        self, state: Optional[str] = None
+    ) -> list[PrimitiveEventProxy]:
+        """All CASE_ASSERT_FAILED events, most recent first, optionally filtered to
+        those whose data payload's ``state`` equals ``state``. The test-harness read:
+        an empty list (with CASE_ASSERTED summaries present) means green."""
+        out: list[PrimitiveEventProxy] = []
+        for ev in self._log.events(label_glob=EV_ASSERT_FAILED, recent_first=True):
+            if state is None or ev.contents().as_dict().get("state") == state:
+                out.append(ev)
+        return out
+
 
 class CaseEventJournalView:
     """Read-only facade over a case folder's event log.
@@ -359,6 +402,11 @@ class CaseEventJournalView:
 
     def count_fails_this_dwell(self) -> int:
         return self._journal.count_fails_this_dwell()
+
+    def assert_failures(
+        self, state: Optional[str] = None
+    ) -> list[PrimitiveEventProxy]:
+        return self._journal.assert_failures(state)
 
     @property
     def unresolved_trigger_started(self) -> Optional[PrimitiveEventProxy]:

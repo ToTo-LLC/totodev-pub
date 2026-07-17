@@ -15,6 +15,7 @@ ASSETS_DIR_NAME = "assets"           # the downstream-owned asset "playground"
 KEEP_LIST_NAME  = "_keep.txt"        # retention manifest at the CASE ROOT (case-relative rules)
 LOGS_DIR_NAME   = "logs"             # per-case folder-logging tee (NOT under assets/)
 LOG_FILE_NAME   = "case.log"         # the single appended per-case log file inside logs/
+ASSERTS_DIR_NAME = "assertions"      # per-case assertion files (case_assert_* functions)
 
 # Framework-owned keep rules seeded idempotently at case create/bind. Every rule is
 # case-relative (exact path or glob). Purge deletes any file under the case folder
@@ -44,6 +45,7 @@ CASE_RESERVED_ARTIFACT_NAMES = (
     KEEP_LIST_NAME,
     LEASE_NAME,
     LOGS_DIR_NAME,
+    ASSERTS_DIR_NAME,
 )
 # Event-log labels written by the FolderBackedCase base class. Every label is
 # CASE_-prefixed so an observer can isolate the family's lifecycle events with a
@@ -70,6 +72,13 @@ EV_TRIGGER_STARTED   = "CASE_TRIGGER_STARTED"   # a trigger's work slot began (v
 EV_INVOKED_PROCESS_FAILED = "CASE_INVOKED_PROCESS_FAILED"  # case_invoke_process: non-zero exit
                                             # (value = program/executable only; data has returncode +
                                             # stderr — never argv or env)
+EV_ASSERT_FAILED = "CASE_ASSERT_FAILED"  # an assertion failed (value = "<state>.<slug>",
+                                         # or the file basename for an import failure;
+                                         # data = state/name/source/msg[/error]). NOT
+                                         # counted by @FAIL — observational only.
+EV_ASSERTED      = "CASE_ASSERTED"       # sweep summary, one per state entry (value =
+                                         # state; data = ran/failed/mode). Written even
+                                         # under AssertionMode.SKIP (mode="skip").
 
 # Trigger timeout policy shared by FolderBackedCase and _CaseMachineFactory.
 DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS = 5.0
