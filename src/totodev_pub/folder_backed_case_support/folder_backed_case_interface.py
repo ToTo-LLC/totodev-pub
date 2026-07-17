@@ -469,51 +469,55 @@ class FolderBackedCaseInterface(ABC):
         """The case's CaseAssets: the file playground under ``assets/``.
 
         This object provides access to files in that directory and facilitates
-        loading of structured data files.
-        """
-        ...
-
-    def case_keep_files(self, *patterns: str | Path) -> None:
-        """Register case files to survive the post-termination purge.
-
-        Closing a case deletes everything under its folder except paths on the
-        case's keep list. Call this to add retention patterns — case-relative
-        exact paths or globs (e.g. ``exports/summary.pdf``, ``reports/*.csv``),
-        including under ``assets/`` (e.g. ``"assets/reply_draft.md"``) — this
-        method is case-root scoped, not assets-scoped, so an asset path needs
-        its ``assets/`` prefix spelled out.
-
-        Typical use: a RUNTIME keep decision that can't be made declaratively —
-        override ``on_terminating()`` and name the deliverables to preserve after
-        the case winds down, judged case-by-case. For an asset you already know at
-        class-definition time you'll want kept, prefer declaring
-        ``AssetSpec(keep=True)`` instead (seeded automatically, no procedural call
-        needed). Patterns are append-only and idempotent; duplicates are ignored.
-        Absolute paths inside the case folder are normalized to case-relative form.
-        To keep the per-case log across purge, pass ``"logs/case.log"`` (or a
-        covering glob) here.
-        """
-        ...
-
-    def case_load_asset(self, alias: str) -> object:
-        """Load a declared asset alias after checking it is trustworthy in the
-        current FSM state. Raises ``AssetNotTrustedInStateError`` before any disk
-        I/O when the alias is constrained and the current state is not listed.
-
-        Declaring ``asset_aliases`` is convenience sugar, not a requirement — a
-        subclass is free to leave it ``[]`` and manage its files by hand. Without
-        a declared alias (or for unguarded access even with one), reach
-        ``case_assets`` directly: ``case_assets.asset_path(relative_path)`` for
-        the filepath, or ``case_assets.read(relative_path)`` / your own parsing
+        loading of structured data files. Declaring ``asset_aliases`` (see
+        ``case_load_asset()``) is convenience sugar, not a requirement — a
+        subclass is free to leave it ``[]`` and manage its files by hand.
+        Without a declared alias (or for unguarded access even with one), use
+        this directly: ``case_assets.asset_path(relative_path)`` for the
+        filepath, or ``case_assets.read(relative_path)`` / your own parsing
         for the in-memory object.
         """
         ...
 
-    def case_record(self, *, force: bool = False) -> CaseRecord:
-        """Public read accessor for the identity record.
+    def case_keep_files(self, *patterns: str | Path) -> None:
+        """Register glob patterns for files to keep when the case reaches
+        terminal status and its folder is otherwise purged.
 
-        Returns a detached deep-copy snapshot. Pass ``force=True`` to re-read
-        from disk first when another process may have changed the file.
+        Patterns are case-relative (e.g. ``"reports/*.csv"``), including files
+        under ``assets/`` — this method is case-root scoped, not
+        assets-scoped, so an asset path needs its ``assets/`` prefix spelled
+        out. Absolute paths inside the case folder are normalized to
+        case-relative form.
+
+        Prefer declaring ``AssetSpec(keep=True)`` for assets you already know
+        at class-definition time. Call this instead for a runtime keep
+        decision — e.g. from ``on_terminating()``, naming deliverables to
+        preserve as judged case-by-case.
+        """
+        ...
+
+    def case_load_asset(self, alias: str) -> object:
+        """Load the asset declared under ``alias`` in ``asset_aliases``, returning
+        the object its ``loader`` produces.  You must declare the asset in 
+        ``asset_aliases`` in order to use this method.
+
+        Before touching disk, checks that the current FSM state is one where
+        ``alias`` is trustworthy (per the spec's ``states``), raising
+        ``AssetNotTrustedInStateError`` if not.
+        """
+        ...
+
+    def case_record(self, *, force: bool = False) -> CaseRecord:
+        """Public read accessor for the case's identity record: a deliberately
+        skinny, stable set of facts about the case — what type it is, its id(s),
+        its declared asset/FSM shape, and (once reached) its terminal facts. It is
+        NOT where detailed, evolving instance data lives; that belongs in assets
+        or the event log. Correspondingly, a driver class will rarely have reason
+        to write to this record directly.
+
+        Returns a detached deep-copy snapshot, so mutating the result has no
+        effect on the case. Pass ``force=True`` to re-read from disk first when
+        another process may have changed the file.
         """
         ...
 
@@ -522,20 +526,35 @@ class FolderBackedCaseInterface(ABC):
     # =======================================================================
 
     def case_log_alert(self, short_msg: str = "", *, where: str | None = None) -> None:
-        """Add a CASE_ALERTED entry to the event log: the case family's single
-        type-agnostic "this case needs a human to look at it" marker.
+        """Append a CASE_ALERTED entry to the event log — the "this case needs a
+        human to look at it" marker. Purely conventional: nothing enforces a
+        response, and it does not touch FSM state (no transition, no
+        termination). Because CASE_ALERTED reads the same for every case type, a
+        type-agnostic observer (dashboard, fleet scan) can surface flagged cases
+        without knowing any of this case's internals.
 
-        Call to flag a case for human attention. Because it reads the same for
-        every case type, an observer can surface flagged cases without knowing
-        any internals. Use SPARINGLY on the low-volume audit log: raise one for
-        an integrity risk or a substantial deviation from norms, NOT for routine,
-        recoverable defects the flow absorbs. Orthogonal to the FSM (does not
-        change state or terminate the case).
+        Use SPARINGLY on this low-volume audit log — raise one for an integrity
+        risk or a substantial deviation from norms, NOT for a routine,
+        recoverable defect the flow already absorbs (that belongs on
+        ``self.log`` instead).
+
+        Prefer calling this from a hook that runs once per attempt
+        (``perform_``/``before_``/``after_``/``on_enter_``/``on_exit_``) rather
+        than from a ``guard_``, which can be polled repeatedly and would
+        duplicate the alert. Called during ``case_advance()``, the message
+        also surfaces on the returned ``AdvanceResult.alerts``.
 
         Args:
             short_msg: a brief human-readable reason (terse phrase, not a stack
-                trace).
-            where: locus of concern; defaults to the current state.
+                trace). Leaving it empty is legal but rarely useful — the
+                message is the whole point.
+            where: locus of concern, stored as the event's value (searchable /
+                glob-scannable); defaults to the current state name, but any
+                short free-text label is fine if it better names what to look
+                at. Becomes literal filename text on disk — keep it short and
+                free of ``/ \\ : * ? " < > |``. It is NOT sanitized for you;
+                an illegal character (especially ``/``) or an overlong value
+                raises ``OSError`` out of the write.
         """
         ...
 
@@ -613,10 +632,32 @@ class FolderBackedCaseInterface(ABC):
 
     @staticmethod
     def get_case_reader(folder: Path) -> FolderBackedCaseReader:
-        """Return a lock-free read-only view of a case folder — no lease, no
-        registry.
+        """Return a lock-free, read-only view of a case folder — no lease, no
+        registry, no live case object required.
 
-        The case reader retrieves data about the case from disk rather than
-        memory but typically provides no direct means of modifying the case.
+        This is the primary way to read a case's data without acquiring its
+        lease. It's especially useful when you have no live instance at all
+        (nothing to detach), or when a live instance HAS been detached and its
+        read-only snapshot properties (``case_state``, ``case_dwell_secs``,
+        etc.) are frozen at their last-known in-memory values. The reader has
+        no such staleness: every property re-reads disk on access, so it stays
+        current even if another process or thread advances the case afterward.
+        That also makes it safe to hand across process/thread boundaries —
+        unlike a live case object, which is bound to one owner's lease.
+
+        The returned ``FolderBackedCaseReader`` mirrors the read-only surface
+        above (``case_id``, ``case_state``, ``case_is_terminal``,
+        ``case_dwell_secs``, ``case_assets``, ``case_load_asset()``,
+        ``case_event_journal``, plus lease-aware extras like
+        ``case_lease_secs_left`` and ``case_active_trigger``) as thin wrappers
+        over the same ``peek_*`` static methods on this class. Each access
+        re-reads its source of truth (record, event log, or filesystem) rather
+        than caching, so expect more I/O cost per read than the equivalent
+        in-memory property on a live case — a reasonable trade for
+        correctness when you can't or don't want to hold the lease.
+
+        Cannot trigger transitions or otherwise mutate the case — for that you
+        need a live, lease-holding instance (see ``create_case_in_folder()`` /
+        ``case_type_registry.rehydrate()``).
         """
         ...
