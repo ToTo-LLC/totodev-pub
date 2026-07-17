@@ -1,7 +1,15 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""CaseManager — fleet coordinator for folder-backed cases (§1)."""
+"""CaseManager — fleet coordinator for folder-backed cases (§1).
+
+Host entry point (process ownership, signals, exit codes, watchdog arm/park):
+    from totodev_pub.case_manager_support.case_manager_host import serve
+
+``serve(manager)`` is the blessed way to run a CaseManager as a whole process.
+See that module for the full host contract. ``CaseManager.serve()`` is a thin
+delegator only.
+"""
 
 from __future__ import annotations
 
@@ -371,11 +379,11 @@ class CaseManager:
         self._write_manifest(running=False, stopped=True)
 
     async def serve(self, **kwargs: Any) -> None:
-        """Delegates to ``case_manager_host.serve()`` for discoverability;
-        ``from totodev_pub.case_manager_host import serve`` is the blessed import
-        path and the place to read the full contract (exit codes, signal
-        wiring, watchdog orchestration)."""
-        from totodev_pub.case_manager_host import serve as host_serve
+        """Delegates to ``case_manager_support.case_manager_host.serve()`` for
+        discoverability; ``from totodev_pub.case_manager_support.case_manager_host
+        import serve`` is the blessed import path and the place to read the full
+        contract (exit codes, signal wiring, watchdog orchestration)."""
+        from totodev_pub.case_manager_support.case_manager_host import serve as host_serve
 
         await host_serve(self, **kwargs)
 

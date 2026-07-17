@@ -12,7 +12,7 @@ Typical host program:
 
     import asyncio
     from totodev_pub.case_manager import CaseManager
-    from totodev_pub.case_manager_host import serve
+    from totodev_pub.case_manager_support.case_manager_host import serve
     from myapp.cases import InquiryCase
 
     manager = CaseManager.open("/data/inquiries", register_types=[InquiryCase])

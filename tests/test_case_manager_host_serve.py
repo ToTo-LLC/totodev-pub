@@ -8,9 +8,13 @@ import threading
 import pytest
 
 from case_manager_test_utils import provision_manager
-from totodev_pub import case_manager_host
 from totodev_pub.case_manager_client import CaseManagerClient
-from totodev_pub.case_manager_host import EXIT_RESTART_REQUESTED, EXIT_WATCHDOG, serve
+from totodev_pub.case_manager_support import case_manager_host
+from totodev_pub.case_manager_support.case_manager_host import (
+    EXIT_RESTART_REQUESTED,
+    EXIT_WATCHDOG,
+    serve,
+)
 from totodev_pub.case_manager_support.case_manager_manifest import CaseManagerManifest
 from totodev_pub.case_manager_support.constants import MANIFEST_FILENAME
 
