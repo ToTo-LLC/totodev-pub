@@ -133,7 +133,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # DSL name) fail at bind via validate_object_compatibility(orphan_detection="error").
     #
     # SIGNATURE: every hook takes `tctx` after `self`. Hooks must yield the event loop;
-    # offload blocking work via case_run_blocking(). See "Creating Hook Methods" in the
+    # offload blocking work via case_invoke_threaded(). See "Creating Hook Methods" in the
     # FolderBackedCaseInterface class docstring for the well-behaved-async /
     # lease-keepalive contract.
 
@@ -612,22 +612,30 @@ class FolderBackedCase(FolderBackedCaseInterface):
         (``YYYY-MM``). Override to key on creation date, fiscal period, tenant, etc."""
         return _utcnow().strftime("%Y-%m")
 
-    async def case_run_blocking(self, fn, /, *args, **kwargs):
-        """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `perform_`. Runs `fn`
-        on the default thread-pool executor and awaits it, so the call does NOT freeze the
-        event loop (which would stall every other case sharing it). Use ONLY when a library
-        gives you no async API:
+    async def case_invoke_threaded(self, fn, /, *args, **kwargs):
+        """OPT-IN escape hatch for a SYNCHRONOUS/blocking call inside a `perform_`.
+
+        Submits ``fn(*args, **kwargs)`` to the event loop's default **thread-pool**
+        executor and awaits the result, so the call does NOT freeze the shared loop
+        (which would stall every other case). The worker thread runs ``fn`` to
+        completion; it is not periodically paused. Use ONLY when a library gives you
+        no async API:
 
             async def perform_fetch(self, tctx):
-                resp = await self.case_run_blocking(requests.get, url)
+                resp = await self.case_invoke_threaded(requests.get, url)
 
-        SECOND-CLASS by design, with two caveats vs. an async-native client:
+        SECOND-CLASS by design, with caveats vs. an async-native client:
           * Concurrency is bounded by the executor's thread pool (not the ~unbounded
             concurrency of real async I/O), so blocking calls do not scale the same way.
-          * The hard-abort (TriggerTimeout) cancels the AWAIT, but a running thread cannot be
-            killed — the worker keeps going until `fn` returns on its own. So a true hang here
-            frees the case but leaks the thread. Prefer an async client for anything that can
-            hang."""
+          * The hard-abort (TriggerTimeout) cancels the AWAIT, but a running thread
+            cannot be killed — the worker keeps going until ``fn`` returns on its own.
+            So a true hang here frees the case but leaks the thread. Prefer an async
+            client for anything that can hang.
+          * Threads share the process and the GIL: fine for typical sync I/O (which
+            usually releases the GIL while waiting); not a multi-core speedup for
+            pure-Python CPU work. For CPU-bound isolation, hand-roll a
+            ``ProcessPoolExecutor`` (pickling constraints apply) or prefer a
+            stand-alone CLI via a process helper when available."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
 
@@ -697,7 +705,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "case_is_live", "case_is_terminal", "case_terminal_states",
         "case_transition_fail_count", "case_id",
         "case_advance", "case_detach", "case_heartbeat", "case_record",
-        "case_emit_alert_event", "case_run_blocking", "case_reclassify_to",
+        "case_emit_alert_event", "case_invoke_threaded", "case_reclassify_to",
     })
 
     # Public members deliberately absent from FolderBackedCaseInterface
@@ -716,7 +724,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # runtime seams & rare operations
         "trigger_warn_secs",
         "archive_grouping_label",
-        "case_run_blocking",
+        "case_invoke_threaded",
         "case_reclassify_to",
         # lease-machinery peeks (fleet observers / recovery sweeps, not owners —
         # the owner's facility is case_heartbeat, on the interface)

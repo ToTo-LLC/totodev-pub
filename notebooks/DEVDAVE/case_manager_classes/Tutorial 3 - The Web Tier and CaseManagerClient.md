@@ -157,7 +157,7 @@ class InquiryCase(FolderBackedCase):
         docs = self.case_assets.list_assets()          # e.g. 2 attachments
         for i, name in enumerate(docs, start=1):
             self._ocr_current_file = name
-            await self.case_run_blocking(ocr_one_document, name)   # the actual slow work
+            await self.case_invoke_threaded(ocr_one_document, name)   # the actual slow work
             self._ocr_progress = (i, len(docs))         # in-memory only — no file write per document
         self._ocr_progress = None
         self._ocr_current_file = None

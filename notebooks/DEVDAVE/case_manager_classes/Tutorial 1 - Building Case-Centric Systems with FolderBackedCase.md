@@ -378,7 +378,7 @@ Whether `ocr` means "at most 2 concurrent" is the *deployment's* decision, made 
 
 **The async contract.** Hooks run on a shared event loop alongside every other live case, so they
 must await rather than block. When a library gives you no async API, wrap the call:
-`await self.case_run_blocking(requests.get, url)`.
+`await self.case_invoke_threaded(requests.get, url)`.
 
 **A note on file locking.** `FileMappedPydanticMixin` files support cross-process locking, but
 inside a hook you are already the case's single owner (the case holds a heartbeat *lease* on its

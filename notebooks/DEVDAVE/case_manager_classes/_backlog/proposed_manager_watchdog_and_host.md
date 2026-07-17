@@ -75,7 +75,7 @@ reasons:
    blocked in a C call or syscall never reaches — precisely the failure mode we care
    about.
 2. **A successful thread kill creates a two-writer hazard.** Blocking work runs on
-   executor threads (`case_run_blocking`), and "a running thread cannot be killed — the
+   executor threads (`case_invoke_threaded`), and "a running thread cannot be killed — the
    worker keeps going until `fn` returns." Kill the coordinator thread and executor
    threads may still be writing into case folders while the lapsed leases are reclaimed
    by a replacement manager. The lease-expiry safety story assumes the old **process**
@@ -686,7 +686,7 @@ present:
   thread's stack — **pointing at the exact line of their code that blocked the loop** —
   then process exit with the watchdog code. This turns the watchdog into a first-class
   *development* diagnostic, not just a production safety net: the most common cause (a
-  synchronous call inside a `perform_*` that should have used `case_run_blocking`) is
+  synchronous call inside a `perform_*` that should have used `case_invoke_threaded`) is
   identified by the dump directly.
 - Nothing restarts the process automatically — there is no supervisor. That is the
   correct desktop default: the developer reads the dump, fixes the hook, reruns. (Anyone

@@ -208,8 +208,9 @@ class TriggerTimeout(Exception):
     absorbed failure.
 
     NOTE: aborting an async-native await cancels it cleanly; a call offloaded via
-    run_blocking() cannot truly be killed (the thread runs on), so the abort frees the case
-    but may leak the worker — prefer async-native clients for anything that can hang."""
+    case_invoke_threaded() cannot truly be killed (the thread runs on), so the abort
+    frees the case but may leak the worker — prefer async-native clients for anything
+    that can hang."""
     def __init__(self, case_id: str, trigger: Optional[str], state: str, *,
                  elapsed: float, ceiling: float):
         super().__init__(

@@ -194,7 +194,7 @@ class FolderBackedCaseInterface(ABC):
 
     Contract — hooks must be well-behaved async. The lease keepalive depends on
     a trigger's work actually yielding the event loop: await at reasonable
-    intervals and offload blocking/CPU-bound work via ``case_run_blocking()``
+    intervals and offload blocking/CPU-bound work via ``case_invoke_threaded()``
     (an advanced member on ``FolderBackedCase``) or your own executor. A hook
     that monopolizes the loop starves other cases and its own heartbeat. The
     keepalive protects only the trigger's work slot (``perform_``/``before``);
