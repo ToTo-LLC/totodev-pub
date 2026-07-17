@@ -70,3 +70,51 @@ def test_journal_assert_failures_state_filter_and_view(tmp_path):
 
     view = CaseEventJournalView.for_folder(tmp_path)
     assert len(view.assert_failures(state="b")) == 1
+
+
+from totodev_pub.folder_backed_case_support.case_assertions import (
+    ASSERT_METHOD_PREFIX, AssertionMode,
+    get_case_assertion_mode, set_case_assertion_mode, match_assertion_name,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_assertion_mode():
+    """The mode knob is process-global; every test starts and ends at FULL."""
+    set_case_assertion_mode(AssertionMode.FULL)
+    try:
+        yield
+    finally:
+        set_case_assertion_mode(AssertionMode.FULL)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: mode knob + name matching
+# ---------------------------------------------------------------------------
+
+def test_assertion_mode_knob_roundtrip_and_type_guard():
+    assert get_case_assertion_mode() is AssertionMode.FULL
+    set_case_assertion_mode(AssertionMode.SKIP)
+    assert get_case_assertion_mode() is AssertionMode.SKIP
+    with pytest.raises(TypeError):
+        set_case_assertion_mode("skip")  # type: ignore[arg-type]
+
+
+def test_match_assertion_name_greedy_longest_state_wins():
+    states = ["open", "open_ticket", "closed"]
+    # 'open_ticket' is the longest matching state; slug is what follows it.
+    assert match_assertion_name("case_assert_open_ticket_check", states) == (
+        "open_ticket", "check",
+    )
+    # Only 'open' matches here.
+    assert match_assertion_name("case_assert_open_has_owner", states) == (
+        "open", "has_owner",
+    )
+
+
+def test_match_assertion_name_rejections():
+    states = ["open", "closed"]
+    assert match_assertion_name("case_assert_nosuch_check", states) is None
+    assert match_assertion_name("case_assert_open", states) is None      # empty slug
+    assert match_assertion_name("case_assert_open_", states) is None     # empty slug
+    assert match_assertion_name("unrelated_method", states) is None      # no prefix
