@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from totodev_pub.folder_backed_case_support.folder_backed_case_interface import (
-    FolderBackedCaseInterface,
+    FolderBackedCaseInterface, _raises_when_detached,
 )
 from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME, LEASE_NAME, LOGS_DIR_NAME, LOG_FILE_NAME,
@@ -92,17 +92,6 @@ __all__ = [
     "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
 ]
-
-
-def _raises_when_detached(fn):
-    """Documentary marker (no behavior change): tags a PUBLIC method that raises
-    ``DetachedCaseError`` when called on a detached husk (see ``case_is_detached`` /
-    ``_check_active()``). Purely metadata — the actual guard is the method's own
-    ``self._check_active()`` call; this decorator does not add, remove, or reorder it.
-    Only apply to public ``case_*`` methods; private/internal methods don't need it."""
-    fn.__raises_when_detached__ = True
-    return fn
-
 
 # ---------------------------------------------------------------------------
 # FolderBackedCase — the logic base class

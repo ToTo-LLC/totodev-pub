@@ -40,6 +40,24 @@ if TYPE_CHECKING:
     from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 
 
+def _raises_when_detached(fn):
+    """Mark a method whose contract forbids operation on a detached case.
+
+    Detachment relinquishes the case's authority to alter its state on disk, so
+    marked operations are conceptually incapable of proceeding and must raise
+    ``DetachedCaseError``. This is documentary metadata only; concrete
+    implementations remain responsible for enforcing the contract.
+
+    Scope note: this only governs mutating operations. Read-only snapshot
+    members are deliberately NOT marked — a detached husk keeps answering
+    those with its last-known in-memory values (see ``case_is_detached``).
+    For guaranteed-current status without a lease, use
+    ``get_case_reader(case_folder)`` rather than reaching for this decorator.
+    """
+    fn.__raises_when_detached__ = True
+    return fn
+
+
 class FolderBackedCaseInterface(ABC):
     """Basic-usage authoring surface for folder-backed case types.
 
@@ -270,6 +288,7 @@ class FolderBackedCaseInterface(ABC):
         """
         ...
 
+    @_raises_when_detached
     async def case_advance(
         self, trigger: str | None = None, trigger_kwargs: dict | None = None,
     ) -> AdvanceResult:
@@ -336,6 +355,12 @@ class FolderBackedCaseInterface(ABC):
         A detached object is a husk — any mutating use (``case_advance()``,
         manual triggers) raises ``DetachedCaseError``. Re-open via
         ``case_type_registry.rehydrate(case_folder)``.
+
+        Read-only snapshot members (``case_state``, ``case_id``, etc.) keep
+        answering on a husk, but with whatever was last known in memory — they
+        do not re-read disk and will not reflect changes made by another owner
+        since detach. For guaranteed-current, lock-free status without holding
+        the lease, use ``get_case_reader(case_folder)`` instead.
         """
         ...
 
@@ -355,6 +380,14 @@ class FolderBackedCaseInterface(ABC):
         Orthogonal to ``case_advanceable`` (structural). Cleared when a restricted
         advance, a direct trigger call, or an unrestricted progress/fail supersedes
         the observation; left unchanged on a plain unrestricted no-op.
+
+        A case might be blocked for any combination of reasons:
+           1) The case is in a state with no auto-exit.
+           2) All auto-exits are gated by guards that are returning False.
+
+        Note that this value is "historical", reflecting the last attempt to advance
+        and may not indicate the current ability of the state to advance.
+        An exception during trigger execution will also clear this flag.
         """
         ...
 

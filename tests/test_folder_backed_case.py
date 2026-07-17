@@ -20,6 +20,7 @@ from totodev_pub.folder_backed_case import (
 )
 import totodev_pub.folder_backed_case as _fbc
 import totodev_pub.folder_backed_case_support.case_machine_factory as _cmf
+import totodev_pub.folder_backed_case_support.folder_backed_case_interface as _fbci
 from totodev_pub.folder_backed_case_support.case_type_registry import (
     CaseTypeRegistry,
     case_type_registry,
@@ -88,6 +89,14 @@ class ReclassTarget(FolderBackedCase):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_raises_when_detached_is_contract_metadata_on_interface():
+    assert hasattr(_fbci, "_raises_when_detached")
+    assert _fbci._raises_when_detached.__module__ == _fbci.__name__
+    assert _fbci.FolderBackedCaseInterface.case_advance.__raises_when_detached__
+    assert FolderBackedCase.case_advance.__raises_when_detached__
+    assert FolderBackedCase.case_heartbeat.__raises_when_detached__
 
 
 def test_create_and_basic_properties(tmp_path):
