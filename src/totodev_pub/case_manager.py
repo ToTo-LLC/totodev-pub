@@ -269,7 +269,10 @@ class CaseManager:
 
     @property
     def is_idle(self) -> bool:
-        """No pooled cases and no pending mailbox intake (§8 self-completion)."""
+        """No pooled cases and no pending mailbox intake (§8 self-completion).
+
+        Does not include the shutdown mailbox — a shutdown file may arrive after
+        an idle check but before the process exits."""
         if len(self._driver) > 0:
             return False
         for intake in (
@@ -366,6 +369,15 @@ class CaseManager:
             await self._settle_with_diagnostics()
         self._publish_fleet_status_board(force=True)
         self._write_manifest(running=False, stopped=True)
+
+    async def serve(self, **kwargs: Any) -> None:
+        """Delegates to ``case_manager_host.serve()`` for discoverability;
+        ``from totodev_pub.case_manager_host import serve`` is the blessed import
+        path and the place to read the full contract (exit codes, signal
+        wiring, watchdog orchestration)."""
+        from totodev_pub.case_manager_host import serve as host_serve
+
+        await host_serve(self, **kwargs)
 
     async def _manager_loop(self) -> None:
         """One tick = maintenance (mailbox intake first), then the pool sweep.

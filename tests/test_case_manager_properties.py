@@ -16,6 +16,7 @@ async def test_lifecycle_properties(tmp_path):
     assert manager.is_running is True
     await manager.stop()
     assert manager.is_running is False
+    assert manager.is_recovered is True
 
 
 @pytest.mark.asyncio

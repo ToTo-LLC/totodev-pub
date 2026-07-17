@@ -82,6 +82,13 @@ async def serve(
     blocking ``perform_*`` hook. ``stop_when_empty=True`` is sugar for
     "stop when manager.is_idle" (job-manager hosts, §8); mutually exclusive
     with an explicit ``stop_when``.
+
+    Production deployments should leave ``watchdog_enabled=True`` (the
+    default). Hosting with ``watchdog_enabled=False`` disables in-process
+    wedge remediation entirely: after three consecutive loop failures the
+    task dies and this coroutine never returns, but no exit code is emitted —
+    the process just sits there unless an external supervisor (health probe,
+    orchestrator restart policy) catches the resulting stale heartbeat.
     """
     if manager.is_recovered or manager.is_running:
         raise ValueError(

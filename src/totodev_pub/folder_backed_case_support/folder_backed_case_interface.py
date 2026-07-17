@@ -141,7 +141,7 @@ class FolderBackedCaseInterface(ABC):
         )
         try:
             await case.open_ticket()
-            await case.case_advance()
+            await case.case_advance() # might trigger mark_as_duplicate()
             if case.case_is_live:
                 await case.close_ticket()
         finally:

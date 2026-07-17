@@ -1,11 +1,15 @@
 # Finishing: Manager watchdog, host entry point, and die-loudly contract
 
-- Status: **follow-up work — implement before promoting to `main`.**
+- Status: **follow-up work — implement before promoting to `main`.** The low-impact,
+  no-decision-required items (part of Follow-up 3, all of Follow-up 5's cheap items) were
+  implemented 2026-07-16; Follow-ups 1, 2, and 4, plus Follow-up 3's optional hardening
+  and Follow-up 5's operator doc, remain open — see "What remains" under the promotion
+  checklist below.
 - Written 2026-07-10. The core feature landed on branch `feature/manager-watchdog-host`
-  (worktree `.worktrees/manager-watchdog-host`, commits `eab148b`–`12c2a6a`).
+  (worktree `.worktrees/manager-watchdog-host`, commits `eab148b`–`12c2a6a`), later merged
+  into `explore/case-queue` (`31e8795`).
 - Parent proposal: [`proposed_manager_watchdog_and_host.md`](proposed_manager_watchdog_and_host.md)
   (implemented 2026-07-09).
-- Implementation plan: [`docs/superpowers/plans/2026-07-09-manager-watchdog-and-host.md`](../../../../docs/superpowers/plans/2026-07-09-manager-watchdog-and-host.md).
 
 ## What shipped
 
@@ -145,6 +149,10 @@ If the gate stays, document explicitly in `CaseManagerClient.submit_shutdown()` 
 
 ## Follow-up 3 (Important): `watchdog_enabled=False` under `serve()`
 
+**Status: doc-only half done (2026-07-16).** `serve()`'s docstring now states the
+production expectation. The fallback `on_loop_failure` (fail-loud exit even with the
+watchdog explicitly disabled) is still an open team decision — not implemented.
+
 ### Problem
 
 When `watchdog_enabled=False`, `serve()` does not register `on_loop_failure`. A manager
@@ -155,14 +163,17 @@ behavior.
 
 ### Recommended fix
 
-**Document as misconfiguration for production hosts.** Add to `serve()` docstring:
+**Document as misconfiguration for production hosts — done.** `serve()`'s docstring now
+reads:
 
 > Production deployments should leave `watchdog_enabled=True` (the default). Hosting with
-> `watchdog_enabled=False` disables in-process wedge remediation; loop failures become
-> silent after three retries unless an external supervisor (health probe, orchestrator
-> restart policy) catches the stale heartbeat.
+> `watchdog_enabled=False` disables in-process wedge remediation entirely: after three
+> consecutive loop failures the task dies and this coroutine never returns, but no exit
+> code is emitted — the process just sits there unless an external supervisor (health
+> probe, orchestrator restart policy) catches the resulting stale heartbeat.
 
-Optionally, register a fallback `on_loop_failure` when watchdog is disabled:
+**Still open:** optionally register a fallback `on_loop_failure` when watchdog is
+disabled:
 
 ```python
 def _loop_failure_no_watchdog(exc: BaseException) -> None:
@@ -183,8 +194,9 @@ process exit on loop death).
 
 ### Acceptance criteria
 
-- Docstring clearly states production expectation.
-- Team decides: doc-only vs. fallback exit on loop failure when watchdog disabled.
+- [x] Docstring clearly states production expectation.
+- [ ] Team decides: doc-only (current state) vs. fallback exit on loop failure when
+  watchdog disabled.
 
 ---
 
@@ -204,39 +216,36 @@ These are lower priority than Follow-ups 1–2 but cheap to add and high diagnos
 
 ## Follow-up 5 (Minor): Documentation and polish
 
-### `is_idle` vs. shutdown intake race
+**Status (2026-07-16):** the three cheap doc/test items are done. The operator-facing
+deployment doc remains unwritten; the `--namespace` note was never a gap (see below).
+
+### `is_idle` vs. shutdown intake race — done
 
 `stop_when_empty=True` can observe `is_idle=True` while a shutdown request file is
 landing in intake milliseconds later. The parent proposal accepts this as a latency gap,
-not a correctness bug. Add a one-line note to the `is_idle` property docstring:
+not a correctness bug. The `is_idle` property docstring now carries the note:
 
 > Does not include the shutdown mailbox — a shutdown file may arrive after an idle check
 > but before the process exits.
 
-### `is_recovered` after `stop()`
+### `is_recovered` after `stop()` — done
 
-`test_lifecycle_properties` does not assert `manager.is_recovered is True` after `stop()`.
-Task 9's precondition guard depends on `is_recovered` staying true once set. Add:
+`test_lifecycle_properties` now asserts `manager.is_recovered is True` after `stop()`,
+guarding Task 9's precondition (`is_recovered` staying true once set).
 
-```python
-await manager.stop()
-assert manager.is_running is False
-assert manager.is_recovered is True
-```
+### `CaseManager.serve()` delegator — done
 
-### `CaseManager.serve()` delegator
-
-The parent proposal allowed an optional one-line delegator on `CaseManager` for
-discoverability. Not implemented. Consider:
+Added on `CaseManager` for discoverability:
 
 ```python
 # case_manager.py
-async def serve(self, **kwargs) -> None:
+async def serve(self, **kwargs: Any) -> None:
     from totodev_pub.case_manager_host import serve as host_serve
     await host_serve(self, **kwargs)
 ```
 
-Low priority; `from totodev_pub.case_manager_host import serve` is the blessed import path.
+`from totodev_pub.case_manager_host import serve` remains the blessed import path; this
+is sugar only.
 
 ### Operator-facing deployment docs
 
@@ -296,8 +305,33 @@ Before merging `feature/manager-watchdog-host` to `main`:
 
 - [ ] Follow-up 1: `serve()` → `EXIT_WATCHDOG` integration test
 - [ ] Follow-up 2: decision on `enable_mailbox` vs. shutdown pickup (implement or document)
-- [ ] Follow-up 3: `watchdog_enabled=False` behavior documented (and optionally hardened)
+- [x] Follow-up 3: `watchdog_enabled=False` behavior documented — fallback-exit hardening
+  still an open decision
 - [ ] Follow-up 4: at least `mailbox_neglect` unit test (recommended)
-- [ ] Follow-up 5: `recovered` after `stop()` assertion (trivial)
+- [x] Follow-up 5: `recovered` after `stop()` assertion (trivial) — done 2026-07-16, along
+  with the `is_idle` docstring note and the `CaseManager.serve()` delegator. Operator
+  deployment doc still outstanding (low priority).
 - [ ] Full core test lane still green (1505+ pass; 6 pre-existing `test_case_machine_factory` failures acceptable)
 - [ ] Move or archive this document to `_backlog/implemented/` or update status to **done** when complete
+
+### What remains
+
+The real remaining work, in priority order:
+
+1. **Follow-up 1** — the highest-risk gap. No test drives three consecutive tick failures
+   through a running `serve()` and asserts exit 70; the seam is only unit-tested in
+   isolation (`ManagerWatchdog`) and via `test_serve_respects_watchdog_enabled_false`
+   (which only checks thread absence, not failure behavior).
+2. **Follow-up 2** — still an open design decision. `MailboxProcessor.maintenance_tick()`
+   still gates `_check_shutdown_intake()` behind `enable_mailbox`, so
+   `enable_mailbox=False` + `watchdog_enabled=False` (e.g. a misconfigured
+   `CaseManager.open_inprocess()` host) leaves the shutdown mailbox completely dead.
+   Needs a team call between Option A (hoist the check above the gate) and Option B
+   (document the coupling instead).
+3. **Follow-up 3's optional hardening** — whether to add the fail-loud
+   `_loop_failure_no_watchdog` fallback when `watchdog_enabled=False`, or leave it
+   doc-only as it is now.
+4. **Follow-up 4** — `mailbox_neglect` (untested `_oldest_intake_age`/ladder branch),
+   `tick_slow` alarm-only path, and a deliberate-stop-timeout → `EXIT_WATCHDOG` scenario
+   under `serve()` are all still uncovered by tests.
+5. **Follow-up 5's operator-facing deployment doc** — still unwritten; low priority.
