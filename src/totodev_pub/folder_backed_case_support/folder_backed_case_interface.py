@@ -34,6 +34,9 @@ from totodev_pub.folder_backed_case_support.case_assets import CaseAssets
 from totodev_pub.folder_backed_case_support.case_id_generation import CaseIDGenerator
 from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournalView
 from totodev_pub.folder_backed_case_support.case_record import CaseRecord
+from totodev_pub.folder_backed_case_support.constants import (
+    LEASE_HEARTBEAT_THROTTLE_SECS,
+)
 
 if TYPE_CHECKING:
     from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
@@ -91,9 +94,10 @@ class FolderBackedCaseInterface(ABC):
     - The case record is a skinny identity card; put your data in assets.
     - Don't instantiate ``FolderBackedCase``. Define a
       subclass.
-    - An in-memory case holds a heartbeat lease on its filesystem folder. 
+    - An in-memory case holds a heartbeat lease on its filesystem folder.
       Simple programs with no fear of concurrent access can ignore the lease.
-      Other progrems should make sure the lease is fresh.
+      Normal operation keeps it fresh automatically; only a held-but-idle
+      case needs a manual ``case_heartbeat()`` (see that method).
 
     Quick start
     -----------
@@ -346,6 +350,42 @@ class FolderBackedCaseInterface(ABC):
         With ``trigger`` (and optional ``trigger_kwargs``), attempts that named
         trigger. Returns an ``AdvanceResult`` describing outcome without
         necessarily raising; see ``AdvanceResult`` for the full reporter contract.
+        """
+        ...
+
+    @_raises_when_detached
+    def case_heartbeat(
+        self,
+        *,
+        min_update_secs: float = LEASE_HEARTBEAT_THROTTLE_SECS,
+        validate_ownership: bool = True,
+    ) -> None:
+        """Refresh this case's heartbeat lease — the keepalive for a held-but-idle
+        case.
+
+        How the lease works (the short version): a live in-memory case owns its
+        folder by holding a lease — a small file whose timestamp encodes "spoken
+        for until then". The window is short (a fixed crash-recovery TTL, ~30s);
+        staying the owner means re-stamping it before it lapses. Normal
+        operation does this for you: ``case_advance()`` beats before each step
+        and at every transition boundary, and while a trigger's work runs a
+        background pulse keeps beating on its behalf. A case that is actively
+        advancing never needs manual attention.
+
+        The one gap is a case you HOLD without advancing — parked in memory
+        between steps, waiting on external input, sitting in a custom dwell
+        loop. Left alone past the TTL, the lease lapses and another owner may
+        legitimately reclaim the folder. An idle holder should either call this
+        periodically or ``case_detach()`` and rehydrate later.
+
+        Call it as often as you like: refreshes are throttled
+        (``min_update_secs``, default ~10s), so a redundant call while the lease
+        is still fresh is a free no-op. It doubles as an ownership check —
+        raises ``OwnershipLostError`` if another owner has displaced this
+        instance (pass ``validate_ownership=False`` to skip that check;
+        ``min_update_secs=0`` forces an immediate re-stamp). There is no knob
+        for a LONGER lease — keeping an idle case alive is done by beating,
+        never by extending the window.
         """
         ...
 
@@ -611,22 +651,6 @@ class FolderBackedCaseInterface(ABC):
         ``resolve_asset_types=True`` to type each alias whose persisted loader
         name resolves through the asset-dataclass registry (others fall back to
         lazy).
-        """
-        ...
-
-    @staticmethod
-    def is_heartbeat_expired(folder: Path) -> bool | None:
-        """Lock-free lease staleness read for a case folder (recovery sweeps).
-
-        Return-value semantics: see ``HeartbeatLease.is_expired``.
-        """
-        ...
-
-    @staticmethod
-    def peek_lease_secs_left(folder: Path) -> float | None:
-        """Lock-free lease-time read for a case folder (no acquire).
-
-        Return-value semantics: see ``HeartbeatLease.secs_left``.
         """
         ...
 

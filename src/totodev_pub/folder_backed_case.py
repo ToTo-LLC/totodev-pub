@@ -588,13 +588,9 @@ class FolderBackedCase(FolderBackedCaseInterface):
         min_update_secs: float = LEASE_HEARTBEAT_THROTTLE_SECS,
         validate_ownership: bool = True,
     ) -> None:
-        """Extend our lease. Raises `OwnershipLostError` when ownership is displaced.
-
-        Quick use:
-          The mainstream driver does NOT need to call this — case_advance() beats the lease
-          for you. Call it directly only when you HOLD a bound case without advancing it (a
-          custom dwell loop, or an idle holder choosing to keep the folder spoken-for rather
-          than detaching — see the idle-ownership contract in SECTION 4)."""
+        # Contract (including the idle-holder keepalive story) lives on the
+        # interface. Throttle/ownership-token mechanics: see `HeartbeatLease.heartbeat`;
+        # the idle-ownership contract rationale is in SECTION 4.
         self._check_active()
         try:
             self._lease.heartbeat(
@@ -718,11 +714,14 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # extended-status hook (polled)
         "case_ext_status_info",
         # runtime seams & rare operations
-        "case_heartbeat",
         "trigger_warn_secs",
         "archive_grouping_label",
         "case_run_blocking",
         "case_reclassify_to",
+        # lease-machinery peeks (fleet observers / recovery sweeps, not owners —
+        # the owner's facility is case_heartbeat, on the interface)
+        "is_heartbeat_expired",
+        "peek_lease_secs_left",
     })
 
     @staticmethod
