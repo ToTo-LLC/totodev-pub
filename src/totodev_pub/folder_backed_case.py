@@ -79,6 +79,10 @@ from totodev_pub.folder_backed_case_support.heartbeat_lease import (
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     StateChainParser, FsmChainSpec,)
 from totodev_pub.folder_backed_case_support.case_machine_factory import _CaseMachineFactory
+from totodev_pub.folder_backed_case_support.case_assertions import (
+    AssertionMode, set_case_assertion_mode,
+    _CaseAssertionRunner, validate_case_assertion_methods,
+)
 from totodev_pub.folder_backed_case_support.case_logging import (
     LogRetention, set_case_log_retention,
     build_case_logger, write_attach_banner, write_detach_banner, disable_case_file_tee,
@@ -100,6 +104,7 @@ __all__ = [
     "CaseIDGenerator", "TimeSlugCaseIDGenerator",
     "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
+    "AssertionMode", "set_case_assertion_mode",
 ]
 
 # Stderr payload cap for CASE_INVOKED_PROCESS_FAILED journal entries.
@@ -655,6 +660,18 @@ class FolderBackedCase(FolderBackedCaseInterface):
           `@FAIL>=n` divert edge, or record intent here and let the next case_advance() carry
           it out."""
 
+    def on_assertion_failed(self, state: str, name: str, msg: str) -> None:
+        """Overridable notification hook, fired once per failed assertion (after the
+        CASE_ASSERT_FAILED journal event and the ``self.log`` error line). Default:
+        no-op. ``name`` is the assertion's slug (or its ``file:<filename>`` source
+        for an assertion file that failed to import).
+
+        Observational only — the machine is unaffected by assertion failures, and
+        this hook cannot change that. An exception raised here is logged and
+        swallowed (a misbehaving hook must not disturb the sweep). Synchronous, like
+        ``on_terminating``. See the "Assertions" section of the
+        ``FolderBackedCaseInterface`` docstring for the authoring contract."""
+
     def on_terminating(self) -> None:
         """Overridable hook fired in phase 1 (pre-finalization): assets still exist,
         record not yet stamped. Override to retain final artifacts before the
@@ -823,6 +840,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # overridable event handlers
         "on_transition_exception",
         "on_terminating",
+        "on_assertion_failed",
         # extended-status hook (polled)
         "case_ext_status_info",
         # runtime seams & rare operations
@@ -1016,6 +1034,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
                 sealed_names=FolderBackedCase._SEALED_MEMBER_NAMES,
                 sealed_owner=FolderBackedCase,
             )
+            validate_case_assertion_methods(cls, cls._fsm.states)
             cls._fsm_binding_checked = True
         self._folder = Path(case_folder)
         # Uninitialized-folder gate: missing record means create_case_in_folder() or
@@ -1098,6 +1117,10 @@ class FolderBackedCase(FolderBackedCaseInterface):
         self._was_blocked: bool = False
         # True while case_advance() owns set/clear of _was_blocked (suppress direct-trigger clear).
         self._in_case_advance: bool = False
+        # Assertion sweeps (observe-only, once per state entry) are executed by the
+        # runner; _on_state_changed calls it at the latest post-entry seam. See the
+        # case_assertions module docstring and the mini-spec it names.
+        self._assertion_runner = _CaseAssertionRunner(self, self._fsm, self._journal)
         # Instance-time machine binding is delegated to _CaseMachineFactory.
         self._machine = _CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
 
@@ -1149,12 +1172,14 @@ class FolderBackedCase(FolderBackedCaseInterface):
     def _on_state_changed(self, event) -> None:
         """Runs after EVERY transition (event is a transitions EventData). Records the
         state-change entry, then on non-terminating transitions throttled-flushes the record
-        and beats the lease. On the non-terminal → terminal EDGE, runs the two-phase termination.
+        and beats the lease, then sweeps assertions for the destination state. On the
+        non-terminal → terminal EDGE, runs the two-phase termination.
 
         Two-phase termination:
           Phase 1 — PRE-FINALIZATION (assets still exist):
             1. Log CASE_TERMINATED event
             2. on_terminating() — subclass retains/extracts final artifacts
+            1.5 assertion sweep — observe-only, pre-purge
           Phase 2 — POST-FINALIZATION (immutable, still BOUND):
             3. _keep_manifest.purge() — drop everything not matched in _keep.txt
             4. _record.terminal + _record.terminal_state stamped + FORCE-flushed
@@ -1175,10 +1200,18 @@ class FolderBackedCase(FolderBackedCaseInterface):
             # the forced phase-2 seal supersedes the flush, and phase 2 beats explicitly.
             self._flush_record()
             self.case_heartbeat()
+            # Assertion sweep LAST: the journal entry and record flush above are on disk,
+            # so file assertions (which read via FolderBackedCaseReader) see current truth.
+            self._assertion_runner.sweep(dest)
         else:
             # --- phase 1: pre-finalization --- assets still present ---
             self._journal.log_terminated(dest, from_state=src)
             self.on_terminating()
+            # Assertion sweep between phases: terminal assertions see the full pre-purge
+            # file set (including anything on_terminating() kept). The record is NOT yet
+            # stamped terminal here — deliberate (purge-then-seal order is unchanged);
+            # ltx.to_state tells an assertion where it is.
+            self._assertion_runner.sweep(dest)
             # --- phase 2: post-finalization --- assets gone, record sealed ---
             # ONE purge process for everything ephemeral: unmatched keepfile paths
             # are deleted (logs included unless a keep rule covers them).

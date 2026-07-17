@@ -480,3 +480,106 @@ def test_vanished_assertion_file_is_journaled_not_raised(tmp_path):
         assert d["error"] in ("FileNotFoundError", "OSError")
     finally:
         case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# Task 6: FolderBackedCase wiring (end-to-end through real transitions)
+# ---------------------------------------------------------------------------
+
+class WiredCase(FolderBackedCase):
+    asset_aliases = []
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+
+    def case_assert_open_scratch_exists(self, ltx):
+        if not (self.case_assets.folder / "scratch.txt").exists():
+            return "scratch.txt missing on entry to open"
+        return None
+
+    def case_assert_open_arrival(self, ltx):
+        # ltx reflects the entry being asserted
+        if ltx.trigger != "begin" or ltx.from_state != "new":
+            return f"unexpected arrival {ltx.from_state}--{ltx.trigger}"
+        return None
+
+    def case_assert_done_prepurge_file_visible(self, ltx):
+        # terminal sweep runs BEFORE the purge: the un-kept file must still exist
+        if not (self.case_assets.folder / "scratch.txt").exists():
+            return "purge ran before terminal assertions"
+        return None
+
+    async def perform_begin(self, tctx):
+        (self.case_assets.folder / "scratch.txt").write_text("hi")
+
+    async def perform_finish(self, tctx):
+        pass
+
+
+def test_end_to_end_sweeps_on_real_transitions(tmp_path):
+    case = WiredCase.create_case_in_folder(tmp_path / "wired")
+    try:
+        # inception is NOT swept
+        assert list(case._journal.primitive.events(label_glob=EV_ASSERTED)) == []
+
+        asyncio.run(case.begin())
+        summaries = list(case._journal.primitive.events(label_glob=EV_ASSERTED))
+        assert [s.value for s in summaries] == ["open"]
+        assert case._journal.assert_failures() == []      # all green
+
+        asyncio.run(case.finish())
+        summaries = list(
+            case._journal.primitive.events(label_glob=EV_ASSERTED, recent_first=True)
+        )
+        assert [s.value for s in summaries] == ["done", "open"]
+        # terminal assertion saw the pre-purge file; purge then deleted it
+        assert case._journal.assert_failures() == []
+        assert not (case.case_assets.folder / "scratch.txt").exists()
+    finally:
+        case.case_detach()
+
+
+def test_assertion_failure_never_disturbs_the_machine(tmp_path):
+    class FailingAssertCase(FolderBackedCase):
+        asset_aliases = []
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+
+        def case_assert_open_always_red(self, ltx):
+            return "red"
+
+    case = FailingAssertCase.create_case_in_folder(tmp_path / "red")
+    try:
+        asyncio.run(case.begin())                 # must not raise
+        assert case.case_state == "open"
+        assert case.case_transition_fail_count == 0   # not @FAIL-counted
+        assert len(case._journal.assert_failures(state="open")) == 1
+        asyncio.run(case.finish())                # case continues normally
+        assert case.case_is_terminal
+    finally:
+        case.case_detach()
+
+
+def test_orphan_assertion_method_fails_at_bind(tmp_path):
+    class OrphanAssertCase(FolderBackedCase):
+        asset_aliases = []
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["^new==begin-->done^"]
+
+        def case_assert_oepn_typo(self, ltx):     # 'oepn' is not a state
+            return None
+
+    with pytest.raises(FsmBindingError, match="case_assert_oepn_typo"):
+        OrphanAssertCase.create_case_in_folder(tmp_path / "orphan")
+
+
+def test_on_assertion_failed_seam_exists_and_is_advanced_member():
+    assert callable(getattr(FolderBackedCase, "on_assertion_failed"))
+    assert "on_assertion_failed" in FolderBackedCase._advanced_members
+    FolderBackedCase._assert_interface_alignment()
+
+
+def test_assertion_mode_reexported_from_main_module():
+    from totodev_pub.folder_backed_case import (          # noqa: F401
+        AssertionMode as ReexportedMode,
+        set_case_assertion_mode as reexported_setter,
+    )
