@@ -267,7 +267,9 @@ class FolderBackedCaseInterface(ABC):
     The folder purges at termination like any other unmatched files. A
     process-global knob (``set_case_assertion_mode``) can restrict sweeps to
     class methods only (``CLASS_ONLY``) or skip them (``SKIP``, still
-    summarized).
+    summarized). Because ``assertions/*.py`` files are code that arrived as
+    data, use ``CLASS_ONLY`` or ``SKIP`` when processing case folders from
+    untrusted sources.
     """
 
     # =======================================================================

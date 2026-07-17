@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from totodev_pub.folder_backed_case_support.case_journal import (
@@ -185,6 +183,22 @@ def test_validate_rejects_bad_arity():
     with pytest.raises(FsmBindingError) as ei:
         validate_case_assertion_methods(BadArity, STATES)
     assert "ltx" in str(ei.value)
+
+
+def test_validate_aggregates_multiple_bad_assertions():
+    class MultiBad:
+        def case_assert_bogus_check(self, ltx):
+            return None
+
+        async def case_assert_open_x(self, ltx):
+            return None
+
+    with pytest.raises(FsmBindingError) as ei:
+        validate_case_assertion_methods(MultiBad, STATES)
+    msg = str(ei.value)
+    assert "case_assert_bogus_check" in msg
+    assert "case_assert_open_x" in msg
+    assert len(ei.value.bad_assertions) == 2
 
 
 def test_discover_class_assertions_groups_and_sorts():
@@ -393,6 +407,20 @@ def test_file_assertions_run_with_reader_and_state_scope(tmp_path):
         summary = list(case._journal.primitive.events(label_glob=EV_ASSERTED))[0]
         # 3 class assertions + 2 file assertions matched "open"
         assert summary.contents().as_dict()["ran"] == 5
+    finally:
+        case.case_detach()
+
+
+def test_file_assertion_failure_fires_on_assertion_failed_hook(tmp_path):
+    file_body = '''
+def case_assert_open_disk_check(case_reader, ltx):
+    return "failed on disk"
+'''
+    case = _make_file_case(tmp_path, {"checks.py": file_body})
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+        assert ("open", "disk_check", "failed on disk") in case.hook_calls
     finally:
         case.case_detach()
 

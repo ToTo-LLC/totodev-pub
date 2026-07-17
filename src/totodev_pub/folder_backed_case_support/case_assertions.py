@@ -250,7 +250,7 @@ class _CaseAssertionRunner:
         self, state: str, name: Optional[str], source: str, msg: str,
         error: Optional[str],
     ) -> None:
-        value = f"{state}.{name}" if name else msg_basename(source)
+        value = f"{state}.{name}" if name else _msg_basename(source)
         self._journal.log_assert_failed(
             value, state=state, name=name, source=source, msg=msg, error=error,
         )
@@ -340,7 +340,7 @@ class _CaseAssertionRunner:
         return module
 
 
-def msg_basename(source: str) -> str:
+def _msg_basename(source: str) -> str:
     """Event VALUE for a failure with no state.slug identity (an assertion file
     that failed to import): the file's basename from a 'file:<filename>' source."""
     return source.partition(":")[2] or source

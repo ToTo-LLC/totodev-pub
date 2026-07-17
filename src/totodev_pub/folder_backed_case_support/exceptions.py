@@ -415,7 +415,7 @@ class FsmBindingError(Exception):
     message at construction time.
 
     Carries `carrier_name` and structured `missing` / `sync` / `orphaned` / `bad_arity` /
-    `sealed` lists for programmatic inspection."""
+    `sealed` / `bad_assertions` lists for programmatic inspection."""
 
     # transition-dict slot -> human label, for readable messages.
     _SLOT_LABEL = {
