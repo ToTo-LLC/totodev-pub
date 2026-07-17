@@ -182,3 +182,101 @@ def discover_class_assertions(
         state, slug = parsed
         found.setdefault(state, []).append((slug, name))
     return found
+
+
+class _CaseAssertionRunner:
+    """Executes one assertion sweep per state entry on behalf of a bound case.
+
+    Internal by convention (leading underscore), like _CaseAdvancer and
+    _CaseMachineFactory: not part of any public surface. FolderBackedCase
+    constructs one per bound instance and calls ``sweep(state)`` from
+    ``_on_state_changed``. Per-assertion isolation is absolute: an assertion
+    that fails, returns garbage, or raises — and a misbehaving
+    ``on_assertion_failed`` hook — never disturbs the sweep, let alone the
+    dispatch that triggered it.
+    """
+
+    def __init__(
+        self, case: "FolderBackedCase", fsm: "FsmChainSpec", journal: CaseEventJournal,
+    ) -> None:
+        self._case = case
+        self._journal = journal
+        self._states = list(fsm.states)
+        self._class_assertions = discover_class_assertions(type(case), self._states)
+        # Per-file module cache for the assertions/ channel: path -> (mtime, module).
+        self._module_cache: dict[Path, tuple[float, object]] = {}
+        # Unknown-state file functions already warned about (once per instance).
+        self._warned_unknown: set[str] = set()
+
+    def sweep(self, state: str) -> None:
+        """Run every assertion tied to ``state`` (class methods first, name-sorted;
+        then file assertions) and close with one CASE_ASSERTED summary. Consults
+        the process-global AssertionMode afresh on every call."""
+        mode = get_case_assertion_mode()
+        if mode is AssertionMode.SKIP:
+            self._journal.log_asserted(state, ran=0, failed=0, mode=mode.value)
+            return
+        ltx = self._journal.last_transition()
+        ran = 0
+        failed = 0
+        for slug, method_name in self._class_assertions.get(state, []):
+            ran += 1
+            fn = getattr(self._case, method_name)
+            failed += self._run_one(state, slug, "method", fn, (ltx,))
+        if mode is AssertionMode.FULL:
+            file_ran, file_failed = self._sweep_files(state, ltx)
+            ran += file_ran
+            failed += file_failed
+        self._journal.log_asserted(state, ran=ran, failed=failed, mode=mode.value)
+
+    # ---- single-assertion execution (isolation boundary) ----
+
+    def _run_one(
+        self, state: str, slug: str, source: str, fn: Callable, args: tuple,
+    ) -> int:
+        """Run one assertion; return 1 on failure, 0 on pass. NEVER raises."""
+        error: Optional[str] = None
+        try:
+            result = fn(*args)
+        except Exception as exc:               # raise inside an assertion = FAIL
+            result, error = str(exc) or type(exc).__name__, type(exc).__name__
+        if not result:                          # falsy = PASS (None, "", False, 0)
+            return 0
+        msg = result if isinstance(result, str) else str(result)
+        self._record_failure(state, slug, source, msg, error)
+        return 1
+
+    def _record_failure(
+        self, state: str, name: Optional[str], source: str, msg: str,
+        error: Optional[str],
+    ) -> None:
+        value = f"{state}.{name}" if name else msg_basename(source)
+        self._journal.log_assert_failed(
+            value, state=state, name=name, source=source, msg=msg, error=error,
+        )
+        self._case.log.error(
+            "assertion %s (%s) FAILED in state %r: %s",
+            name or source, source, state, msg,
+        )
+        hook = getattr(self._case, "on_assertion_failed", None)
+        if hook is None:
+            return
+        try:
+            hook(state, name or source, msg)
+        except Exception:                       # a misbehaving hook must not mask/disturb
+            self._case.log.exception(
+                "on_assertion_failed hook raised for case %s", self._case.case_id,
+            )
+
+    # ---- file channel (Task 5 fills this in) ----
+
+    def _sweep_files(
+        self, state: str, ltx: Optional[CaseLastTransition],
+    ) -> tuple[int, int]:
+        return 0, 0
+
+
+def msg_basename(source: str) -> str:
+    """Event VALUE for a failure with no state.slug identity (an assertion file
+    that failed to import): the file's basename from a 'file:<filename>' source."""
+    return source.partition(":")[2] or source

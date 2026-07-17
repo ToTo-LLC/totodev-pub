@@ -205,3 +205,135 @@ def test_discover_class_assertions_groups_and_sorts():
     ]
     assert found["done"] == [("final", "case_assert_done_final")]
     assert "new" not in found
+
+
+import asyncio
+
+from totodev_pub.folder_backed_case import FolderBackedCase
+from totodev_pub.folder_backed_case_support.case_assertions import _CaseAssertionRunner
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
+
+
+@pytest.fixture(autouse=True)
+def _isolate_case_registry():
+    saved = dict(case_type_registry._registry)
+    try:
+        yield
+    finally:
+        case_type_registry._registry.clear()
+        case_type_registry._registry.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: runner sweep core (class channel + modes)
+# ---------------------------------------------------------------------------
+
+class SweepCase(FolderBackedCase):
+    asset_aliases = []
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+
+    hook_calls: list  # set per-instance in tests
+
+    def case_assert_open_passes(self, ltx):
+        return None
+
+    def case_assert_open_fails(self, ltx):
+        return "totals do not balance"
+
+    def case_assert_open_raises(self, ltx):
+        raise ValueError("kaboom")
+
+    def case_assert_done_truthy_nonstring(self, ltx):
+        return 42
+
+    def on_assertion_failed(self, state, name, msg):
+        self.hook_calls.append((state, name, msg))
+
+
+def _make_swept_case(tmp_path, name="sweep-case"):
+    case = SweepCase.create_case_in_folder(tmp_path / name)
+    case.hook_calls = []
+    return case
+
+
+def test_sweep_runs_class_assertions_and_journals(tmp_path):
+    case = _make_swept_case(tmp_path)
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+
+        fails = case._journal.assert_failures(state="open")
+        assert {f.value for f in fails} == {"open.fails", "open.raises"}
+        by_value = {f.value: f.contents().as_dict() for f in fails}
+        assert by_value["open.fails"]["msg"] == "totals do not balance"
+        assert by_value["open.fails"]["source"] == "method"
+        assert "error" not in by_value["open.fails"]
+        assert by_value["open.raises"]["error"] == "ValueError"
+        assert "kaboom" in by_value["open.raises"]["msg"]
+
+        summaries = list(case._journal.primitive.events(label_glob=EV_ASSERTED))
+        assert len(summaries) == 1
+        assert summaries[0].value == "open"
+        assert summaries[0].contents().as_dict() == {
+            "ran": 3, "failed": 2, "mode": "full",
+        }
+        # the on_assertion_failed hook fired once per failure
+        assert sorted(n for _, n, _ in case.hook_calls) == ["fails", "raises"]
+    finally:
+        case.case_detach()
+
+
+def test_sweep_truthy_nonstring_fails_with_str_message(tmp_path):
+    case = _make_swept_case(tmp_path)
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("done")
+        fails = case._journal.assert_failures(state="done")
+        assert len(fails) == 1
+        assert fails[0].contents().as_dict()["msg"] == "42"
+    finally:
+        case.case_detach()
+
+
+def test_sweep_skip_mode_writes_summary_only(tmp_path):
+    case = _make_swept_case(tmp_path)
+    try:
+        set_case_assertion_mode(AssertionMode.SKIP)
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")
+        assert case._journal.assert_failures() == []
+        summaries = list(case._journal.primitive.events(label_glob=EV_ASSERTED))
+        assert len(summaries) == 1
+        assert summaries[0].contents().as_dict() == {
+            "ran": 0, "failed": 0, "mode": "skip",
+        }
+    finally:
+        case.case_detach()
+
+
+def test_sweep_misbehaving_hook_never_breaks_sweep(tmp_path):
+    case = _make_swept_case(tmp_path)
+    try:
+        def _bad_hook(state, name, msg):
+            raise RuntimeError("hook bug")
+        case.on_assertion_failed = _bad_hook
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("open")                      # must not raise
+        assert len(case._journal.assert_failures(state="open")) == 2
+    finally:
+        case.case_detach()
+
+
+def test_sweep_state_with_no_assertions_still_summarizes(tmp_path):
+    case = _make_swept_case(tmp_path)
+    try:
+        runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
+        runner.sweep("new")
+        summaries = list(case._journal.primitive.events(label_glob=EV_ASSERTED))
+        assert len(summaries) == 1
+        assert summaries[0].contents().as_dict() == {
+            "ran": 0, "failed": 0, "mode": "full",
+        }
+    finally:
+        case.case_detach()
