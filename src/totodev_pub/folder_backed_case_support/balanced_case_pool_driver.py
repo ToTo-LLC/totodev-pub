@@ -845,8 +845,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
     def blocked_cases(self) -> list[FolderBackedCase]:
         out: list[FolderBackedCase] = []
         for slot in self._by_folder.values():
-            last_blocked = slot.last_result is not None and slot.last_result.blocked
-            if last_blocked or not slot.case.case_advanceable:
+            if slot.case.case_was_blocked or not slot.case.case_advanceable:
                 out.append(slot.case)
         return out
 

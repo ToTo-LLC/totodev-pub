@@ -291,6 +291,12 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return _CaseAdvancer(self).advanceable
 
     @property
+    def case_was_blocked(self) -> bool:
+        # Sticky last-observation flag; set/cleared by `_CaseAdvancer` and
+        # `_on_prepare_fsm_event` (direct trigger clear). See interface docstring.
+        return self._was_blocked
+
+    @property
     def case_transition_fail_count(self) -> int:
         # Derivation: see `CaseEventJournal.count_fails_this_dwell`.
         return self._journal.count_fails_this_dwell()
@@ -981,6 +987,11 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # fresh object — never inherits a stale flag.
         self._transition_in_flight: bool = False
         self._active_trigger_name: str | None = None
+        # Process-lifetime sticky: last unrestricted case_advance() proved AutoAdvanceBlocked.
+        # See case_was_blocked / _CaseAdvancer._apply_was_blocked.
+        self._was_blocked: bool = False
+        # True while case_advance() owns set/clear of _was_blocked (suppress direct-trigger clear).
+        self._in_case_advance: bool = False
         # Instance-time machine binding is delegated to _CaseMachineFactory.
         self._machine = _CaseMachineFactory(self, self._fsm, self._journal).build(self.case_state)
 
@@ -1021,6 +1032,10 @@ class FolderBackedCase(FolderBackedCaseInterface):
             event_data.event.name if event_data.event is not None else None
         )
         event_data._case_guard_owner = True
+        # Direct trigger calls clear the sticky blocked observation; case_advance()
+        # owns set/clear itself while _in_case_advance is True.
+        if not self._in_case_advance:
+            self._was_blocked = False
 
     def _on_finalize_fsm_event(self, event_data) -> None:
         """Pairs with `_on_prepare_fsm_event` — see that method for why the ownership

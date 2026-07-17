@@ -347,6 +347,18 @@ class FolderBackedCaseInterface(ABC):
         ...
 
     @property
+    def case_was_blocked(self) -> bool:
+        """Whether the last unrestricted ``case_advance()`` on this live object
+        proved auto-advance blocked (``AutoAdvanceBlocked``).
+
+        Process-lifetime only: ``False`` after create/open; not journal-backed.
+        Orthogonal to ``case_advanceable`` (structural). Cleared when a restricted
+        advance, a direct trigger call, or an unrestricted progress/fail supersedes
+        the observation; left unchanged on a plain unrestricted no-op.
+        """
+        ...
+
+    @property
     def case_transition_fail_count(self) -> int:
         """The value the ``@FAIL`` guard compares against: the count of failed
         transition attempts since the case entered its current state.

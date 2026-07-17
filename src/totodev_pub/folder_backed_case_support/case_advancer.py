@@ -149,7 +149,27 @@ class _CaseAdvancer:
             )
         case._check_active()
         case.case_heartbeat()  # pre-step beat for long-dwelling no-op polls; see docstring
-        return await self._advance_collecting_alerts(initial, trigger, trigger_kwargs)
+        case._in_case_advance = True
+        try:
+            # Restricted form: observation is stale regardless of outcome (cannot re-prove
+            # the whole state). Clear before the attempt so misuse raises still clear.
+            if trigger is not None:
+                case._was_blocked = False
+            result = await self._advance_collecting_alerts(initial, trigger, trigger_kwargs)
+            if trigger is None:
+                self._apply_was_blocked_unrestricted(result)
+            return result
+        finally:
+            case._in_case_advance = False
+
+    def _apply_was_blocked_unrestricted(self, result: AdvanceResult) -> None:
+        """Update ``case_was_blocked`` from an unrestricted sweep outcome."""
+        case = self._case
+        if result.blocked:
+            case._was_blocked = True
+        elif result.progressed or result.failed:
+            case._was_blocked = False
+        # plain same-state no-fail no-op: leave unchanged
 
     async def _advance_collecting_alerts(
         self, initial: str, trigger: str | None, trigger_kwargs: dict | None,

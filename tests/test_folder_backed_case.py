@@ -1184,6 +1184,174 @@ def test_pinned_auto_guard_decline_does_not_synthesize_blocked(tmp_path):
     asyncio.run(scenario())
 
 
+# ---------------------------------------------------------------------------
+# case_was_blocked: process-lifetime sticky observation of the last unrestricted
+# AutoAdvanceBlocked proof. See docs/superpowers/specs/2026-07-16-case-was-blocked-design.md
+# ---------------------------------------------------------------------------
+
+
+class _TimedEscapeCase(FolderBackedCase):
+    """waiting has a declining guarded auto exit PLUS a @DWELL timed escape, so an
+    unrestricted no-op is never AutoAdvanceBlocked."""
+
+    asset_aliases = []
+    fsm_trigger_chokes = {}
+    fsm_state_chains = [
+        "^new--go-->waiting--gated#proceed-->done^",
+        "waiting--@DWELL>30d#timeout-->done^",
+    ]
+    open_gate: bool = False
+
+    async def perform_go(self, tctx):
+        pass
+
+    async def perform_proceed(self, tctx):
+        pass
+
+    async def perform_timeout(self, tctx):
+        pass
+
+    async def guard_gated(self, tctx):
+        return self.open_gate
+
+
+def test_case_was_blocked_false_on_create(tmp_path):
+    case = _OverloadCase.create_case_in_folder(tmp_path / "wb0", case_id="wb-0")
+    try:
+        assert case.case_was_blocked is False
+    finally:
+        case.case_detach()
+
+
+def test_case_was_blocked_set_by_unrestricted_blocked_sweep(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb1", case_id="wb-1")
+        try:
+            await case.case_advance()  # new -> ready
+            await case.submit()  # ready -> review
+            assert case.case_was_blocked is False
+
+            swept = await case.case_advance()
+            assert swept.blocked
+            assert case.case_was_blocked is True
+
+            # Idempotent: another blocked sweep keeps it True.
+            swept2 = await case.case_advance()
+            assert swept2.blocked
+            assert case.case_was_blocked is True
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_progress(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb2", case_id="wb-2")
+        try:
+            await case.case_advance()
+            await case.submit()
+            await case.case_advance()
+            assert case.case_was_blocked is True
+
+            case.open_gate = True
+            result = await case.case_advance()
+            assert result.progressed
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_failed_attempt(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb3", case_id="wb-3")
+        try:
+            await case.case_advance()
+            await case.submit()
+            await case.case_advance()
+            assert case.case_was_blocked is True
+
+            case.open_gate = True
+
+            async def boom(tctx):
+                raise RuntimeError("approve boom")
+
+            case.perform_approve = boom  # type: ignore[method-assign]
+            result = await case.case_advance()
+            assert result.failed
+            assert not result.progressed
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_restricted_advance(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb4", case_id="wb-4")
+        try:
+            await case.case_advance()
+            await case.submit()
+            await case.case_advance()
+            assert case.case_was_blocked is True
+
+            # Pinned decline: clears the sticky flag even though nothing fired.
+            pinned = await case.case_advance(trigger="approve")
+            assert not pinned.progressed
+            assert not pinned.blocked
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_direct_trigger(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb5", case_id="wb-5")
+        try:
+            await case.case_advance()  # new -> ready
+            # Force sticky True without a blocked sweep (ready is advanceable via manual).
+            case._was_blocked = True
+            assert case.case_was_blocked is True
+
+            await case.submit()  # direct manual trigger
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_unchanged_on_timed_escape_noop(tmp_path):
+    async def scenario():
+        case = _TimedEscapeCase.create_case_in_folder(tmp_path / "wb6", case_id="wb-6")
+        try:
+            await case.case_advance()  # new -> waiting
+            assert case.case_state == "waiting"
+
+            # Stale True must survive a plain unrestricted no-op (dwell not ripe, gate closed).
+            case._was_blocked = True
+            result = await case.case_advance()
+            assert not result.progressed
+            assert not result.blocked
+            assert not result.failed
+            assert case.case_was_blocked is True
+
+            # Starting False stays False.
+            case._was_blocked = False
+            result2 = await case.case_advance()
+            assert not result2.blocked
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
 def test_trigger_kwargs_without_trigger_raises(tmp_path):
     """Passing trigger_kwargs with no trigger has no edge to flow into -> ValueError."""
 
