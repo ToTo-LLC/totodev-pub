@@ -476,12 +476,12 @@ class FolderBackedCaseInterface(ABC):
     def case_keep_files(self, *patterns: str | Path) -> None:
         """Register case files to survive the post-termination purge.
 
-        Closing a case deletes everything under its folder except paths listed in
-        ``_keep.txt``. Call this to add retention patterns — case-relative exact
-        paths or globs (e.g. ``exports/summary.pdf``, ``reports/*.csv``), including
-        under ``assets/`` (e.g. ``"assets/reply_draft.md"``) — this method is
-        case-root scoped, not assets-scoped, so an asset path needs its ``assets/``
-        prefix spelled out.
+        Closing a case deletes everything under its folder except paths on the
+        case's keep list. Call this to add retention patterns — case-relative
+        exact paths or globs (e.g. ``exports/summary.pdf``, ``reports/*.csv``),
+        including under ``assets/`` (e.g. ``"assets/reply_draft.md"``) — this
+        method is case-root scoped, not assets-scoped, so an asset path needs
+        its ``assets/`` prefix spelled out.
 
         Typical use: a RUNTIME keep decision that can't be made declaratively —
         override ``on_terminating()`` and name the deliverables to preserve after

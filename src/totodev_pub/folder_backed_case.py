@@ -318,6 +318,9 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return self._assets
 
     def case_keep_files(self, *patterns: str | Path) -> None:
+        # The "keep list" the interface docstring speaks of abstractly is
+        # `_keep.txt` at the case root — the file `_keep_manifest.purge()`
+        # consults at close to decide what survives.
         self._keep_manifest.add_rules(*patterns)
 
     def case_load_asset(self, alias: str) -> object:
