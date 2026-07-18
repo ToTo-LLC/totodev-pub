@@ -104,12 +104,19 @@ import inspect
 import re
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
+if TYPE_CHECKING:
+    import networkx as nx
+
+from totodev_pub.folder_backed_case_support.constants import (
+    DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS,
+)
 from totodev_pub.folder_backed_case_support.exceptions import (
     FsmChainParseError,
     FsmBindingError,
 )
+from totodev_pub.optional_dependencies import raise_missing_dependency
 
 # A state name: one or more [A-Za-z0-9_] characters (no dashes). This keeps state names
 # directly representable as Python suffix identifiers for hook conventions.
@@ -471,7 +478,14 @@ class FsmChainSpec:
             tolerates any number of failures, so a safety-net timeout is never disabled by a
             transient failure.
         Only AUTO edges are touched: manual/event-driven (`==`) triggers are never
-        driven by advance(), so a retry cap on them would have no meaning."""
+        driven by advance(), so a retry cap on them would have no meaning.
+
+        The injected guard dict carries an extra `"implicit": True` key (absent from every
+        author-written fact guard) — the ONLY way to later tell "the DSL declared this" from
+        "the compiler defaulted it in", since the two are otherwise bit-for-bit identical
+        once compiled. `FsmChainSpec.to_networkx(include_implied_caps=False)` is what reads
+        this marker to exclude implied caps from a rendering that wants to show only what the
+        author actually wrote."""
         for t in self.transitions:
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
             if not any((s, t["trigger"]) in self.auto_edges for s in srcs):
@@ -481,8 +495,226 @@ class FsmChainSpec:
                 continue                       # explicit @FAIL policy wins
             if self._is_pure_timed_escape(t):
                 continue                       # timed escape => unlimited fail tolerance
-            t["_fact_guards"] = list(fgs) + [{"name": "FAIL", "op": "<", "operand": 1}]
+            t["_fact_guards"] = list(fgs) + [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
         return self
+
+    # ---- rendering (visualization / analysis) ----
+    # A read-only VIEW of the compiled spec for tools that want a graph library's worth of
+    # algorithms (layout, shortest-path, cycle detection, ...) rather than this dataclass's
+    # bespoke accessors. Kept OFF the hot path: `networkx` is imported lazily inside the
+    # method body (an optional dependency), so a case that never calls to_networkx() never
+    # pays for it.
+
+    def to_networkx(
+        self, *, wildcard_pseudo_state: bool = False, include_implied_caps: bool = True,
+    ) -> "nx.MultiDiGraph":
+        """Render this spec as a `networkx.MultiDiGraph`, losslessly: every state, transition,
+        guard, timeout, choke, and initial/terminal/timed-escape flag the DSL can express is
+        reproduced as a node/edge/graph attribute. Safe to call at ANY point in the compile
+        pipeline (right after parse(), or after validate()/expand_wildcards()/classify()) —
+        it never mutates `self` and never requires a particular stage to have run.
+
+        A `MultiDiGraph` (not a plain `DiGraph`) is used deliberately: two distinct edges may
+        share the same (source, dest) pair — e.g. two differently-guarded transitions on the
+        same trigger, or two different triggers between the same states — and collapsing them
+        would silently drop a transition. Each entry in `self.transitions` becomes its own
+        edge; NetworkX auto-assigns the multi-edge key.
+
+        Nodes are every name in `states`, with attributes:
+          * initial          -- state in `initial_states` (a leading '^name')
+          * default_initial  -- state == `initial_state` (the create_case_in_folder default)
+          * terminal         -- state in `terminal_states` (a trailing 'name^')
+          * timed_escape      -- state in `timed_escape_states` (set only if classify() has
+                                 run; False otherwise -- this is the one field whose fidelity
+                                 depends on compile stage, since it is itself computed by a
+                                 pipeline step)
+
+        Edges are every dict in `transitions`, with attributes:
+          * trigger              -- the trigger name
+          * auto / manual         -- whether (source, trigger) is in `auto_edges` (`--`) or not
+                                     (`==`); mutually exclusive
+          * conditions            -- method-guard names (`guard_<token>`), as declared
+          * fact_guards           -- list of {"name","op","operand"} factual guards. `name` is
+                                     `"DWELL"` (time, `operand` in seconds) or `"FAIL"` (count,
+                                     `operand` a bare int). An entry `apply_implicit_fail_cap()`
+                                     injected (rather than the author declaring it) carries an
+                                     extra `"implicit": True` key — the one case where an
+                                     author-written guard and a compiler-defaulted one are
+                                     otherwise bit-for-bit identical. See `include_implied_caps`.
+          * soft_timeout_secs     -- this trigger's effective soft-timeout in seconds: its
+                                     `~<dur>` DSL annotation if explicit, else (subject to
+                                     `include_implied_caps`) the same
+                                     `DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS` fallback
+                                     `FolderBackedCase.trigger_warn_secs()` uses. NOTE: that
+                                     fallback is a global constant, NOT the live value of a
+                                     per-case override of `trigger_warn_secs()` -- this spec is
+                                     a per-CLASS, instance-independent artifact and has no
+                                     visibility into an overridden instance method.
+          * soft_timeout_is_explicit -- True iff this trigger carries an explicit `~<dur>`
+                                     annotation (i.e. `soft_timeout_secs` is NOT a filled-in
+                                     default); always accurate regardless of
+                                     `include_implied_caps`
+          * chokes                -- frozenset of choke resource names for this trigger
+          * pure_timed_escape     -- True iff THIS edge alone is fireable by waiting alone
+                                     (see `_is_pure_timed_escape`); finer-grained than the
+                                     node-level `timed_escape` flag, which only says the STATE
+                                     has such an edge somewhere
+          * wildcard_expanded     -- True if this edge was injected by expand_wildcards()
+
+        A chain's `*[--|==]...-->dest` wildcard rule is ALSO represented directly (not just
+        via the per-source edges expand_wildcards() concretizes): `expand_wildcards()` never
+        clears `pending_wildcards`, so the abstract rule stays declared on the spec forever,
+        same as `primary_chain`. Each entry in `pending_wildcards` becomes an edge from a
+        synthetic `"*"` node (the DSL forbids `*` in a real state name, so this can never
+        collide) to its destination, tagged `wildcard_pending=True`. This is UNAFFECTED by
+        `wildcard_pseudo_state` — there is exactly one such edge per declared wildcard chain
+        regardless, so it never contributes to fan-out clutter.
+
+        `wildcard_pseudo_state` (default False) controls how the CONCRETE, expand_wildcards()
+        -injected edges (`wildcard_expanded=True`) are drawn — these are the ones that fan out
+        from every eligible source state to the wildcard's destination, and can make a diagram
+        with many states look like every node connects to `cancelled`/`expired`/etc:
+          * False (default) -- each injected edge is drawn directly `source -> dest`, exactly
+            like any other transition. This is the raw, general-purpose topology: every real
+            edge the compiled machine would actually fire is a real edge in the graph.
+          * True -- each injected edge is instead routed through the same `"*"` sentinel node
+            used for the pending rule: `source -> "*"` (carrying the edge's full trigger/
+            guard/timeout/choke data, plus `wildcard_dest` naming the true destination so
+            nothing is lost) and one deduplicated `"*" -> dest` edge per distinct
+            (trigger, dest, conditions, fact_guards) combination. Visually this turns an
+            N-source fan-out into a small hub-and-spoke cluster hanging off `"*"` — the
+            "little islands" that keep wildcard escapes from tangling the main flow.
+
+        `include_implied_caps` (default True) controls whether values the COMPILER filled in
+        (nothing the author typed in the DSL) appear in the rendering:
+          * True (default) -- the full effective picture: an unguarded auto edge's implicit
+            `@FAIL<1` retry cap (from `apply_implicit_fail_cap()`) is included in
+            `fact_guards`, and an un-annotated trigger's `soft_timeout_secs` is filled in with
+            the `DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS` fallback.
+          * False -- only what the DSL chains actually declared: implicit `@FAIL<1` entries
+            (`fact_guards` items with `"implicit": True`) are dropped, and an un-annotated
+            trigger's `soft_timeout_secs` is `None` rather than the default. Useful for a
+            diagram meant to show the author's own guard/timeout policy, undiluted by
+            framework defaults.
+        Either way, `soft_timeout_is_explicit` tells you which case you are in for a given
+        edge, and non-implicit `fact_guards` entries (explicit `@FAIL`/`@DWELL`, or any guard
+        not from `apply_implicit_fail_cap()`) are never affected by this flag.
+
+        Graph-level attributes (`graph.graph[...]`) carry everything that isn't naturally a
+        node/edge property: `initial_state`, `states_order`, `triggers`, `pipeline`,
+        `trigger_timeouts`, `trigger_chokes`, `timed_escape_states`, `wildcard_dests`, and
+        `primary_chain` (the raw first chain string, handy as a diagram title).
+
+        Some edge/graph attributes (frozensets) are not directly serializable by NetworkX's
+        text-format writers (GraphML/GEXF); this method targets in-memory use (layout,
+        algorithms, custom rendering), not round-tripping through those formats.
+
+        Raises ImportError, with a pointed message, if `networkx` is not installed.
+        """
+        try:
+            import networkx as nx
+        except ImportError:
+            raise_missing_dependency(feature="FsmChainSpec.to_networkx()", packages=["networkx"])
+
+        def resolve_fact_guards(raw_fact_guards) -> list[dict]:
+            fgs = [dict(fg) for fg in raw_fact_guards]
+            if include_implied_caps:
+                return fgs
+            return [fg for fg in fgs if not fg.get("implicit")]
+
+        def resolve_soft_timeout(trigger: str) -> tuple[Optional[float], bool]:
+            if trigger in self.trigger_timeouts:
+                return self.trigger_timeouts[trigger], True
+            if include_implied_caps:
+                return DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS, False
+            return None, False
+
+        g = nx.MultiDiGraph()
+        g.graph.update({
+            "initial_state": self.initial_state,
+            "initial_states": set(self.initial_states),
+            "terminal_states": set(self.terminal_states),
+            "states_order": list(self.states),
+            "triggers": list(self.triggers),
+            "pipeline": list(self.pipeline),
+            "trigger_timeouts": dict(self.trigger_timeouts),
+            "trigger_chokes": {k: frozenset(v) for k, v in self.trigger_chokes.items()},
+            "timed_escape_states": set(self.timed_escape_states),
+            "wildcard_dests": set(self.wildcard_dests),
+            "primary_chain": self.primary_chain,
+        })
+
+        for state in self.states:
+            g.add_node(
+                state,
+                initial=state in self.initial_states,
+                default_initial=state == self.initial_state,
+                terminal=state in self.terminal_states,
+                timed_escape=state in self.timed_escape_states,
+            )
+
+        needs_wildcard_node = bool(self.pending_wildcards) or (
+            wildcard_pseudo_state and any(t.get("_wildcard") for t in self.transitions)
+        )
+        if needs_wildcard_node:
+            g.add_node(_WILDCARD_SOURCE, wildcard_source=True)
+
+        hub_dest_seen: set[tuple] = set()  # (trigger, dest, conditions, fact_key) already hubbed
+
+        for t in self.transitions:
+            srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
+            trigger = t["trigger"]
+            dest = t["dest"]
+            conditions = list(t.get("conditions") or [])
+            fact_guards = resolve_fact_guards(t.get("_fact_guards") or [])
+            chokes = frozenset(self.trigger_chokes.get(trigger, frozenset()))
+            soft_timeout_secs, soft_timeout_is_explicit = resolve_soft_timeout(trigger)
+            pure_timed_escape = self._is_pure_timed_escape(t)
+            wildcard_expanded = bool(t.get("_wildcard", False))
+            as_hub = wildcard_pseudo_state and wildcard_expanded
+
+            for s in srcs:
+                auto = (s, trigger) in self.auto_edges
+                edge_attrs = dict(
+                    trigger=trigger,
+                    auto=auto,
+                    manual=not auto,
+                    conditions=conditions,
+                    fact_guards=fact_guards,
+                    chokes=chokes,
+                    soft_timeout_secs=soft_timeout_secs,
+                    soft_timeout_is_explicit=soft_timeout_is_explicit,
+                    pure_timed_escape=pure_timed_escape,
+                    wildcard_expanded=wildcard_expanded,
+                )
+                if not as_hub:
+                    g.add_edge(s, dest, **edge_attrs)
+                    continue
+
+                g.add_edge(s, _WILDCARD_SOURCE, wildcard_dest=dest, **edge_attrs)
+                fact_key = tuple((fg["name"], fg["op"], fg["operand"]) for fg in fact_guards)
+                hub_key = (trigger, dest, tuple(conditions), fact_key)
+                if hub_key not in hub_dest_seen:
+                    hub_dest_seen.add(hub_key)
+                    g.add_edge(_WILDCARD_SOURCE, dest, **edge_attrs)
+
+        for w in self.pending_wildcards:
+            trigger = w["trigger"]
+            soft_timeout_secs, soft_timeout_is_explicit = resolve_soft_timeout(trigger)
+            g.add_edge(
+                _WILDCARD_SOURCE, w["dest"],
+                trigger=trigger,
+                auto=w["auto"],
+                manual=not w["auto"],
+                conditions=list(w["conditions"]),
+                fact_guards=resolve_fact_guards(w["fact_guards"]),
+                chokes=frozenset(self.trigger_chokes.get(trigger, frozenset())),
+                soft_timeout_secs=soft_timeout_secs,
+                soft_timeout_is_explicit=soft_timeout_is_explicit,
+                wildcard_pending=True,
+            )
+
+        return g
 
     # ---- carrier-object compatibility (the binding check) ----
     # The spec is the ONLY thing that knows what callables its graph implies, so it is the

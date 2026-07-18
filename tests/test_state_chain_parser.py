@@ -1,5 +1,6 @@
 import pytest
 
+from totodev_pub.folder_backed_case_support.constants import DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS
 from totodev_pub.folder_backed_case_support.exceptions import FsmBindingError
 from totodev_pub.folder_backed_case_support.exceptions import FsmChainParseError
 from totodev_pub.folder_backed_case_support.state_chain_parser import StateChainParser
@@ -285,3 +286,369 @@ def test_require_tctx_false_skips_arity_check():
             return None
 
     spec.validate_object_compatibility(Carrier(), require_tctx=False)
+
+
+# ---------------------------------------------------------------------------
+# to_networkx(): lossless rendering into a networkx.MultiDiGraph
+# ---------------------------------------------------------------------------
+# networkx is an optional dependency (not required for core FSM usage), so each
+# test below skips at collection time via importorskip rather than gating the
+# whole module -- the rest of this file must keep running without it installed.
+
+def test_to_networkx_missing_dependency_raises_import_error(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "networkx":
+            raise ImportError("simulated missing networkx")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    spec = StateChainParser.parse(["^new--go-->done^"])
+    with pytest.raises(ImportError) as excinfo:
+        spec.to_networkx()
+    assert "networkx" in str(excinfo.value)
+
+
+def test_to_networkx_maps_state_flags_to_node_attributes():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["^new--go-->open==finish-->done^"]).validate()
+
+    g = spec.to_networkx()
+
+    assert set(g.nodes) == {"new", "open", "done"}
+    assert g.nodes["new"] == {
+        "initial": True, "default_initial": True, "terminal": False, "timed_escape": False,
+    }
+    assert g.nodes["open"] == {
+        "initial": False, "default_initial": False, "terminal": False, "timed_escape": False,
+    }
+    assert g.nodes["done"] == {
+        "initial": False, "default_initial": False, "terminal": True, "timed_escape": False,
+    }
+
+
+def test_to_networkx_edge_attributes_capture_guards_auto_and_facts():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(
+        ["^new--@FAIL<3#funded#finish-->done^"]
+    ).validate().classify()
+
+    g = spec.to_networkx()
+
+    edges = list(g.edges(data=True))
+    assert len(edges) == 1
+    u, v, data = edges[0]
+    assert (u, v) == ("new", "done")
+    assert data["trigger"] == "finish"
+    assert data["auto"] is True
+    assert data["manual"] is False
+    assert data["conditions"] == ["guard_funded"]
+    assert data["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+    assert data["wildcard_expanded"] is False
+    # a `<`-style @FAIL guard tightens rather than relaxes, so this is not a timed escape.
+    assert data["pure_timed_escape"] is False
+    assert g.nodes["new"]["timed_escape"] is False
+
+
+def test_to_networkx_flags_pure_timed_escape_edges_and_states():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(
+        ["^new--go-->waiting--@DWELL>=30m#timeout-->done^"]
+    ).validate().classify()
+
+    g = spec.to_networkx()
+
+    _, _, data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "timeout")
+    assert data["pure_timed_escape"] is True
+    assert data["fact_guards"] == [{"name": "DWELL", "op": ">=", "operand": 1800.0}]
+    assert g.nodes["waiting"]["timed_escape"] is True
+
+
+def test_to_networkx_carries_trigger_timeout_and_choke_metadata():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["^new--assign~20s-->done^"]).validate()
+    spec.trigger_chokes = {"assign": frozenset({"db"})}
+
+    g = spec.to_networkx()
+
+    _, _, data = next(iter(g.edges(data=True)))
+    assert data["soft_timeout_secs"] == 20.0
+    assert data["chokes"] == frozenset({"db"})
+    assert g.graph["trigger_timeouts"] == {"assign": 20.0}
+    assert g.graph["trigger_chokes"] == {"assign": frozenset({"db"})}
+
+
+def test_to_networkx_is_multigraph_and_keeps_parallel_edges_distinct():
+    """Two auto edges leave the same source with different triggers/guards -- a plain
+    DiGraph would collapse same-(source,dest) edges; MultiDiGraph must keep both."""
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse([
+        "^fork--gated#alpha-->done^",
+        "fork--@DWELL>1h#beta-->done^",
+    ]).validate()
+
+    g = spec.to_networkx()
+
+    import networkx as nx
+    assert isinstance(g, nx.MultiDiGraph)
+    triggers = sorted(d["trigger"] for _, _, d in g.edges(data=True))
+    assert triggers == ["alpha", "beta"]
+    assert g.number_of_edges("fork", "done") == 2
+
+
+def test_to_networkx_pending_wildcard_renders_as_sentinel_node_and_edge():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["*==cancel-->cancelled^"])
+
+    g = spec.to_networkx()
+
+    assert g.nodes["*"] == {"wildcard_source": True}
+    _, dest, data = next(iter(g.edges(data=True)))
+    assert dest == "cancelled"
+    assert data["trigger"] == "cancel"
+    assert data["wildcard_pending"] is True
+    assert data["auto"] is False and data["manual"] is True
+
+
+def test_to_networkx_wildcard_expansion_adds_concrete_edges_alongside_sentinel():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse([
+        "^new--go-->open==finish-->done^",
+        "*==cancel-->cancelled^",
+    ]).validate().expand_wildcards()
+
+    g = spec.to_networkx()
+
+    # concrete, per-source edges injected by expand_wildcards()
+    concrete = [
+        (u, v) for u, v, d in g.edges(data=True)
+        if d["trigger"] == "cancel" and d.get("wildcard_expanded")
+    ]
+    assert set(concrete) == {("new", "cancelled"), ("open", "cancelled")}
+    # the abstract rule (expand_wildcards() never clears pending_wildcards) still renders too
+    assert g.has_edge("*", "cancelled")
+
+
+def test_to_networkx_fact_guards_include_dwell_and_explicit_fail():
+    """The built-in @DWELL/@FAIL factual guards (compiled by the base class itself, not a
+    carrier method) show up on the edge exactly as declared."""
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(
+        ["^new--@FAIL<3#retry-->waiting--@DWELL>=2h#timeout-->done^"]
+    ).validate().classify()
+
+    g = spec.to_networkx()
+
+    _, _, retry_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "retry")
+    assert retry_data["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+
+    _, _, timeout_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "timeout")
+    assert timeout_data["fact_guards"] == [{"name": "DWELL", "op": ">=", "operand": 7200.0}]
+    assert timeout_data["pure_timed_escape"] is True
+
+
+def test_to_networkx_shows_implicit_fail_cap_after_apply_implicit_fail_cap():
+    """An unguarded auto edge gets NO @FAIL guard until apply_implicit_fail_cap() runs; once
+    it does, the injected cap is visible on the edge, marked `"implicit": True` so it can be
+    told apart from an author-written `@FAIL` guard (which never carries that key)."""
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["^new--go-->done^"]).validate().classify()
+
+    g_before = spec.to_networkx()
+    _, _, before = next(iter(g_before.edges(data=True)))
+    assert before["fact_guards"] == []
+
+    spec.apply_implicit_fail_cap()
+    g_after = spec.to_networkx()
+    _, _, after = next(iter(g_after.edges(data=True)))
+    assert after["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
+
+
+# ---------------------------------------------------------------------------
+# to_networkx(include_implied_caps=False): hide compiler-filled-in defaults
+# (the implicit @FAIL<1 retry cap, and the default soft-timeout for
+# un-annotated triggers) so the rendering shows only what the DSL declared.
+# ---------------------------------------------------------------------------
+
+def test_to_networkx_excludes_implicit_fail_cap_when_disabled():
+    pytest.importorskip("networkx")
+    spec = (
+        StateChainParser.parse(["^new--go-->done^"])
+        .validate().classify().apply_implicit_fail_cap()
+    )
+
+    g_default = spec.to_networkx()
+    _, _, with_caps = next(iter(g_default.edges(data=True)))
+    assert with_caps["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
+
+    g_stripped = spec.to_networkx(include_implied_caps=False)
+    _, _, without_caps = next(iter(g_stripped.edges(data=True)))
+    assert without_caps["fact_guards"] == []
+
+
+def test_to_networkx_keeps_explicit_fail_guard_regardless_of_flag():
+    """An author-written `@FAIL<3` (no `implicit` key) is never touched by the flag, even
+    after apply_implicit_fail_cap() runs (which exempts edges with an explicit @FAIL)."""
+    pytest.importorskip("networkx")
+    spec = (
+        StateChainParser.parse(["^new--@FAIL<3#go-->done^"])
+        .validate().classify().apply_implicit_fail_cap()
+    )
+
+    for include in (True, False):
+        g = spec.to_networkx(include_implied_caps=include)
+        _, _, data = next(iter(g.edges(data=True)))
+        assert data["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+
+
+def test_to_networkx_fills_default_soft_timeout_when_enabled():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["^new--go-->waiting--assign~20s-->done^"]).validate()
+
+    g = spec.to_networkx()
+
+    _, _, go_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "go")
+    assert go_data["soft_timeout_secs"] == DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS
+    assert go_data["soft_timeout_is_explicit"] is False
+
+    _, _, assign_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "assign")
+    assert assign_data["soft_timeout_secs"] == 20.0
+    assert assign_data["soft_timeout_is_explicit"] is True
+
+
+def test_to_networkx_omits_default_soft_timeout_when_disabled():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["^new--go-->waiting--assign~20s-->done^"]).validate()
+
+    g = spec.to_networkx(include_implied_caps=False)
+
+    _, _, go_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "go")
+    assert go_data["soft_timeout_secs"] is None
+    assert go_data["soft_timeout_is_explicit"] is False
+
+    # an EXPLICIT annotation is not "implied" -- it is never hidden by the flag
+    _, _, assign_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "assign")
+    assert assign_data["soft_timeout_secs"] == 20.0
+    assert assign_data["soft_timeout_is_explicit"] is True
+
+
+def test_to_networkx_include_implied_caps_applies_to_pending_wildcard_edges_too():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["*--go-->done^"])
+
+    g_default = spec.to_networkx()
+    _, _, with_default = next(iter(g_default.edges(data=True)))
+    assert with_default["soft_timeout_secs"] == DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS
+    assert with_default["soft_timeout_is_explicit"] is False
+
+    g_stripped = spec.to_networkx(include_implied_caps=False)
+    _, _, without_default = next(iter(g_stripped.edges(data=True)))
+    assert without_default["soft_timeout_secs"] is None
+
+
+# ---------------------------------------------------------------------------
+# to_networkx(wildcard_pseudo_state=True): route wildcard-expanded fan-out
+# through the "*" hub instead of drawing direct source -> dest edges
+# ---------------------------------------------------------------------------
+
+def test_to_networkx_default_draws_wildcard_expansion_as_direct_edges():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse([
+        "^new--go-->open==finish-->done^",
+        "*==cancel-->cancelled^",
+    ]).validate().expand_wildcards()
+
+    g = spec.to_networkx()  # wildcard_pseudo_state=False by default
+
+    direct = {(u, v) for u, v, d in g.edges(data=True) if d["trigger"] == "cancel" and d.get("wildcard_expanded")}
+    assert direct == {("new", "cancelled"), ("open", "cancelled")}
+    assert not g.has_edge("new", "*")
+    assert not g.has_edge("open", "*")
+
+
+def test_to_networkx_pseudo_state_routes_expanded_wildcard_edges_through_hub():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse([
+        "^new--go-->open==finish-->done^",
+        "*==cancel-->cancelled^",
+    ]).validate().expand_wildcards()
+
+    g = spec.to_networkx(wildcard_pseudo_state=True)
+
+    # no direct source -> cancelled edges any more for the wildcard trigger
+    assert not g.has_edge("new", "cancelled")
+    assert not g.has_edge("open", "cancelled")
+
+    # each eligible source instead points at the hub, with the true destination preserved
+    for source in ("new", "open"):
+        _, _, data = next(e for e in g.out_edges(source, data=True) if e[2]["trigger"] == "cancel")
+        assert data["wildcard_dest"] == "cancelled"
+        assert data["wildcard_expanded"] is True
+
+    # non-wildcard edges are completely unaffected
+    assert g.has_edge("new", "open")
+    assert g.has_edge("open", "done")
+
+    # the hub fans out to the real destination -- deduplicated, not once per source
+    hub_to_cancelled = [
+        d for _, v, d in g.out_edges("*", data=True)
+        if v == "cancelled" and d.get("wildcard_expanded")
+    ]
+    assert len(hub_to_cancelled) == 1
+
+    # the abstract pending-rule edge is untouched by the flag, and coexists with the hub edge
+    pending_to_cancelled = [
+        d for _, v, d in g.out_edges("*", data=True)
+        if v == "cancelled" and d.get("wildcard_pending")
+    ]
+    assert len(pending_to_cancelled) == 1
+
+
+def test_to_networkx_pseudo_state_dedupes_hub_edges_by_guard_not_just_trigger():
+    """Two sources funneling into the hub with the SAME trigger+dest but DIFFERENT guards
+    must still produce two distinct hub -> dest edges -- guards are part of edge identity."""
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse([
+        "^a--x-->done^",
+        "b--gated#x-->done^",
+        "*==escape-->done^",
+    ])
+    # hand-craft two differently-guarded concrete "wildcard-expanded" edges sharing a
+    # trigger+dest, the way expand_wildcards() would if two distinct wildcard chains both
+    # targeted the same destination under the same trigger name but different guards.
+    spec.transitions.append({
+        "trigger": "escape", "source": "a", "dest": "done", "_wildcard": True,
+    })
+    spec.transitions.append({
+        "trigger": "escape", "source": "b", "dest": "done", "_wildcard": True,
+        "conditions": ["guard_gated"],
+    })
+    spec.auto_edges.add(("a", "escape"))
+    spec.auto_edges.add(("b", "escape"))
+
+    g = spec.to_networkx(wildcard_pseudo_state=True)
+
+    hub_to_done = [d for _, v, d in g.out_edges("*", data=True) if v == "done" and d.get("wildcard_expanded")]
+    assert len(hub_to_done) == 2
+    assert {tuple(d["conditions"]) for d in hub_to_done} == {(), ("guard_gated",)}
+
+
+def test_to_networkx_graph_level_metadata():
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(
+        ["^new--go-->open==finish-->done^"]
+    ).validate()
+
+    g = spec.to_networkx()
+
+    assert g.graph["initial_state"] == "new"
+    assert g.graph["initial_states"] == {"new"}
+    assert g.graph["terminal_states"] == {"done"}
+    assert g.graph["states_order"] == ["new", "open", "done"]
+    assert g.graph["triggers"] == ["go", "finish"]
+    assert g.graph["pipeline"] == ["go"]
+    assert g.graph["primary_chain"] == "^new--go-->open==finish-->done^"
