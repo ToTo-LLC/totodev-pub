@@ -1,0 +1,288 @@
+# Part of the totodev_pub library.
+# Repository: https://github.com/ToTo-LLC/totodev-pub
+
+"""Tests for the case documentation generator (case_doc mini-spec).
+
+Purely class-level, like test_case_type_spec.py — no case folder is ever
+created; `collect()`/`render_markdown()` only ever touch the class."""
+
+from __future__ import annotations
+
+import types
+from pathlib import Path
+
+import pytest
+
+from totodev_pub.folder_backed_case import FolderBackedCase
+from totodev_pub.folder_backed_case_support import case_doc
+from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
+from totodev_pub.folder_backed_case_support.case_doc import (
+    CaseDocOptions, collect, generate_case_docs, render_markdown, to_mermaid,
+)
+
+
+class SampleCase(FolderBackedCase):
+    """One customer ticket, from intake to closure or expiry.
+
+    Extra detail that should not appear in a first-paragraph render.
+    """
+
+    fsm_state_chains = [
+        "^new--intake-->reviewing",
+        "reviewing==funded#approve-->done^",
+        "reviewing==funded#fasttrack-->done^",
+        "reviewing--@DWELL>=1h#expire-->expired^",
+        "*==cancel-->cancelled^",
+    ]
+    fsm_trigger_chokes = {"approve": {"finance-api"}}
+    asset_aliases = [
+        AssetSpec(
+            alias="ticket", relative_path="ticket.yaml", loader=Path,
+            states={"reviewing", "done"}, keep=True,
+        ),
+    ]
+
+    async def perform_intake(self, tctx):
+        """Pull the raw ticket payload into the case folder."""
+
+    async def guard_funded(self, tctx) -> bool:
+        """True once the linked invoice shows a cleared payment."""
+        return True
+
+    async def before_approve(self, tctx):
+        """Snapshot the reviewer's decision before the transition commits."""
+
+    async def perform_approve(self, tctx):
+        """Stamp the ticket as approved and notify the customer."""
+
+    async def perform_expire(self, tctx):
+        """Archive the stale ticket once the review window lapses."""
+
+    async def on_enter_reviewing(self, tctx):
+        """Kick off the reviewer-assignment workflow."""
+
+    def case_assert_done_totals_balance(self, ltx):
+        """The closed ticket's recorded total matches the invoice."""
+        return None
+
+    def case_assert_reviewing_has_ticket(self, ltx):
+        """The ticket asset exists before review starts."""
+        return None
+
+    def on_terminating(self):
+        """Keep the ticket asset regardless of the declarative keep rule."""
+
+
+class UndocumentedCase(FolderBackedCase):
+    asset_aliases = []
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^new--go-->done^"]
+
+    async def perform_go(self, tctx):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# collect()
+# ---------------------------------------------------------------------------
+
+def test_collect_is_class_level_only_no_folder_needed():
+    # If this needed a live case, it would raise (no folder exists).
+    doc = collect(SampleCase)
+    assert doc.case_cls_name == "SampleCase"
+
+
+def test_collect_class_doc_is_first_paragraph_by_default():
+    doc = collect(SampleCase)
+    assert doc.class_doc == "One customer ticket, from intake to closure or expiry."
+
+
+def test_collect_class_doc_none_when_undocumented():
+    doc = collect(UndocumentedCase)
+    assert doc.class_doc is None
+
+
+def test_collect_states_flags_and_hooks():
+    doc = collect(SampleCase)
+    by_name = {s.name: s for s in doc.states}
+    assert by_name["new"].initial is True
+    assert by_name["new"].default_initial is True
+    assert by_name["reviewing"].terminal is False
+    assert by_name["reviewing"].on_enter_doc == "Kick off the reviewer-assignment workflow."
+    assert by_name["reviewing"].on_exit_doc is None
+    # "reviewing" is the SOURCE of the pure-timed-escape edge (DWELL alone fires it);
+    # the flag marks the state that can escape by waiting, not the destination.
+    assert by_name["reviewing"].timed_escape is True
+    assert by_name["done"].terminal is True
+    assert by_name["expired"].terminal is True
+    assert by_name["cancelled"].terminal is True
+
+
+def test_collect_state_assertions_grouped_and_documented():
+    doc = collect(SampleCase)
+    by_name = {s.name: s for s in doc.states}
+    assert by_name["done"].assertions == [
+        ("totals_balance", "The closed ticket's recorded total matches the invoice."),
+    ]
+    assert by_name["reviewing"].assertions == [
+        ("has_ticket", "The ticket asset exists before review starts."),
+    ]
+    assert by_name["new"].assertions == []
+
+
+def test_collect_triggers_docs_and_chokes():
+    doc = collect(SampleCase)
+    by_name = {t.name: t for t in doc.triggers}
+
+    intake = by_name["intake"]
+    assert intake.perform_doc == "Pull the raw ticket payload into the case folder."
+    assert {(e.source, e.dest, e.auto) for e in intake.edges} == {("new", "reviewing", True)}
+
+    approve = by_name["approve"]
+    assert approve.before_doc == "Snapshot the reviewer's decision before the transition commits."
+    assert approve.perform_doc == "Stamp the ticket as approved and notify the customer."
+    assert approve.chokes == frozenset({"finance-api"})
+    assert approve.edges[0].guard_names == ["funded"]
+
+    fasttrack = by_name["fasttrack"]
+    assert fasttrack.perform_doc is None          # never defined -> None, not an error
+    assert fasttrack.edges[0].guard_names == ["funded"]
+
+    expire = by_name["expire"]
+    assert expire.edges[0].fact_guards == [{"name": "DWELL", "op": ">=", "operand": 3600.0}]
+
+    cancel = by_name["cancel"]
+    assert any(e.source == "*" for e in cancel.edges) or any(
+        e.wildcard_expanded for e in cancel.edges
+    )
+
+
+def test_collect_guards_cross_referenced_across_triggers():
+    doc = collect(SampleCase)
+    [funded] = [g for g in doc.guards if g.name == "funded"]
+    assert funded.doc == "True once the linked invoice shows a cleared payment."
+    assert funded.used_by_triggers == ["approve", "fasttrack"]
+
+
+def test_collect_assets():
+    doc = collect(SampleCase)
+    [ticket] = doc.assets
+    assert ticket.alias == "ticket"
+    assert ticket.relative_path == "ticket.yaml"
+    assert ticket.states == frozenset({"reviewing", "done"})
+    assert ticket.keep is True
+    assert ticket.many is False
+
+
+def test_collect_overridden_hooks_only_lists_actual_overrides():
+    doc = collect(SampleCase)
+    names = {h.name for h in doc.overridden_hooks}
+    assert names == {"on_terminating"}
+    [hook] = [h for h in doc.overridden_hooks if h.name == "on_terminating"]
+    assert hook.doc == "Keep the ticket asset regardless of the declarative keep rule."
+
+
+def test_collect_overridden_hooks_empty_when_none_overridden():
+    doc = collect(UndocumentedCase)
+    assert doc.overridden_hooks == []
+
+
+def test_docstring_mode_none_drops_all_docs():
+    doc = collect(SampleCase, options=CaseDocOptions(docstring_mode="none"))
+    assert doc.class_doc is None
+    assert all(s.on_enter_doc is None for s in doc.states)
+    assert all(t.perform_doc is None for t in doc.triggers)
+    assert all(g.doc is None for g in doc.guards)
+
+
+# ---------------------------------------------------------------------------
+# to_mermaid()
+# ---------------------------------------------------------------------------
+
+def test_to_mermaid_state_style_default():
+    doc = collect(SampleCase)
+    mermaid = to_mermaid(doc.fsm_graph)
+    assert mermaid.startswith("stateDiagram-v2")
+    assert "[*] --> new" in mermaid
+    assert "done --> [*]" in mermaid
+    assert "approve [funded]" in mermaid
+
+
+def test_to_mermaid_flowchart_style_with_wildcard_hub():
+    doc = collect(SampleCase, options=CaseDocOptions(wildcard_pseudo_state=True))
+    mermaid = to_mermaid(doc.fsm_graph, style="flowchart")
+    assert mermaid.startswith("flowchart TD")
+    assert case_doc._MERMAID_WILDCARD_ID in mermaid
+    assert "classDef initialState" in mermaid
+
+
+# ---------------------------------------------------------------------------
+# render_markdown() / generate_case_docs()
+# ---------------------------------------------------------------------------
+
+def test_render_markdown_contains_all_default_sections():
+    text = generate_case_docs(SampleCase)
+    assert text.startswith("# SampleCase")
+    assert "```mermaid" in text
+    assert "## States" in text
+    assert "## Triggers" in text
+    assert "## Guards" in text
+    assert "## Assertions" in text
+    assert "## Asset Aliases" in text
+    assert "## Overridden Lifecycle Hooks" in text
+    assert "per-case file assertions" in text        # the §6 footnote
+
+
+def test_render_markdown_sections_are_individually_toggleable():
+    options = CaseDocOptions(
+        include_diagram=False, include_states_table=False,
+        include_triggers_table=False, include_guards_table=False,
+        include_assertions=False, include_assets=False, include_hooks=False,
+    )
+    text = generate_case_docs(SampleCase, options=options)
+    assert "```mermaid" not in text
+    assert "## States" not in text
+    assert "## Triggers" not in text
+    assert "## Guards" not in text
+    assert "## Assertions" not in text
+    assert "## Asset Aliases" not in text
+    assert "## Overridden Lifecycle Hooks" not in text
+    assert text.startswith("# SampleCase")             # header always present
+
+
+def test_render_markdown_omits_hooks_section_when_none_overridden():
+    text = generate_case_docs(UndocumentedCase)
+    assert "## Overridden Lifecycle Hooks" not in text
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def test_cli_main_smoke(monkeypatch, capsys):
+    fake_module = types.SimpleNamespace(SampleCase=SampleCase)
+    monkeypatch.setattr(case_doc.importlib, "import_module", lambda name: fake_module)
+
+    rc = case_doc.main(["fake_module:SampleCase", "--no-diagram"])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "# SampleCase" in captured.out
+    assert "```mermaid" not in captured.out
+
+
+def test_cli_main_rejects_bad_target_syntax(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        case_doc.main(["no-colon-here"])
+    assert exc_info.value.code == 2
+    assert "must be" in capsys.readouterr().err
+
+
+def test_cli_main_rejects_non_case_class(monkeypatch, capsys):
+    fake_module = types.SimpleNamespace(NotACase=object)
+    monkeypatch.setattr(case_doc.importlib, "import_module", lambda name: fake_module)
+
+    with pytest.raises(SystemExit) as exc_info:
+        case_doc.main(["fake_module:NotACase"])
+    assert exc_info.value.code == 2
+    assert "not a FolderBackedCase subclass" in capsys.readouterr().err
