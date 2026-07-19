@@ -54,7 +54,8 @@ from totodev_pub.folder_backed_case_support.helpers import (
     _utcnow, _local_mtime_as_utc, _norm_rel,
 )
 from totodev_pub.folder_backed_case_support.case_id_generation import (
-    CaseIDGenerator, TimeSlugCaseIDGenerator, DEFAULT_CASE_ID_GENERATOR,
+    CaseIDGenerator, TimeSlugCaseIDGenerator, UUIDCaseIDGenerator,
+    DEFAULT_CASE_ID_GENERATOR,
 )
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
@@ -102,7 +103,7 @@ __all__ = [
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
     "CaseInvokedProcessError",
     "MissingAssetSchemaError", "MissingTriggerChokesError",
-    "CaseIDGenerator", "TimeSlugCaseIDGenerator",
+    "CaseIDGenerator", "TimeSlugCaseIDGenerator", "UUIDCaseIDGenerator",
     "CASE_RESERVED_ARTIFACT_NAMES", "CASE_BASE_EVENT_PREFIX",
     "LogRetention", "set_case_log_retention",
     "AssertionMode", "set_case_assertion_mode",

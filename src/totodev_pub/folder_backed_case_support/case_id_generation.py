@@ -12,6 +12,7 @@ parallel, or encode limited case-type info into the id.
 from __future__ import annotations
 
 import time
+import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -56,6 +57,28 @@ class TimeSlugCaseIDGenerator(CaseIDGenerator):
         mint_ms = now_ms if now_ms > self._last_ms else self._last_ms + 1
         self._last_ms = mint_ms
         return _new_time_slug(mint_ms)
+
+
+class UUIDCaseIDGenerator(CaseIDGenerator):
+    """UUID4-based generator: collision-resistant across processes and machines.
+
+    A good choice when cases are minted from multiple processes (or hosts)
+    into a shared tree and id collisions are a concern — random UUIDs need no
+    coordination, unlike ``TimeSlugCaseIDGenerator``'s per-instance monotonic
+    clock. The trade-offs: ids take a bit more effort to generate, are longer
+    (32 hex characters), and are NOT lexically sortable by creation time.
+    Stateless, so one instance is safe to share across threads and case types.
+
+    Ignores ``case_cls`` — uniqueness only.
+
+    Future: a UUIDv7 variant would add time-ordered (lexically monotonic) ids
+    on top of the same collision resistance; ``uuid.uuid7`` lands in the
+    stdlib in Python 3.14, so upgrade this (or add a sibling) once the
+    project's minimum Python allows it.
+    """
+
+    def generate(self, case_cls: type[FolderBackedCase] | None = None) -> str:
+        return uuid.uuid4().hex
 
 
 DEFAULT_CASE_ID_GENERATOR = TimeSlugCaseIDGenerator()

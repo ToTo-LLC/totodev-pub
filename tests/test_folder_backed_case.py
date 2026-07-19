@@ -16,6 +16,7 @@ from totodev_pub.folder_backed_case import (
     AssetSpec,
     CaseIDGenerator,
     TimeSlugCaseIDGenerator,
+    UUIDCaseIDGenerator,
     DEFAULT_CASE_ID_GENERATOR,
 )
 import totodev_pub.folder_backed_case as _fbc
@@ -731,6 +732,31 @@ def test_time_slug_generator_auto_bumps_on_same_millisecond(monkeypatch):
     second = gen.generate()
     assert second != first
     assert int(second, 36) == int(first, 36) + 1
+
+
+def test_uuid_generator_mints_unique_hex_ids():
+    gen = UUIDCaseIDGenerator()
+    first = gen.generate()
+    second = gen.generate()
+    assert first != second
+    for case_id in (first, second):
+        assert len(case_id) == 32
+        int(case_id, 16)  # pure lowercase hex, no dashes
+
+
+def test_create_case_mints_id_via_uuid_generator(tmp_path):
+    class UUIDCase(FolderBackedCase):
+        asset_aliases = []
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["^new==begin-->done^"]
+        case_id_generator = UUIDCaseIDGenerator()
+
+    case = UUIDCase.create_case_in_folder(tmp_path / "uuid-minted")
+    try:
+        assert len(case.case_id) == 32
+        int(case.case_id, 16)
+    finally:
+        case.case_detach()
 
 
 def test_create_case_mints_id_via_default_generator(tmp_path):
