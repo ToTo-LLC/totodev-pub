@@ -34,6 +34,9 @@ here and tends to confuse rather than help a first-time case author.
 6. **Validate it binds** — actually import the generated module and fix
    whatever the framework rejects. Do not skip this.
 7. **Check coverage** against the checklist before handing it back.
+8. **Offer a documentation report** — ask if the developer wants a rendered
+   summary of the finished class (lifecycle diagram, states/triggers/guards/
+   assertions/assets tables) to sanity-check the whole design at a glance.
 
 For DSL grammar, hook-naming rules, the assertion convention, and `AssetSpec`
 fields, see `references/dsl_and_hooks.md` — read it before step 2 if any of
@@ -180,3 +183,36 @@ Before handing the file back, confirm:
 - [ ] The class carries `@case_type_registry.register`.
 - [ ] No stub contains real logic — only a `self._not_implemented(...)` call,
       a responsibility docstring, and the signature-required default return.
+
+## Step 8 — Offer a documentation report
+
+Once the class binds cleanly (Step 6) and the coverage checklist (Step 7) is
+satisfied, **ask** the developer whether they'd like a rendered documentation
+report for the class — don't generate it unprompted; it's a few extra seconds
+of output some developers won't want.
+
+If they say yes, use the case documentation generator
+(`totodev_pub.folder_backed_case_support.case_doc`):
+
+```python
+from totodev_pub.folder_backed_case_support.case_doc import generate_case_docs
+print(generate_case_docs(<GeneratedClass>))
+```
+
+or, equivalently, from the CLI:
+
+```bash
+python -m totodev_pub.folder_backed_case_support.case_doc <module path>:<GeneratedClass>
+```
+
+This is class-level only, like Step 6's import check — no case folder is
+created. It renders the lifecycle diagram plus states/triggers/guards/
+assertions/asset-alias tables, pulling the first paragraph of every docstring
+this skill just wrote. It doubles as a last sanity check in its own right: a
+trigger, guard, or state whose docstring came out thin or missing stands out
+immediately in the rendered tables — worth fixing before handing the file
+back if so.
+
+Show the rendered Markdown to the developer directly (or save it alongside
+the generated class if they'd like a copy) — don't just report that it
+succeeded.
