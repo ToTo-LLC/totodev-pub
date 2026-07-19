@@ -652,3 +652,118 @@ def test_to_networkx_graph_level_metadata():
     assert g.graph["triggers"] == ["go", "finish"]
     assert g.graph["pipeline"] == ["go"]
     assert g.graph["primary_chain"] == "^new--go-->open==finish-->done^"
+
+
+# ---------------------------------------------------------------------------
+# to_networkx() declaration_index: preserve advance() attempt order
+# ---------------------------------------------------------------------------
+
+
+def test_to_networkx_declaration_index_restores_auto_attempt_order():
+    """MultiDiGraph groups out-edges by destination, so raw iteration can scramble
+    declaration order when destinations interleave. Sorting by declaration_index must
+    reproduce auto_edges_from() — the order advance() actually tries."""
+    pytest.importorskip("networkx")
+    # Destinations B, C, B: NetworkX adjacency yields t1,t3,t2 (grouped by dest),
+    # while declaration / advance order is t1,t2,t3.
+    spec = StateChainParser.parse([
+        "^fork--t1-->B^",
+        "fork--t2-->C^",
+        "fork--t3-->B^",
+    ]).validate()
+
+    g = spec.to_networkx()
+
+    raw = [(d["trigger"], v) for _, v, d in g.out_edges("fork", data=True) if d["auto"]]
+    expected = spec.auto_edges_from("fork")
+    assert raw != list(expected), (
+        "precondition: NetworkX out_edges order must differ from declaration order "
+        "for this interleaved-destination fixture"
+    )
+
+    restored = [
+        (d["trigger"], v)
+        for _, v, d in sorted(
+            ((u, v, d) for u, v, d in g.out_edges("fork", data=True)
+             if d["auto"] and d["declaration_index"] is not None),
+            key=lambda e: e[2]["declaration_index"],
+        )
+    ]
+    assert restored == list(expected)
+
+
+def test_to_networkx_wildcard_expanded_edges_sort_after_explicit():
+    """expand_wildcards() appends concrete edges, so their declaration_index must be
+    greater than every explicit transition's index — matching runtime attempt order."""
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse([
+        "^new--go-->open==finish-->done^",
+        "*--timeout-->expired^",
+    ]).validate().expand_wildcards()
+
+    g = spec.to_networkx()
+
+    explicit_idxs = [
+        d["declaration_index"]
+        for _, _, d in g.edges(data=True)
+        if not d.get("wildcard_expanded") and not d.get("wildcard_pending")
+    ]
+    expanded_idxs = [
+        d["declaration_index"]
+        for _, _, d in g.edges(data=True)
+        if d.get("wildcard_expanded")
+    ]
+    assert explicit_idxs and expanded_idxs
+    assert all(isinstance(i, int) for i in explicit_idxs + expanded_idxs)
+    assert min(expanded_idxs) > max(explicit_idxs)
+
+
+def test_to_networkx_hub_spokes_keep_index_artifacts_are_none():
+    """In hub mode, source->* spokes are the fireable edges and keep their index;
+    deduplicated *->dest hub edges and abstract pending-rule edges get None."""
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse([
+        "^new--go-->open==finish-->done^",
+        "*--timeout-->expired^",
+    ]).validate().expand_wildcards()
+
+    g = spec.to_networkx(wildcard_pseudo_state=True)
+
+    spokes = [
+        d for u, v, d in g.edges(data=True)
+        if v == "*" and d.get("wildcard_expanded")
+    ]
+    assert spokes
+    assert all(isinstance(d["declaration_index"], int) for d in spokes)
+
+    hub_to_dest = [
+        d for u, v, d in g.out_edges("*", data=True)
+        if d.get("wildcard_expanded") and not d.get("wildcard_pending")
+    ]
+    assert hub_to_dest
+    assert all(d["declaration_index"] is None for d in hub_to_dest)
+
+    pending = [d for _, _, d in g.edges(data=True) if d.get("wildcard_pending")]
+    assert pending
+    assert all(d["declaration_index"] is None for d in pending)
+
+
+def test_to_networkx_multi_source_transition_shares_declaration_index():
+    """A hand-built multi-source transition dict fans out to one edge per source that
+    all share the same transitions-list index; within each source the index is unique."""
+    pytest.importorskip("networkx")
+    spec = StateChainParser.parse(["^a--x-->done^", "^b--y-->done^"]).validate()
+    # Replace the two single-source edges with one multi-source dict at a known index.
+    shared = {"trigger": "shared", "source": ["a", "b"], "dest": "done"}
+    spec.transitions = [shared]
+    spec.auto_edges = {("a", "shared"), ("b", "shared")}
+    spec.triggers = ["shared"]
+    spec.pipeline = ["shared"]
+
+    g = spec.to_networkx()
+
+    a_edge = next(d for _, _, d in g.out_edges("a", data=True) if d["trigger"] == "shared")
+    b_edge = next(d for _, _, d in g.out_edges("b", data=True) if d["trigger"] == "shared")
+    assert a_edge["declaration_index"] == b_edge["declaration_index"] == 0
+    assert [d["declaration_index"] for _, _, d in g.out_edges("a", data=True)] == [0]
+    assert [d["declaration_index"] for _, _, d in g.out_edges("b", data=True)] == [0]

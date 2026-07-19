@@ -560,6 +560,29 @@ class FsmChainSpec:
                                      node-level `timed_escape` flag, which only says the STATE
                                      has such an edge somewhere
           * wildcard_expanded     -- True if this edge was injected by expand_wildcards()
+          * declaration_index     -- int index of the producing entry in `self.transitions`,
+                                     or None for edges that are rendering artifacts rather than
+                                     one fireable transition (see below). Globally well-ordered
+                                     but NOT promised contiguous for a given state's out-edges
+                                     (indices are global; hub-mode gaps are expected). Contract:
+                                     for any state S, take S's out-edges where auto=True and
+                                     declaration_index is not None, sort ascending by that
+                                     index, and the resulting (trigger, dest) sequence equals
+                                     `auto_edges_from(S)` — the order advance() attempts them.
+                                     Do NOT treat NetworkX's own `out_edges()` iteration order
+                                     as declaration order: a MultiDiGraph groups adjacency by
+                                     destination, which can scramble interleaved destinations
+                                     even when edges were added in declaration order. Multi-
+                                     source transition dicts fan out to one edge per source that
+                                     SHARE the same index (harmless: attempt order is only ever
+                                     compared among one state's out-edges, where indices stay
+                                     unique). Concrete wildcard-expanded edges inherit their
+                                     appended position in `transitions` (after every explicit
+                                     edge), matching runtime. `None` is used for (a) the
+                                     deduplicated `"*" -> dest` hub edges under
+                                     `wildcard_pseudo_state=True` and (b) abstract
+                                     `wildcard_pending` rule edges — neither is a one-to-one
+                                     fireable transition.
 
         A chain's `*[--|==]...-->dest` wildcard rule is ALSO represented directly (not just
         via the per-source edges expand_wildcards() concretizes): `expand_wildcards()` never
@@ -661,7 +684,7 @@ class FsmChainSpec:
 
         hub_dest_seen: set[tuple] = set()  # (trigger, dest, conditions, fact_key) already hubbed
 
-        for t in self.transitions:
+        for declaration_index, t in enumerate(self.transitions):
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
             trigger = t["trigger"]
             dest = t["dest"]
@@ -686,6 +709,7 @@ class FsmChainSpec:
                     soft_timeout_is_explicit=soft_timeout_is_explicit,
                     pure_timed_escape=pure_timed_escape,
                     wildcard_expanded=wildcard_expanded,
+                    declaration_index=declaration_index,
                 )
                 if not as_hub:
                     g.add_edge(s, dest, **edge_attrs)
@@ -696,7 +720,11 @@ class FsmChainSpec:
                 hub_key = (trigger, dest, tuple(conditions), fact_key)
                 if hub_key not in hub_dest_seen:
                     hub_dest_seen.add(hub_key)
-                    g.add_edge(_WILDCARD_SOURCE, dest, **edge_attrs)
+                    # Aggregated rendering edge: not one fireable transition.
+                    g.add_edge(
+                        _WILDCARD_SOURCE, dest,
+                        **{**edge_attrs, "declaration_index": None},
+                    )
 
         for w in self.pending_wildcards:
             trigger = w["trigger"]
@@ -712,6 +740,7 @@ class FsmChainSpec:
                 soft_timeout_secs=soft_timeout_secs,
                 soft_timeout_is_explicit=soft_timeout_is_explicit,
                 wildcard_pending=True,
+                declaration_index=None,
             )
 
         return g
