@@ -16,6 +16,7 @@ KEEP_LIST_NAME  = "_keep.txt"        # retention manifest at the CASE ROOT (case
 LOGS_DIR_NAME   = "logs"             # per-case folder-logging tee (NOT under assets/)
 LOG_FILE_NAME   = "case.log"         # the single appended per-case log file inside logs/
 ASSERTS_DIR_NAME = "assertions"      # per-case assertion files (case_assert_* functions)
+WORKBENCH_DIR_NAME = "workbench"     # reserved for testing tools (CaseWorkbench); not case-owned assets
 
 # Framework-owned keep rules seeded idempotently at case create/bind. Every rule is
 # case-relative (exact path or glob). Purge deletes any file under the case folder
@@ -46,6 +47,7 @@ CASE_RESERVED_ARTIFACT_NAMES = (
     LEASE_NAME,
     LOGS_DIR_NAME,
     ASSERTS_DIR_NAME,
+    WORKBENCH_DIR_NAME,
 )
 # Event-log labels written by the FolderBackedCase base class. Every label is
 # CASE_-prefixed so an observer can isolate the family's lifecycle events with a

@@ -174,8 +174,15 @@ class FolderBackedCaseInterface(ABC):
         ``guard#trigger`` DSL
 
     Raising in a guard or ``before_`` hook aborts the transition and counts as a
-    transition fail. Guards should be fast, idempotent, and side-effect free
-    (they may be polled many times). Built-in factual guards:
+    transition fail.
+
+    Guard purity
+    ------------
+    Guards are **side-effect-free predicates**. They must be fast, idempotent, and
+    free of writes (filesystem, network, case mutation). The framework and tooling
+    (including CaseWorkbench.probe) may call them repeatedly, out of band, and with
+    empty kwargs — treat them as pure questions about current case facts, not as
+    work steps. Built-in factual guards:
 
       * ``@FAIL(>|>=|<|<=)n#`` — fail count since entering current state
       * ``@DWELL(>|>=|<|<=)dur#`` — seconds in current state (units s/m/h/d)

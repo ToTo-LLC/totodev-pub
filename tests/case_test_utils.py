@@ -3,13 +3,18 @@
 
 """Test-only helpers for driving FolderBackedCase instances.
 
-This is intentionally NOT part of the shipped library. Driving a single case to
-its terminal state (seizing a worker until one case finishes) is an anti-pattern
-for the framework's intended many-cases / round-robin deployment, so it lives
-here purely as a testing convenience. Production driving is a scheduler concern
-that belongs to a driver layer
-(see totodev_pub.folder_backed_case_support.case_pool_driver.CasePoolDriver),
-not to the case.
+Driving a single case to its terminal state (seizing a worker until one case
+finishes) is an anti-pattern for the framework's intended many-cases /
+round-robin *production* deployment. That concern belongs to a scheduler /
+driver layer (see
+``totodev_pub.folder_backed_case_support.case_pool_driver.CasePoolDriver``),
+not to FolderBackedCase itself — so this module must not be treated as a
+production driver API.
+
+Interactive / developer testing is different: ``CaseWorkbench.run`` in
+``totodev_pub.case_testing`` intentionally ships a single-case drive helper
+for notebooks, REPL, and scenario scripts. Prefer ``CaseWorkbench`` for new
+work; ``drive_to_completion`` here remains a thin pytest-local convenience.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ async def drive_to_completion(
     step from the current state could ENTER ``stop_before`` (for staged inspection).
 
     Returns the LAST AdvanceResult (so a caller can inspect why the drive stopped), or
-    None if it never stepped. For tests and one-off scripts only — see module docstring.
+    None if it never stepped. Prefer ``CaseWorkbench.run`` for interactive work.
     """
     last: AdvanceResult | None = None
     while case.case_is_live:
