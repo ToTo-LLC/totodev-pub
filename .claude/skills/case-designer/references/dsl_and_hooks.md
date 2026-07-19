@@ -66,8 +66,7 @@ Plain **synchronous** method, one per state-shape invariant worth checking:
 ```python
 def case_assert_<state>_<slug>(self, ltx) -> None | str:
     """Return a falsy value to pass, or a message string describing the failure."""
-    self._not_implemented("case_assert_<state>_<slug>")
-    return None
+    return self._not_implemented(None)
 ```
 
 - Runs once per entry into `<state>`, after `on_enter_`/`after_` hooks (and for a
@@ -101,21 +100,29 @@ Stub bodies do NOT `raise NotImplementedError`. Instead every generated class
 gets one small scaffolding helper, and every stub calls it:
 
 ```python
-def _not_implemented(self, method_name: str) -> None:
-    self.log.warning("STUB not implemented: %s.%s", type(self).__name__, method_name)
+def _not_implemented(self, retval: Any = None) -> Any:
+    """Log that a stub ran (naming the caller), then return the stubbed-in default."""
+    caller = sys._getframe(1).f_code.co_qualname  # e.g. "MyCase.guard_eligible"
+    self.log.warning("STUB not implemented: %s", caller)
+    return retval
 ```
 
 This logs a WARNING to the case's own `self.log` (case.log tee) instead of
 crashing, so the developer can drive/simulate the lifecycle (`case_advance()`
-in a scratch script or test) before any hook has real logic. Each stub calls
-`self._not_implemented("<its own name>")` and then returns whatever default
-its signature requires:
+in a scratch script or test) before any hook has real logic. The helper reads
+the caller's qualified name via `sys._getframe(1)` (`co_qualname` is fine —
+this project requires Python >= 3.11), so stubs never hardcode their own
+method name (and can't silently drift if a trigger gets renamed mid-design).
+Each stub's entire body (after its docstring) is exactly one line —
+`return self._not_implemented(<default>)` — so replacing a stub with a real
+implementation means deleting that one line and writing the body. The
+`<default>` is whatever the stub's signature requires:
 
-| Stub kind | Return type | Stubbed default | Why |
+| Stub kind | Return type | Stubbed body | Why |
 |---|---|---|---|
-| `perform_`/`before_`/`after_`/`on_enter_`/`on_exit_`/`on_terminating` | `None` | nothing to return | already returns `None` naturally |
-| `guard_<guard>` | `bool` | `return True` | lets a simulated run walk past the edge; flip to `False` if the guard should block until real logic lands |
-| `case_assert_<state>_<slug>` | `None \| str` | `return None` | treats the check as passing while stubbed, so it doesn't spam `CASE_ASSERT_FAILED` events for a known-unimplemented check — the log WARNING is the visible signal instead |
+| `perform_`/`before_`/`after_`/`on_enter_`/`on_exit_`/`on_terminating` | `None` | `return self._not_implemented(None)` | return value is ignored; `None` keeps it honest |
+| `guard_<guard>` | `bool` | `return self._not_implemented(True)` | lets a simulated run walk past the edge; pass `False` if the guard should block until real logic lands |
+| `case_assert_<state>_<slug>` | `None \| str` | `return self._not_implemented(None)` | falsy = pass, so a known-unimplemented check doesn't spam `CASE_ASSERT_FAILED` events — the log WARNING is the visible signal instead |
 
 `_not_implemented` and every call to it are meant to be deleted once real
 implementations replace the stubs — say so in its docstring/comment when
@@ -124,6 +131,9 @@ generating it.
 ## Minimal skeleton shape
 
 ```python
+from typing import Any
+import sys
+
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
@@ -137,22 +147,22 @@ class MyCase(FolderBackedCase):
     asset_aliases = [...]
     fsm_trigger_chokes = {...}
 
-    def _not_implemented(self, method_name: str) -> None:
-        self.log.warning("STUB not implemented: %s.%s", type(self).__name__, method_name)
+    def _not_implemented(self, retval: Any = None) -> Any:
+        caller = sys._getframe(1).f_code.co_qualname
+        self.log.warning("STUB not implemented: %s", caller)
+        return retval
 
     async def perform_<trigger>(self, tctx):
-        self._not_implemented("perform_<trigger>")
+        return self._not_implemented(None)
 
     async def guard_<guard>(self, tctx) -> bool:
-        self._not_implemented("guard_<guard>")
-        return True
+        return self._not_implemented(True)
 
     def case_assert_<state>_<slug>(self, ltx) -> None | str:
-        self._not_implemented("case_assert_<state>_<slug>")
-        return None
+        return self._not_implemented(None)
 
     def on_terminating(self):
-        self._not_implemented("on_terminating")  # or case_keep_files() for a real decision
+        return self._not_implemented(None)  # or case_keep_files() for a real decision
 ```
 
 See `assets/case_class_template.py` in this skill for a fully worked, fully

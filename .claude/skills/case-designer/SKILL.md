@@ -110,12 +110,16 @@ for every name that appears in the confirmed `fsm_state_chains`:
   retention decision; otherwise omit it and rely on `AssetSpec(keep=True)`.
 
 **Stub bodies never raise or implement anything.** Every generated class also
-gets a small `_not_implemented(self, method_name)` scaffolding helper (see
+gets a small `_not_implemented(self, retval)` scaffolding helper (see
 `references/dsl_and_hooks.md` for its exact form) that logs a WARNING to
-`self.log` instead of crashing. Every stub calls it and then returns whatever
-default its signature requires (`None` for hooks, `True` for guards, `None`
-for assertions) — this is what lets the developer drive/simulate the whole
-lifecycle before any real logic exists. Mention in the generated file that
+`self.log` — naming the caller via `sys._getframe(1).f_code.co_qualname`, so
+stubs never hardcode their method name — then returns `retval`. Every stub's
+entire body (after its docstring) is exactly one line —
+`return self._not_implemented(<default>)` — passing whatever default its
+signature requires (`None` for hooks, `True` for guards, `None` for
+assertions). This is what lets the developer drive/simulate the whole
+lifecycle before any real logic exists, and it makes de-stubbing mechanical:
+delete that one line, write the real body. Mention in the generated file that
 `_not_implemented` and its call sites are meant to be deleted once real
 implementations land. Never write the actual `perform_`/`guard_` logic, even
 if it looks obvious or short — that is the developer's implementation to
@@ -181,8 +185,8 @@ Before handing the file back, confirm:
 - [ ] `asset_aliases` states/loader/keep/many are all set (or
       `flexible_asset_alias_loading = True` was deliberately chosen instead).
 - [ ] The class carries `@case_type_registry.register`.
-- [ ] No stub contains real logic — only a `self._not_implemented(...)` call,
-      a responsibility docstring, and the signature-required default return.
+- [ ] No stub contains real logic — only a responsibility docstring and a
+      single `return self._not_implemented(<default>)` line.
 
 ## Step 8 — Offer a documentation report
 
