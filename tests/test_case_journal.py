@@ -12,7 +12,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     EV_ALERTED,
 )
 from totodev_pub.folder_backed_case_support.case_journal import (
-    CaseEventJournal, CaseEventJournalView, CaseLastTransition,
+    CaseEventJournal, CaseEventJournalView, CaseTransition,
 )
 
 
@@ -200,7 +200,7 @@ def test_last_transition_inception_has_no_trigger_or_from(tmp_path):
     journal.log_state_entered("new")
     snap = journal.last_transition()
     assert snap is not None
-    assert isinstance(snap, CaseLastTransition)
+    assert isinstance(snap, CaseTransition)
     assert snap.to_state == "new"
     assert snap.trigger is None
     assert snap.from_state is None
@@ -224,6 +224,51 @@ def test_last_transition_view_parity(tmp_path):
     journal.log_state_entered("open", trigger="go", from_state="new")
     view = journal.view()
     assert view.last_transition() == journal.last_transition()
+
+
+# ---------------------------------------------------------------------------
+# transitions() history
+# ---------------------------------------------------------------------------
+
+def test_transitions_empty_when_no_state_entered(tmp_path):
+    journal = _journal(tmp_path)
+    assert journal.transitions() == []
+    # Non-STATE_ENTERED events do not create transitions.
+    journal.log_created("TicketCase", case_id="c-1", external_key=None)
+    assert journal.transitions() == []
+
+
+def test_transitions_sequential_oldest_first(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_state_entered("new")
+    journal.log_state_entered("open", trigger="go", from_state="new")
+    journal.log_state_entered("done", trigger="finish", from_state="open")
+    history = journal.transitions()
+    assert [tx.to_state for tx in history] == ["new", "open", "done"]
+    assert all(isinstance(tx, CaseTransition) for tx in history)
+    # Inception marker has no trigger/from; later entries carry their payload.
+    assert history[0].trigger is None and history[0].from_state is None
+    assert history[1].trigger == "go" and history[1].from_state == "new"
+    assert history[2].trigger == "finish" and history[2].from_state == "open"
+    # Timestamps never go backwards, and the tail matches last_transition().
+    assert all(a.mtime <= b.mtime for a, b in zip(history, history[1:]))
+    assert history[-1] == journal.last_transition()
+
+
+def test_transitions_ignores_other_event_labels(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_state_entered("open")
+    journal.log_transition_failed("go", {"trigger": "go"})
+    journal.log_alerted("open", msg="x")
+    journal.log_state_entered("done", trigger="finish", from_state="open")
+    assert [tx.to_state for tx in journal.transitions()] == ["open", "done"]
+
+
+def test_transitions_view_parity(tmp_path):
+    journal = _journal(tmp_path)
+    journal.log_state_entered("new")
+    journal.log_state_entered("open", trigger="go", from_state="new")
+    assert journal.view().transitions() == journal.transitions()
 
 
 # ---------------------------------------------------------------------------

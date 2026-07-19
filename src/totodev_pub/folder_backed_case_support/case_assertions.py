@@ -13,7 +13,7 @@ raise = fail with error detail):
     ``def case_assert_<state>_<slug>(case_reader, ltx)`` where ``case_reader``
     is a read-only FolderBackedCaseReader (observe-only by construction).
 
-``ltx`` is the sweep's CaseLastTransition snapshot. Assertions are SYNCHRONOUS
+``ltx`` is the sweep's CaseTransition snapshot. Assertions are SYNCHRONOUS
 by contract (the ``on_terminating`` precedent): they run at the transition
 boundary with no keepalive spanning them, so heavy work belongs in a
 ``perform_`` step, not here.
@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from totodev_pub.folder_backed_case_support.case_journal import (
-    CaseEventJournal, CaseLastTransition,
+    CaseEventJournal, CaseTransition,
 )
 from totodev_pub.folder_backed_case_support.constants import ASSERTS_DIR_NAME
 from totodev_pub.folder_backed_case_support.exceptions import FsmBindingError
@@ -269,7 +269,7 @@ class _CaseAssertionRunner:
             )
 
     def _sweep_files(
-        self, state: str, ltx: Optional[CaseLastTransition],
+        self, state: str, ltx: Optional[CaseTransition],
     ) -> tuple[int, int]:
         """Discover and run assertions/*.py functions tied to ``state``. Files are
         DATA: a broken file logs one import-failure CASE_ASSERT_FAILED and the sweep

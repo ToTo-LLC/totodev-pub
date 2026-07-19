@@ -48,8 +48,8 @@ from totodev_pub.folder_backed_case_support.constants import (
 
 
 @dataclass(frozen=True)
-class CaseLastTransition:
-    """Snapshot of the most recent CASE_STATE_ENTERED event.
+class CaseTransition:
+    """Snapshot of one CASE_STATE_ENTERED event.
 
     ``mtime`` is naive/local, like all event-log mtimes; callers convert to
     aware UTC when needed. ``trigger`` / ``from_state`` are None when the
@@ -60,6 +60,7 @@ class CaseLastTransition:
     trigger: str | None
     to_state: str
     mtime: datetime.datetime
+
 
 # Events that RESOLVE a CASE_TRIGGER_STARTED: the attempt committed (STATE_ENTERED) or
 # failed in one of its recorded ways. Anything else logged mid-work (an alert, a slow
@@ -280,7 +281,19 @@ class CaseEventJournal:
         ev = next(self._log.events(label_glob=EV_STATE_ENTERED), None)
         return ev.mtime if ev is not None else None
 
-    def last_transition(self) -> Optional[CaseLastTransition]:
+    @staticmethod
+    def _transition_of(ev: PrimitiveEventProxy) -> CaseTransition:
+        """Structured snapshot of one CASE_STATE_ENTERED event."""
+        payload = ev.contents()
+        data = payload.as_dict() if payload is not None else {}
+        return CaseTransition(
+            from_state=data.get("from"),
+            trigger=data.get("trigger"),
+            to_state=ev.value,
+            mtime=ev.mtime,
+        )
+
+    def last_transition(self) -> Optional[CaseTransition]:
         """Most recent CASE_STATE_ENTERED as a structured snapshot, or None if none.
 
         Prefer this over digging into ``primitive`` when you need the last
@@ -290,14 +303,18 @@ class CaseEventJournal:
         ev = next(self._log.events(label_glob=EV_STATE_ENTERED), None)
         if ev is None:
             return None
-        payload = ev.contents()
-        data = payload.as_dict() if payload is not None else {}
-        return CaseLastTransition(
-            from_state=data.get("from"),
-            trigger=data.get("trigger"),
-            to_state=ev.value,
-            mtime=ev.mtime,
-        )
+        return self._transition_of(ev)
+
+    def transitions(self) -> list[CaseTransition]:
+        """Every CASE_STATE_ENTERED as structured snapshots, oldest first — the
+        case's committed state history in the order it happened. Empty list for
+        a case that has not entered a state yet. The first entry is normally the
+        inception marker (``trigger`` / ``from_state`` None); the last entry
+        equals ``last_transition()``."""
+        return [
+            self._transition_of(ev)
+            for ev in self._log.events(label_glob=EV_STATE_ENTERED, recent_first=False)
+        ]
 
     def count_fails_this_dwell(self) -> int:
         """Count of failed pre-commit attempts since the current state was entered — the
@@ -397,8 +414,11 @@ class CaseEventJournalView:
     def last_state_entered_mtime(self) -> Optional[datetime.datetime]:
         return self._journal.last_state_entered_mtime()
 
-    def last_transition(self) -> Optional[CaseLastTransition]:
+    def last_transition(self) -> Optional[CaseTransition]:
         return self._journal.last_transition()
+
+    def transitions(self) -> list[CaseTransition]:
+        return self._journal.transitions()
 
     def count_fails_this_dwell(self) -> int:
         return self._journal.count_fails_this_dwell()
