@@ -102,11 +102,14 @@ class PermitApplicationCase(FolderBackedCase):
     ]
 
     fsm_trigger_chokes = {
-        # TODO: name a resource only for triggers that actually draw on a
-        # capacity-constrained dependency; leave the others unlisted.
-        "validate_documents": {"cpu"},
+        # TODO: name a resource only for triggers whose perform_ work actually
+        # contends for a capacity-constrained shared dependency; leave the rest
+        # unlisted (many cases need none). Prefer one resource per trigger --
+        # chokes are semaphores, so stacking several onto one trigger slows the
+        # lifecycle. See references/dsl_and_hooks.md on trigger chokes.
+        "validate_documents": {"cpu"},   # local OCR / vector embedding
         "check_eligibility": {"llm"},
-        "issue_permit": {"external_api"},
+        "issue_permit": {"api"},         # bandwidth-limited external API
     }
 
     # =======================================================================

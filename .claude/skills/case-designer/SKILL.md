@@ -70,10 +70,14 @@ dumping every question at once; follow up based on what comes back. Cover:
    what states is it trustworthy/complete in? Does it need to survive
    termination (`keep=True`)? Is it a single file or a glob of many
    (`many=True`)?
-4. **Mark the expensive steps.** Which triggers call something rate-limited or
-   costly (an LLM, an external API, heavy CPU work)? Only the resource *name*
-   is needed here — capacity limits are a deployment decision, not part of the
-   case type.
+4. **Mark the expensive steps** (chokes). Which triggers' `perform_` work draws
+   on a rate-limited or costly *shared* resource — local OCR / vector embedding
+   (`"cpu"`), a bandwidth-limited external API (`"api"`, even when the ceiling
+   is fairly high, e.g. ~20 parallel calls), an LLM (`"llm"`)? Only the resource
+   *name* is needed here — capacity limits are a deployment decision, not part
+   of the case type. Be sparing: many cases have no chokes at all, and when in
+   doubt leave a step unlisted and let real resource contention emerge under
+   test rather than pre-declaring chokes you may not need.
 
 If the developer gives you a rough narrative instead of clean answers to the
 above, restate the lifecycle back as a numbered list of states/transitions and
@@ -87,7 +91,9 @@ Using `references/dsl_and_hooks.md`:
   `FileMappedPydanticMixin`/pydantic placeholder class per structured asset,
   fields named but bodies empty — field declarations aren't "meat" to defer,
   they're the contract itself).
-- Turn the confirmed expensive steps into `fsm_trigger_chokes`.
+- Turn the confirmed expensive steps into `fsm_trigger_chokes` (prefer a single
+  resource per trigger — see the chokes section in `references/dsl_and_hooks.md`
+  for why).
 
 Show the developer the declarations before generating hook stubs — cheaper to
 fix a wrong state name now than after 15 stubs reference it.

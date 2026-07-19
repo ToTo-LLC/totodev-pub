@@ -7,6 +7,7 @@ Worked example: `notebooks/DEVDAVE/case_manager_classes/Tutorial 1 - Building Ca
 ## Contents
 - FSM state-chain DSL grammar
 - Hook naming conventions (what to stub)
+- Trigger chokes (`fsm_trigger_chokes`)
 - Assertion convention (what to stub)
 - AssetSpec fields
 - Minimal class skeleton shape
@@ -51,13 +52,36 @@ bind time — so only stub what the chains actually name.
 | `on_exit_<state>` | `async def (self, tctx)` | on leaving `<state>` | only states the developer says need exit side effects |
 
 `tctx` is the `transitions` `EventData` object (not the event journal); kwargs
-passed to a direct trigger call land in `tctx.kwargs`. Raising in a guard or
-`before_` hook aborts the transition and counts as a failed attempt (feeds `@FAIL`).
+passed to a direct trigger call land in `tctx.kwargs`. Keep those kwargs
+JSON-serializable — parts of the `CaseManager` framework may persist or relay
+them. Raising in a guard or `before_` hook aborts the transition and counts as a
+failed attempt (feeds `@FAIL`).
 
 Hooks must be well-behaved async — they share one event loop with every other
 live case. Long/blocking work belongs behind `case_invoke_threaded()` (in-process
 blocking call) or `case_invoke_process()` (external CLI/subprocess), not stubbed
 inline — note the need for it in the docstring but do not implement it.
+
+## Trigger chokes (`fsm_trigger_chokes`)
+
+Maps a trigger name to a set of resource-name strings, e.g.
+`{"check_eligibility": {"llm"}, "validate_documents": {"cpu"}}`. It is purely a
+**case-level annotation** — the case itself does nothing with it. Orchestrators
+like the `CaseManager` read it when managing a pool of running cases, primarily
+to **limit how many cases run a given trigger's `perform_` work concurrently**
+when they contend for the same scarce resource (a CPU/GPU, a bandwidth-limited
+API, an LLM endpoint).
+
+- Chokes gate **trigger steps** — the work in `perform_<trigger>` — not states,
+  guards, or assets.
+- **Prefer at most one resource per trigger.** Chokes are enforced with
+  semaphores; a trigger listing several must acquire several semaphores, which
+  tends to slow the whole case's lifecycle. Split the work across triggers or
+  pick the dominant constraint rather than stacking resources onto one trigger.
+- Resource *names* are free-form strings the deployment agrees on; the actual
+  concurrency limit per name is configured where cases are run, not here.
+- Many case types need no chokes. Only list a trigger that genuinely contends
+  for a shared, capacity-constrained dependency.
 
 ## Assertions (`case_assert_<state>_<slug>`)
 
