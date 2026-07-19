@@ -20,7 +20,9 @@ Everything a basic subclass author needs is on `FolderBackedCaseInterface`
 (`src/totodev_pub/folder_backed_case_support/folder_backed_case_interface.py`).
 Do not read the fuller `FolderBackedCase` implementation file or its advanced
 customization seams for this task — that surface is deliberately out of scope
-here and tends to confuse rather than help a first-time case author.
+here and tends to confuse rather than help a first-time case author. (The lone
+exception is the advanced reclassify pattern in Step 7's catalog, which names
+the one docstring to read if that specific pattern is adopted.)
 
 ## Workflow
 
@@ -33,8 +35,12 @@ here and tends to confuse rather than help a first-time case author.
    `assets/case_class_template.py`.
 6. **Validate it binds** — actually import the generated module and fix
    whatever the framework rejects. Do not skip this.
-7. **Check coverage** against the checklist before handing it back.
-8. **Offer a documentation report** — ask if the developer wants a rendered
+7. **Review optional design patterns** — consult
+   `references/case_design_patterns.md` and prompt the developer about whether
+   any of those enhancements fit this case; fold in the ones they adopt and
+   re-validate.
+8. **Check coverage** against the checklist before handing it back.
+9. **Offer a documentation report** — ask if the developer wants a rendered
    summary of the finished class (lifecycle diagram, states/triggers/guards/
    assertions/assets tables) to sanity-check the whole design at a glance.
 
@@ -173,7 +179,26 @@ Don't drive the case any further than this (no `case_advance()`, no trigger
 calls) — the point is confirming it binds and constructs, not simulating the
 lifecycle; that's the developer's job once real logic replaces the stubs.
 
-## Step 7 — Coverage checklist
+## Step 7 — Review optional design patterns
+
+The base class now binds, but a case that runs unattended usually wants one or
+two recurring enhancements the interview may not have surfaced — surviving data
+past the terminal purge, capturing user feedback, retrying fallible steps,
+escaping a stall, and so on.
+
+Read `references/case_design_patterns.md` and follow its "how to use this list"
+guidance: judge each pattern against *this* case, raise only the ones that
+plausibly fit (one topic at a time, as a question), and adopt only on the
+developer's explicit confirmation. Most cases warrant two or three, not all and
+not none.
+
+Each adopted pattern is folded in the same way the base design was built — new
+states get `case_assert_*`, new triggers get `perform_`/`guard_` stubs, new
+assets get an `AssetSpec` plus a pydantic class — with bodies still stubbed via
+`_not_implemented`, never implemented. Adding a state or trigger can break the
+FSM, so **re-run the Step 6 bind check** after folding anything in.
+
+## Step 8 — Coverage checklist
 
 Before handing the file back, confirm:
 
@@ -188,9 +213,9 @@ Before handing the file back, confirm:
 - [ ] No stub contains real logic — only a responsibility docstring and a
       single `return self._not_implemented(<default>)` line.
 
-## Step 8 — Offer a documentation report
+## Step 9 — Offer a documentation report
 
-Once the class binds cleanly (Step 6) and the coverage checklist (Step 7) is
+Once the class binds cleanly (Step 6) and the coverage checklist (Step 8) is
 satisfied, **ask** the developer whether they'd like a rendered documentation
 report for the class — don't generate it unprompted; it's a few extra seconds
 of output some developers won't want.
