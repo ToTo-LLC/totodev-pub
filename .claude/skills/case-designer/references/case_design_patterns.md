@@ -11,6 +11,11 @@ a case type leaves the whiteboard and starts running unattended.
 Consult this catalog **after** the base design binds (`SKILL.md` Step 6), not
 before — the developer needs something concrete to react to.
 
+**Exception:** pattern **0 (Inert intake)** is part of the *base* lifecycle
+draft whenever the case ingests files. Raise it in Steps 1–2 of `SKILL.md`,
+not as a post-bind optional — waiting until Step 7 is how create-time import
+sneaks into the skeleton.
+
 - Read the whole list, then judge each pattern against *this* case. Most cases
   warrant two or three of these, not all of them, and not none.
 - **Raise only the patterns that plausibly apply**, one topic at a time, framed
@@ -30,6 +35,38 @@ DSL grammar, hook naming, and `AssetSpec` fields referenced below are all
 defined in `dsl_and_hooks.md`; read it if any syntax here is unfamiliar.
 
 ## The patterns
+
+### 0. Inert intake (default when files enter the case)
+
+**When:** the case's work starts from one or more files the caller supplies
+(uploads, drops, fixtures). This is the **default** shape unless the developer
+specifically needs create-time import.
+
+**Shape:**
+- Initial state is **inert and empty**, named outside the domain (`new`,
+  `initial`, …) — not `submitted` / `received` / `uploaded`.
+- A **manual** trigger (e.g. `add_attachments`) takes a filepath or filepaths
+  via kwargs (`tctx.kwargs`; keep them JSON-serializable when the manager may
+  relay them). Its `perform_` copies/links those files into the case assets.
+- Transition into a very temporary state such as `attachments_added`, then
+  either loop back to `new` or enter the first real-flow state:
+
+```text
+^new==add_attachments-->attachments_added--begin-->submitted--...
+# or: attachments_added--accept-->new   (then a separate edge starts the flow)
+```
+
+**Why not `create_case_in_folder`:** trigger ops get semantics, event tracking,
+timing, and the rest of the case machinery. Pre-creation's main virtue is
+speed. Heavy init in `create_case_in_folder` (or an override) is allowed when
+the developer needs it — just note that testing and tracking get harder.
+Pressure like "skip extra states" / "create with the PDF already there" is
+exactly when to propose this shape and explain the tradeoff, not when to
+collapse intake into construction.
+
+**Notes:** pair with #6 (import manifest) when ingesting a *set* of files with
+per-file status. `add_attachments` (or equivalent) gets a normal
+`perform_` stub; do not implement the copy logic in the skeleton.
 
 ### 1. Pre-final data extraction
 
@@ -129,7 +166,9 @@ possibly at different rates or with per-file outcomes.
 of per-file entries (filename, source, size/hash, `status: "pending" |
 "processed" | "failed"`, error note). Declared as a single-file
 `AssetSpec(alias="manifest", ...)` alongside the `many=True` alias that globs
-the actual incoming files.
+the actual incoming files. Pair with **#0 (Inert intake)** — populate the
+manifest from `add_attachments` (or equivalent), not from
+`create_case_in_folder`.
 
 **Notes:** the manifest becomes the source of truth for "what came in and
 where each item is," which a `guard_` can consult to decide when the batch is

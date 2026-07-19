@@ -65,6 +65,9 @@ dumping every question at once; follow up based on what comes back. Cover:
    - Where can a case sit waiting on a person indefinitely — does it need a
      timed escape (`@DWELL`)?
    - Is there a global "cancel from anywhere" edge or similar wildcard?
+   - **How do files enter the case?** Unless the developer specifically needs
+     otherwise, prefer the inert-intake default in Step 2 (below) — do not
+     silently bake file copy/import into `create_case_in_folder`.
 3. **Name the data contracts.** What files/objects does the case read or
    write (e.g. an analysis result, a set of attachments, a draft)? For each:
    what states is it trustworthy/complete in? Does it need to survive
@@ -94,6 +97,32 @@ Using `references/dsl_and_hooks.md`:
 - Turn the confirmed expensive steps into `fsm_trigger_chokes` (prefer a single
   resource per trigger — see the chokes section in `references/dsl_and_hooks.md`
   for why).
+
+### Default: inert initial state + trigger-based intake
+
+Unless the developer specifically needs otherwise, draft the lifecycle so the
+**initial state is inert and empty**, with a name clearly outside the domain
+(e.g. `new`, `initial`). Do **not** make file import part of
+`create_case_in_folder` (or a subclass override of it). The portable way to add
+files is a **manual** trigger whose kwargs carry a filepath or filepaths —
+e.g. `add_attachments` — into a very temporary state like `attachments_added`,
+then either loop back to `new` or advance into the first real-flow state:
+
+```text
+^new==add_attachments-->attachments_added--begin-->submitted--...
+```
+
+**Why:** real processing (OCR, translate, parse, …) becomes a trigger operation
+with semantics, event tracking, timing, and the rest of the case machinery.
+Pre-creation's main virtue is speed; putting heavy init there makes testing and
+tracking harder. Heavy work *inside* `create_case_in_folder` is not wrong — it
+just costs those facilities. If the developer insists on create-time import,
+honor that explicitly and note the tradeoff; otherwise propose the trigger
+shape even when they ask to "keep it simple" or "skip extra states."
+
+Full notes and variants: pattern "Inert intake" in
+`references/case_design_patterns.md` (raise this during base lifecycle design
+when the case ingests files — do not wait for Step 7).
 
 Show the developer the declarations before generating hook stubs — cheaper to
 fix a wrong state name now than after 15 stubs reference it.
@@ -218,6 +247,10 @@ Before handing the file back, confirm:
 - [ ] The class carries `@case_type_registry.register`.
 - [ ] No stub contains real logic — only a responsibility docstring and a
       single `return self._not_implemented(<default>)` line.
+- [ ] If the case ingests files: initial state is inert (e.g. `new` /
+      `initial`) and intake is a kwargs-bearing trigger — **or** the
+      developer explicitly chose create-time import and that tradeoff is
+      noted. Do not silently put file copy/import in `create_case_in_folder`.
 
 ## Step 9 — Offer a documentation report
 

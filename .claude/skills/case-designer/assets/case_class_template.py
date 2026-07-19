@@ -13,9 +13,12 @@
 # Swap in the real case name, states, triggers, assets, and responsibility
 # text gathered from the developer's interview answers.
 #
-# Lifecycle drawn (see references/dsl_and_hooks.md for the DSL grammar):
+# Lifecycle drawn (see references/dsl_and_hooks.md for the DSL grammar).
+# Default intake shape (SKILL.md Step 2 / pattern 0): inert ^new + manual
+# add_attachments(kwargs paths) — not file copy inside create_case_in_folder.
 #
-#   ^submitted --@FAIL<3#validate_documents~2m--> validated
+#   ^new ==add_attachments--> attachments_added --begin--> submitted
+#   submitted --@FAIL<3#validate_documents~2m--> validated
 #   submitted --@FAIL>=3#flag_incomplete--> needs_attention
 #   validated --check_eligibility~1m--> screened
 #   screened --eligible#route_to_reviewer--> awaiting_review
@@ -63,6 +66,10 @@ NEEDS_APPLICATION = {
     "approved", "issued", "denied",
 }
 NEEDS_ELIGIBILITY = {"screened", "awaiting_review", "approved", "issued"}
+# supporting_docs become trustworthy once intake has run (not in inert `new`)
+NEEDS_SUPPORTING_DOCS = {
+    "attachments_added", "submitted", "validated", "screened", "awaiting_review",
+}
 
 
 @case_type_registry.register
@@ -79,7 +86,8 @@ class PermitApplicationCase(FolderBackedCase):
     # =======================================================================
 
     fsm_state_chains = [
-        "^submitted--@FAIL<3#validate_documents~2m-->validated",
+        "^new==add_attachments-->attachments_added--begin-->submitted",
+        "submitted--@FAIL<3#validate_documents~2m-->validated",
         "submitted--@FAIL>=3#flag_incomplete-->needs_attention",
         "validated--check_eligibility~1m-->screened",
         "screened--eligible#route_to_reviewer-->awaiting_review",
@@ -97,8 +105,7 @@ class PermitApplicationCase(FolderBackedCase):
         AssetSpec(alias="eligibility", relative_path="eligibility.yaml",
                   loader=EligibilityAssessment, states=NEEDS_ELIGIBILITY, keep=True),
         AssetSpec(alias="supporting_docs", relative_path="documents/*",
-                  loader=Path, states={"validated", "screened", "awaiting_review"},
-                  many=True),
+                  loader=Path, states=NEEDS_SUPPORTING_DOCS, many=True),
     ]
 
     fsm_trigger_chokes = {
@@ -132,6 +139,18 @@ class PermitApplicationCase(FolderBackedCase):
     # =======================================================================
     # perform_<trigger> — the work each automated/manual edge does.
     # =======================================================================
+
+    async def perform_add_attachments(self, tctx) -> None:
+        """TODO(responsibility): copy/link filepath(s) from tctx.kwargs into
+        the `supporting_docs` asset location. Intake only — no OCR/parse here.
+        """
+        return self._not_implemented(None)
+
+    async def perform_begin(self, tctx) -> None:
+        """TODO(responsibility): any bookkeeping needed when leaving the
+        temporary intake state and entering the real flow at `submitted`.
+        """
+        return self._not_implemented(None)
 
     async def perform_validate_documents(self, tctx) -> None:
         """TODO(responsibility): validate the uploaded documents named in
@@ -199,14 +218,22 @@ class PermitApplicationCase(FolderBackedCase):
     # See references/dsl_and_hooks.md: falsy = pass, message string = fail.
     # =======================================================================
 
-    def case_assert_submitted_has_application(self, ltx) -> None | str:
-        """TODO(responsibility): the `application` asset must exist and be
-        loadable the moment a case enters `submitted`.
-
+    def case_assert_new_is_empty(self, ltx) -> None | str:
+        """TODO(responsibility): inert parking state — no supporting_docs yet.
         Stubbed default is None (pass) rather than a failure message, so a
         known-unimplemented check doesn't spam CASE_ASSERT_FAILED events —
         the WARNING in the case log is the visible signal instead.
         """
+        return self._not_implemented(None)
+
+    def case_assert_attachments_added_has_docs(self, ltx) -> None | str:
+        """TODO(responsibility): at least one file must match `supporting_docs`
+        after `add_attachments`."""
+        return self._not_implemented(None)
+
+    def case_assert_submitted_has_application(self, ltx) -> None | str:
+        """TODO(responsibility): the `application` asset must exist and be
+        loadable the moment a case enters `submitted`."""
         return self._not_implemented(None)
 
     def case_assert_validated_docs_present(self, ltx) -> None | str:
