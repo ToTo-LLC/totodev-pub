@@ -41,11 +41,11 @@ Project-first setup (marimo, IPython, or a script)::
 
 Happy path
 ----------
-Create or clone, inspect, drive (async), freeze-dry::
+Create (or clone a freeze-dried example), inspect, drive (async), freeze-dry::
 
     wb.create("MyCase", nickname="demo")          # or wb.create(MyCase)
-    # or: wb.clone("MyCase/newly_created/minimal")
-    # or: wb.clone(Path("/abs/path/to/case_folder"))  # preferred for arbitrary folders
+    # optional: wb.clone("MyCase/some_group/sample")   # when the shelf has one
+    # optional: wb.clone(Path("/abs/path/to/case_folder"))
     print(wb.status()); print(wb.probe())
     await wb.advance()   # or await wb.run() / await wb.trigger(...)
     wb.freeze_dry(nickname="group/sample", description="...")

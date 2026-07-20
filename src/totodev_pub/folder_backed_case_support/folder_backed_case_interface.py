@@ -365,6 +365,9 @@ class FolderBackedCaseInterface(ABC):
         ``case_id`` may be a literal id string, a ``CaseIDGenerator`` to mint one
         from, or omitted to use ``cls.case_id_generator``.
 
+        Subclass overrides should call ``super().create_case_in_folder(...)``
+        first so the folder and base structures exist before custom init.
+
         Raises:
             FileNotFoundError: parent folder does not exist.
             FileExistsError: folder already contains case artifacts.

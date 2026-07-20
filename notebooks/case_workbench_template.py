@@ -13,12 +13,12 @@ async def main() -> None:
     wb = CaseWorkbench.for_project()
     print(wb.help())
     print(wb.list_examples())
-    # Clone a freeze-dried example when your shelf has one:
-    #   wb.clone("YourCase/newly_created/minimal")
-    # Or construct fresh (type or class-name string):
+    # Construct fresh (type or class-name string):
     #   from your_pkg import YourCase
     #   wb.create(YourCase)
     #   wb.create("YourCase", nickname="demo")
+    # Or clone a freeze-dried example when your shelf has one:
+    #   wb.clone("YourCase/some_group/sample")
     #
     # if wb.case is not None:
     #     print(wb.status())
