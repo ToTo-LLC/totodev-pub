@@ -22,6 +22,13 @@ Mental model
   ``volatile/case-workbench/scratch``).
 * **Focus** — ``wb.case``, the live case most commands act on.
 
+**Intended usage pattern.** CaseWorkbench copies cases into the project's
+scratch area and views/manipulates them there. Useful snapshots are later
+copied onto the project's fixtures shelf (``freeze_dry``) or to an absolute
+destination. By design it is **not** an in-place editor of arbitrary case
+folders — prefer ``clone`` (including absolute paths) over focusing a live
+folder elsewhere on disk.
+
 Project-first setup (marimo, IPython, or a script)::
 
     from totodev_pub.case_testing import CaseWorkbench
@@ -38,14 +45,17 @@ Create or clone, inspect, drive (async), freeze-dry::
 
     wb.create("MyCase", nickname="demo")          # or wb.create(MyCase)
     # or: wb.clone("MyCase/newly_created/minimal")
+    # or: wb.clone(Path("/abs/path/to/case_folder"))  # preferred for arbitrary folders
     print(wb.status()); print(wb.probe())
     await wb.advance()   # or await wb.run() / await wb.trigger(...)
     wb.freeze_dry(nickname="group/sample", description="...")
+    # or: wb.freeze_dry(dest=Path("/abs/exports/snapshot"))
 
 Driving methods are async. In marimo or IPython use ``await``; elsewhere use
 ``asyncio.run(...)`` or run under ``python -m asyncio``. Methods return
 narrative report objects that print cleanly; use ``wb.case`` for the live
-instance.
+instance. To inspect a case folder elsewhere on disk, ``clone`` an absolute
+path into scratch (do not focus the original in place).
 
 Discovery and cleanup
 ---------------------
@@ -166,6 +176,17 @@ def _rand4() -> str:
 def _slugify(text: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
     return s or "case"
+
+
+def _folder_has_contents(path: Path) -> bool:
+    """True if *path* is a directory containing any entry."""
+    if not path.is_dir():
+        return False
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return False
+    return True
 
 
 class CaseWorkbench:
@@ -794,7 +815,12 @@ class CaseWorkbench:
         case_id: str | None = None,
         parallel: bool = False,
     ) -> CloneReport:
-        """Clone a fixture, scratch case, live case, or the focus case into scratch."""
+        """Clone a fixture, scratch case, absolute path, live case, or focus into scratch.
+
+        Absolute filesystem paths (``str`` or ``Path``) copy any case folder into
+        the scratch pool — prefer this over focusing an in-place folder. Relative
+        ``Class/group/sample`` strings remain fixture nicknames.
+        """
         if keep_identity and case_id is not None:
             raise WorkbenchError(
                 "Pass keep_identity=True or case_id=..., not both."
@@ -802,6 +828,7 @@ class CaseWorkbench:
 
         src_folder, meta = self._resolve_clone_source(source)
         fixture_nick = meta.get("fixture_nickname")
+        source_path = meta.get("source_path")
         original_id = meta.get("original_case_id")
         chained_nick = meta.get("original_fixture_nickname")
 
@@ -851,16 +878,20 @@ class CaseWorkbench:
         class_name = data.get("case_object_type") or meta.get("class_name")
 
         # Provenance
-        immediate = (
-            f"fixture:{fixture_nick}" if fixture_nick
-            else f"scratch:{original_id or src_folder.name}"
-        )
+        if fixture_nick:
+            immediate = f"fixture:{fixture_nick}"
+        elif source_path:
+            immediate = f"path:{source_path}"
+        else:
+            immediate = f"scratch:{original_id or src_folder.name}"
         prov = {
             "immediate_source": immediate,
             "original_case_id": original_id or src_folder.name,
             "original_fixture_nickname": chained_nick or fixture_nick,
             "cloned_at": _utc_z(),
         }
+        if source_path:
+            prov["source_path"] = str(source_path)
         wb_dir = dest / WORKBENCH_DIR_NAME
         wb_dir.mkdir(exist_ok=True)
         (wb_dir / "provenance.yaml").write_text(
@@ -889,7 +920,7 @@ class CaseWorkbench:
             if self._case is None:
                 raise WorkbenchError(
                     "clone() with no source needs a focus case. "
-                    "clone('Class/group/sample') or create(...) first."
+                    "clone('Class/group/sample'), clone(/abs/path), or create(...) first."
                 )
             source = self._case
 
@@ -900,11 +931,18 @@ class CaseWorkbench:
             meta.update(self._read_provenance_chain(folder))
             return folder, meta
 
+        if isinstance(source, Path):
+            return self._resolve_absolute_case_folder(source)
+
         if not isinstance(source, str):
             raise WorkbenchError(
-                f"clone source must be a fixture nickname, scratch id/glob, "
-                f"case object, or None; got {type(source).__name__}."
+                f"clone source must be a fixture nickname, absolute path, "
+                f"scratch id/glob, case object, or None; got {type(source).__name__}."
             )
+
+        as_path = Path(source)
+        if as_path.is_absolute():
+            return self._resolve_absolute_case_folder(as_path)
 
         if "/" in source:
             parts = source.split("/")
@@ -943,6 +981,33 @@ class CaseWorkbench:
         meta.update(self._read_provenance_chain(folder))
         return folder.resolve(), meta
 
+    def _resolve_absolute_case_folder(self, folder: Path) -> tuple[Path, dict]:
+        """Resolve an absolute filesystem path to a case folder for clone()."""
+        folder = Path(folder)
+        if not folder.is_absolute():
+            raise WorkbenchError(
+                f"clone(path) requires an absolute path; got relative {folder!s}. "
+                "Use Class/group/sample for fixtures, or Path(...).resolve()."
+            )
+        folder = folder.resolve()
+        if not (folder / RECORD_NAME).is_file():
+            raise WorkbenchError(
+                f"No case_record.yaml at {self._display_path(folder, full=True)}. "
+                "clone(path) expects an absolute path to a case folder."
+            )
+        meta: dict[str, Any] = {
+            "source_path": str(folder),
+            "original_case_id": folder.name,
+        }
+        try:
+            rec = FolderBackedCase.peek_case_record(folder)
+            meta["original_case_id"] = rec.case_id
+            meta["class_name"] = rec.case_object_type
+        except Exception:
+            pass
+        meta.update(self._read_provenance_chain(folder))
+        return folder, meta
+
     def _read_provenance_chain(self, folder: Path) -> dict:
         prov_path = folder / WORKBENCH_DIR_NAME / "provenance.yaml"
         out: dict[str, Any] = {}
@@ -962,39 +1027,62 @@ class CaseWorkbench:
         nickname: str | None = None,
         description: str = "",
         overwrite: bool = False,
+        *,
+        dest: Path | str | None = None,
     ) -> FreezeDryReport:
-        """Copy focus (or *case*) into the fixtures shelf."""
+        """Copy focus (or *case*) onto the fixtures shelf or an absolute path.
+
+        Pass *nickname* (``group/sample`` or ``Class/group/sample``) for the
+        project fixtures shelf, or absolute *dest* for an arbitrary snapshot
+        directory. A pre-existing **empty** destination is reused; a
+        non-empty destination raises unless ``overwrite=True`` (which purges
+        it first). Absolute *dest* snapshots omit shelf ``fixture.yaml``.
+        """
         case = self._resolve_case(case)
-        if not nickname:
+        if nickname is not None and dest is not None:
             raise WorkbenchError(
-                "freeze_dry requires nickname='group/sample' or "
-                "'Class/group/sample'."
+                "Pass nickname=... (fixtures shelf) or dest=... (absolute path), "
+                "not both."
             )
-        parts = nickname.strip("/").split("/")
-        class_name = case.__class__.__name__
-        if len(parts) == 2:
-            group, sample = parts
-            full_nick = f"{class_name}/{group}/{sample}"
-        elif len(parts) == 3:
-            if parts[0] != class_name:
-                raise WorkbenchError(
-                    f"Nickname class segment {parts[0]!r} != case class {class_name!r}."
-                )
-            full_nick = "/".join(parts)
-            group, sample = parts[1], parts[2]
-        else:
+        if nickname is None and dest is None:
             raise WorkbenchError(
-                f"nickname must be group/sample or Class/group/sample; got {nickname!r}."
+                "freeze_dry requires nickname='group/sample' (or "
+                "'Class/group/sample') or absolute dest=..."
             )
 
-        dest = self._fixtures_root / class_name / group / sample
-        if dest.exists() and not overwrite:
-            raise WorkbenchError(
-                f"Fixture already exists at {self._display_path(dest)}. "
-                "Pass overwrite=True to replace."
-            )
-        if dest.exists():
-            shutil.rmtree(dest)
+        full_nick: str | None = None
+        write_fixture_meta = False
+        if dest is not None:
+            dest_path = Path(dest)
+            if not dest_path.is_absolute():
+                raise WorkbenchError(
+                    f"freeze_dry(dest=...) requires an absolute path; got "
+                    f"{dest_path!s}. Use nickname= for the fixtures shelf."
+                )
+            dest_path = dest_path.resolve()
+        else:
+            parts = nickname.strip("/").split("/")
+            class_name = case.__class__.__name__
+            if len(parts) == 2:
+                group, sample = parts
+                full_nick = f"{class_name}/{group}/{sample}"
+            elif len(parts) == 3:
+                if parts[0] != class_name:
+                    raise WorkbenchError(
+                        f"Nickname class segment {parts[0]!r} != case class "
+                        f"{class_name!r}."
+                    )
+                full_nick = "/".join(parts)
+                group, sample = parts[1], parts[2]
+            else:
+                raise WorkbenchError(
+                    f"nickname must be group/sample or Class/group/sample; "
+                    f"got {nickname!r}."
+                )
+            dest_path = self._fixtures_root / class_name / group / sample
+            write_fixture_meta = True
+
+        self._prepare_freeze_dest(dest_path, overwrite=overwrite)
 
         def _ignore(dirpath, names):
             drop = set()
@@ -1009,29 +1097,59 @@ class CaseWorkbench:
                     drop.add(n)
             return drop
 
-        shutil.copytree(case.case_folder, dest, ignore=_ignore)
+        shutil.copytree(case.case_folder, dest_path, ignore=_ignore)
         # Strip lease if copied
-        lease = dest / LEASE_NAME
+        lease = dest_path / LEASE_NAME
         if lease.exists():
             lease.unlink()
-        wb_dir = dest / WORKBENCH_DIR_NAME
-        wb_dir.mkdir(exist_ok=True)
-        fixture_yaml = {
-            "nickname": full_nick,
-            "description": description,
-            "case_class": class_name,
-            "state_at_freeze": case.case_state,
-            "frozen_at": _utc_z(),
-        }
-        (wb_dir / "fixture.yaml").write_text(
-            yaml.safe_dump(fixture_yaml, sort_keys=False), encoding="utf-8",
-        )
-        self._log(case, f"freeze_dry → {full_nick}")
+        if write_fixture_meta:
+            wb_dir = dest_path / WORKBENCH_DIR_NAME
+            wb_dir.mkdir(exist_ok=True)
+            fixture_yaml = {
+                "nickname": full_nick,
+                "description": description,
+                "case_class": case.__class__.__name__,
+                "state_at_freeze": case.case_state,
+                "frozen_at": _utc_z(),
+            }
+            (wb_dir / "fixture.yaml").write_text(
+                yaml.safe_dump(fixture_yaml, sort_keys=False), encoding="utf-8",
+            )
+            self._log(case, f"freeze_dry → {full_nick}")
+            narrative = f"Freeze-dried → {full_nick}\n{self._display_path(dest_path)}"
+        else:
+            self._log(case, f"freeze_dry → path:{dest_path}")
+            narrative = (
+                f"Freeze-dried → path:{dest_path}\n"
+                f"{self._display_path(dest_path, full=True)}"
+            )
         return FreezeDryReport(
-            narrative=f"Freeze-dried → {full_nick}\n{self._display_path(dest)}",
+            narrative=narrative,
             nickname=full_nick,
-            dest=dest.resolve(),
+            dest=dest_path.resolve(),
         )
+
+    def _prepare_freeze_dest(self, dest: Path, *, overwrite: bool) -> None:
+        """Ensure *dest* is absent so copytree can create it.
+
+        Empty directories are removed quietly. Non-empty destinations require
+        ``overwrite=True`` (purge then proceed).
+        """
+        if dest.exists() and dest.is_file():
+            raise WorkbenchError(
+                f"freeze_dry destination is a file, not a folder: "
+                f"{self._display_path(dest, full=True)}."
+            )
+        if dest.exists() and dest.is_dir() and _folder_has_contents(dest):
+            if not overwrite:
+                raise WorkbenchError(
+                    f"Destination is not empty: {self._display_path(dest)}. "
+                    "Pass overwrite=True to replace."
+                )
+            shutil.rmtree(dest)
+        elif dest.exists() and dest.is_dir():
+            dest.rmdir()
+        dest.parent.mkdir(parents=True, exist_ok=True)
 
     # --- inspect ---------------------------------------------------------
 

@@ -248,10 +248,74 @@ def test_clone_parallel_keeps_both(tmp_path):
 def test_clone_keep_identity_collision(tmp_path):
     wb = _wb(tmp_path)
     c = wb.create(WbTicketCase)
-    # keep_identity wants dest folder named like source id — still present → collision
+    # keep_identity wants dest folder named like source id � still present ? collision
     with pytest.raises(WorkbenchError, match="already exists"):
         wb.clone(keep_identity=True)
     assert c.case is wb.case
+
+
+def test_clone_absolute_path_copies_into_scratch_with_path_provenance(tmp_path):
+    wb = _wb(tmp_path)
+    elsewhere = tmp_path / "elsewhere" / "live-case"
+    elsewhere.parent.mkdir(parents=True)
+    source = WbTicketCase.create_case_in_folder(elsewhere, case_id="ext-001", nickname="external")
+    source.case_detach()
+
+    report = wb.clone(elsewhere.resolve())
+    assert report.case is wb.case
+    assert report.case.case_id != "ext-001"
+    assert (wb.scratch_root / report.case.case_id).is_dir()
+    assert elsewhere.is_dir()  # original untouched
+    assert (elsewhere / "case_record.yaml").is_file()
+
+    prov = yaml.safe_load(
+        (Path(report.case.case_folder) / "workbench" / "provenance.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert prov["immediate_source"] == f"path:{elsewhere.resolve()}"
+    assert Path(prov["source_path"]) == elsewhere.resolve()
+    assert prov["original_case_id"] == "ext-001"
+
+
+def test_clone_absolute_path_string(tmp_path):
+    wb = _wb(tmp_path)
+    elsewhere = tmp_path / "other" / "case-a"
+    elsewhere.parent.mkdir(parents=True)
+    WbTicketCase.create_case_in_folder(elsewhere, case_id="str-path").case_detach()
+    report = wb.clone(str(elsewhere.resolve()))
+    assert report.case.case_id != "str-path"
+    prov = yaml.safe_load(
+        (Path(report.case.case_folder) / "workbench" / "provenance.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert prov["immediate_source"].startswith("path:")
+
+
+def test_clone_absolute_path_missing_record_errors(tmp_path):
+    wb = _wb(tmp_path)
+    empty = tmp_path / "not-a-case"
+    empty.mkdir()
+    with pytest.raises(WorkbenchError, match="case_record"):
+        wb.clone(empty.resolve())
+
+
+def test_clone_relative_three_segment_still_fixture_nickname(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    wb.freeze_dry(nickname="newly_created/minimal")
+    wb.case.case_detach()
+    wb._live.clear()
+    wb._case = None
+    # Relative Class/group/sample must not be treated as a filesystem path
+    report = wb.clone("WbTicketCase/newly_created/minimal")
+    prov = yaml.safe_load(
+        (Path(report.case.case_folder) / "workbench" / "provenance.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert prov["immediate_source"].startswith("fixture:")
 
 
 def test_ambiguous_focus_glob(tmp_path):
@@ -305,6 +369,54 @@ def test_list_examples_prefix(tmp_path):
     assert len(filtered.examples) == 1
 
 
+def test_freeze_dry_empty_dest_ok_nonempty_errors(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    dest = wb.fixtures_root / "WbTicketCase" / "newly_created" / "minimal"
+    dest.mkdir(parents=True)
+    # empty pre-existing folder is fine
+    report = wb.freeze_dry(nickname="newly_created/minimal")
+    assert report.dest == dest.resolve()
+    assert (dest / "case_record.yaml").is_file()
+    with pytest.raises(WorkbenchError, match="not empty|overwrite"):
+        wb.freeze_dry(nickname="newly_created/minimal")
+    report2 = wb.freeze_dry(nickname="newly_created/minimal", overwrite=True)
+    assert report2.dest == dest.resolve()
+
+
+def test_freeze_dry_absolute_dest(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    out = tmp_path / "exports" / "snapshot"
+    out.parent.mkdir(parents=True)
+    report = wb.freeze_dry(dest=out.resolve())
+    assert report.dest == out.resolve()
+    assert report.nickname is None
+    assert (out / "case_record.yaml").is_file()
+    assert not (out / "workbench" / "fixture.yaml").is_file()
+    # nonempty guard
+    with pytest.raises(WorkbenchError, match="not empty|overwrite"):
+        wb.freeze_dry(dest=out.resolve())
+    wb.freeze_dry(dest=out.resolve(), overwrite=True)
+    assert (out / "case_record.yaml").is_file()
+
+
+def test_freeze_dry_dest_and_nickname_mutex(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    with pytest.raises(WorkbenchError, match="nickname|dest"):
+        wb.freeze_dry(nickname="g/s", dest=(tmp_path / "x").resolve())
+    with pytest.raises(WorkbenchError, match="nickname|dest"):
+        wb.freeze_dry()
+
+
+def test_freeze_dry_relative_dest_rejected(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    with pytest.raises(WorkbenchError, match="absolute"):
+        wb.freeze_dry(dest="relative/snapshot")
+
+
 # ---------------------------------------------------------------------------
 # drive / probe / history / problems
 # ---------------------------------------------------------------------------
@@ -340,7 +452,7 @@ async def test_probe_guard_verdict(tmp_path):
     auto = [e for e in report.edges if e.kind == "auto"]
     assert auto
     assert auto[0].chokes == ["slot_a"]
-    # Inside a running asyncio loop, sync probe cannot await async guards → error
+    # Inside a running asyncio loop, sync probe cannot await async guards ? error
     assert auto[0].guards
 
 
