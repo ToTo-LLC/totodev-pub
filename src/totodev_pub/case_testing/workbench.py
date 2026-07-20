@@ -1,7 +1,69 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""CaseWorkbench — interactive single-case testing helper for FolderBackedCase."""
+"""CaseWorkbench — interactive single-case testing helper for FolderBackedCase.
+
+Design-time / validation tooling for exploring one FolderBackedCase at a time:
+construct or clone into a scratch folder, drive the FSM, inspect state, and
+freeze-dry useful snapshots onto a fixtures shelf. Aimed at medium-sized
+business apps that need careful testing of reliability-sensitive case
+lifecycles. Prefer using it from inside a project that depends on totodev-pub
+(a repo with ``pyproject.toml``), not as a fully stand-alone sandbox.
+
+**Unstable API.** CaseWorkbench is usable for interactive exploration, but
+this interface should not yet be treated as stable. Changes are planned to
+improve workbench + marimo notebook use for regression testing.
+
+Mental model
+------------
+* **Fixtures shelf** — durable freeze-dried examples (default
+  ``tests/case-fixtures`` via ``for_project``).
+* **Scratch pool** — working case folders (default
+  ``volatile/case-workbench/scratch``).
+* **Focus** — ``wb.case``, the live case most commands act on.
+
+Project-first setup (marimo, IPython, or a script)::
+
+    from totodev_pub.case_testing import CaseWorkbench
+
+    wb = CaseWorkbench.for_project()  # finds pyproject.toml; prints doctor()
+    print(wb.help())
+
+``for_project`` also caches a class index under ``volatile/case-workbench/``.
+(Advanced: pass absolute ``fixtures_root`` / ``scratch_root`` instead.)
+
+Happy path
+----------
+Create or clone, inspect, drive (async), freeze-dry::
+
+    wb.create("MyCase", nickname="demo")          # or wb.create(MyCase)
+    # or: wb.clone("MyCase/newly_created/minimal")
+    print(wb.status()); print(wb.probe())
+    await wb.advance()   # or await wb.run() / await wb.trigger(...)
+    wb.freeze_dry(nickname="group/sample", description="...")
+
+Driving methods are async. In marimo or IPython use ``await``; elsewhere use
+``asyncio.run(...)`` or run under ``python -m asyncio``. Methods return
+narrative report objects that print cleanly; use ``wb.case`` for the live
+instance.
+
+Discovery and cleanup
+---------------------
+* ``wb.help()`` / ``wb.help("create")`` — API catalog and per-method docs.
+* ``wb.list_examples()``, ``wb.doctor()`` — shelf browse and environment check.
+* ``wb.refresh_class_index()`` — rescan if a new
+  ``@case_type_registry.register`` class is not found yet.
+* Scratch is durable by default. Call ``wb.cleanup()``, or use
+  ``with CaseWorkbench.for_project() as wb:``, to detach live cases and clear
+  the scratch pool.
+
+Beyond marimo
+-------------
+The same API works in IPython, ``python -m asyncio``, and plain scripts. See
+``notebooks/case_workbench_template.py`` for a pasteable tour. Tighter
+regression-harness integration is planned; until then treat this as
+exploration-first tooling.
+"""
 
 from __future__ import annotations
 
@@ -107,7 +169,10 @@ def _slugify(text: str) -> str:
 
 
 class CaseWorkbench:
-    """Single-session helper for constructing, cloning, driving, and freeze-drying one case at a time."""
+    """Single-session helper for constructing, cloning, driving, and freeze-drying one case at a time.
+
+    See the module docstring for a usage tour (project setup, happy path, async notes).
+    """
 
     _HELP_EXCLUDE: frozenset[str] = frozenset()
 
@@ -682,11 +747,26 @@ class CaseWorkbench:
 
     # --- create / clone / freeze_dry -------------------------------------
 
-    def create(self, case_cls: type, *, nickname: str | None = None, **fields) -> CreateReport:
-        """Construct a fresh case in the scratch pool."""
+    def create(
+        self,
+        case_cls: type | str,
+        *,
+        nickname: str | None = None,
+        **fields,
+    ) -> CreateReport:
+        """Construct a fresh case in the scratch pool.
+
+        *case_cls* may be a ``FolderBackedCase`` subclass or a class-name string
+        resolved through the workbench class index (same discovery path as
+        ``clone`` / ``focus``). Call ``refresh_class_index()`` if a newly added
+        module is not found yet.
+        """
+        if isinstance(case_cls, str):
+            case_cls = self._class_index.ensure_registered(case_cls, case_type_registry)
         if not isinstance(case_cls, type) or not issubclass(case_cls, FolderBackedCase):
             raise WorkbenchError(
-                f"create() expects a FolderBackedCase subclass; got {case_cls!r}."
+                f"create() expects a FolderBackedCase subclass or class-name "
+                f"string; got {case_cls!r}."
             )
         case_type_registry.register_case_types(case_cls)
         stem = _slugify(nickname) if nickname else _slugify(case_cls.__name__)

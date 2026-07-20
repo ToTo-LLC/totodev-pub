@@ -417,6 +417,13 @@ def test_class_index_case_modules(tmp_path, monkeypatch):
         assert case_type_registry.resolve_case_type("IndexedMiniCase") is not None
         wb.create(case_type_registry.resolve_case_type("IndexedMiniCase"))
         assert wb.case is not None
+        first_id = wb.case.case_id
+        # string form uses the same ClassIndex / registry path
+        wb.create("IndexedMiniCase", nickname="by-name")
+        assert wb.case.case_id != first_id
+        assert wb.case.case_id.startswith("by-name--")
+        with pytest.raises(WorkbenchError, match="not registered"):
+            wb.create("DefinitelyMissingCaseClass")
     finally:
         sys.path.remove(str(tmp_path))
 

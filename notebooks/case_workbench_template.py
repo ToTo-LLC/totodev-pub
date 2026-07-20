@@ -15,9 +15,10 @@ async def main() -> None:
     print(wb.list_examples())
     # Clone a freeze-dried example when your shelf has one:
     #   wb.clone("YourCase/newly_created/minimal")
-    # Or construct fresh:
+    # Or construct fresh (type or class-name string):
     #   from your_pkg import YourCase
     #   wb.create(YourCase)
+    #   wb.create("YourCase", nickname="demo")
     #
     # if wb.case is not None:
     #     print(wb.status())
