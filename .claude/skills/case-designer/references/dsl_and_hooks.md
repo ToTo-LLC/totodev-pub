@@ -1,16 +1,171 @@
-# FolderBackedCase reference: DSL, hook naming, assertions, assets
+# FolderBackedCase reference: FSM design, DSL, hooks, assertions, assets
 
 Condensed for skeleton generation. Authoritative source (read it if anything here
 seems ambiguous or out of date): `src/totodev_pub/folder_backed_case_support/folder_backed_case_interface.py`.
-Worked example: `notebooks/DEVDAVE/case_manager_classes/Tutorial 1 - Building Case-Centric Systems with FolderBackedCase.md`.
+Worked skeleton shape: `assets/case_class_template.py` in this skill.
 
 ## Contents
+- FSM design principles (read before drafting chains)
 - FSM state-chain DSL grammar
 - Hook naming conventions (what to stub)
 - Trigger chokes (`fsm_trigger_chokes`)
 - Assertion convention (what to stub)
 - AssetSpec fields
 - Minimal class skeleton shape
+
+## FSM design principles
+
+**Agent instructions.** Apply this section while interviewing and drafting
+`fsm_state_chains` (`SKILL.md` Steps 1–2). The grammar below encodes a design;
+it does not invent one. Prefer restating a coarse happy path in plain English
+and confirming it before adding states “for documentation.” Optional post-bind
+enhancements (retry catalogs, dwell escapes, feedback assets, …) live in
+`case_design_patterns.md` — raise those after the base class binds, except
+inert intake when files enter the case.
+
+### Start simple; split on purpose
+
+There is a natural tension between a simple model with a few coarse steps
+(e.g. `new → open → closed`) and a complex model with granular substeps.
+**Default to the coarsest honest model** that still matches how the business
+talks about the work. Extra states are cheap to add later and expensive to
+rename once `perform_` / `guard_` / `case_assert_` / `AssetSpec.states` all
+hang off the names.
+
+Only propose a split when you can name a concrete reason from the checklist
+below — not because a narrative “feels like it should have more boxes.”
+
+### Mirror the users’ mental model
+
+FSMs are most useful when terminology matches vocabulary operators and
+developers already share:
+
+| Kind | Prefer | Examples | Describes |
+|---|---|---|---|
+| **Triggers** | present-tense verbs | `apply_ocr`, `transmit_file`, `finalize`, `approve` | the action or change if that trigger fires |
+| **States** | adjectives or nouns | `ready`, `finished`, `retrieved`, `ocrd` | current condition, or the step just completed |
+
+If renaming a state or trigger to match how people already talk about the work
+improves clarity, do that over inventing framework jargon (`phase_2b`,
+`proc_ok`).
+
+### Names must be Python identifiers
+
+Triggers, states, and guards map to method names (`perform_<trigger>`,
+`guard_<guard>`, `on_enter_<state>`, `case_assert_<state>_<slug>`). Use only
+characters legal in a Python identifier segment: letters, digits, underscore.
+No hyphens, spaces, punctuation, or Unicode “pretty” dashes. Keep names short
+enough that the generated methods stay readable.
+
+### When to break a coarse step down
+
+Good reasons to split:
+
+1. **Granular retry / recovery.** If part of a multi-step `perform_` fails
+   often, splitting lets `@FAIL` retry or divert that edge without redoing the
+   whole chunk.
+2. **One choke resource per trigger.** Chokes are semaphores. A trigger that
+   needs `"cpu"` *and* `"llm"` (or any stack of resources) must acquire several
+   locks and tends to stall under load. Split so each trigger lists about one
+   resource — see Trigger chokes below.
+3. **Divergent error handling.** If failure at point A needs a different divert
+   path than failure at point B, put A and B in different states so the FSM
+   can express both.
+4. **Workbench “breakpoints.”** Save or copy a case parked in a specific state
+   and use `CaseWorkbench` (`totodev_pub.case_testing`) to isolate and retest
+   one trigger. Granular states act like built-in breakpoints in the lifecycle.
+5. **Pool fairness.** Orchestrators like `CaseManager` typically give other
+   cases a chance to proceed after a case reaches a new state. A single fat
+   `perform_` that runs for a long time hoggs the turn; smaller steps share the
+   pool better.
+6. **Inbuilt documentation** — useful, easy to overdo. Do not split *only* to
+   narrate internal function calls.
+
+Weak or insufficient reasons on their own: “we might want metrics someday,”
+“every function deserves a state,” “the slide deck had seven boxes.”
+
+### Design from the happy path outward
+
+1. Draw the primary success path from initial state to terminal success.
+2. Confirm that path with the developer in plain English (numbered steps).
+3. Only then layer: failure / `@FAIL` divert, `@DWELL` escapes, secondary
+   success paths, human gates, and wildcard edges.
+
+Showing a tidy happy-path chain first is cheaper than debating a fully loaded
+graph the developer cannot yet visualize.
+
+### Manual vs automated edges
+
+Human intervention — attach a document, approve an action, archive a record,
+confirm extraction — is usually a **manual** edge (`==`). Automated pipeline
+steps use `--` so `case_advance()` can fire them unattended.
+
+If unsure whether a step should run without a person, use `==`. Auto-advance
+is opt-in (see grammar defaults below).
+
+### Wildcard-source triggers
+
+Use `*` when the same action is valid from (almost) any live state — cancel,
+abort, admin escape:
+
+```text
+*==abort-->aborted^
+```
+
+Keep wildcards for cross-cutting control actions. Do **not** wildcard the
+normal domain flow; that hides which states are real and makes unreachable /
+dead-end validation harder to reason about.
+
+### Chokes, splitting, and pool behavior
+
+- Declare `fsm_trigger_chokes` only for triggers that contend for a shared,
+  capacity-constrained resource.
+- Prefer **at most one resource name per trigger**; split work rather than
+  stacking semaphores.
+- Remember pool fairness: after a state change, other cases often get a turn —
+  another reason not to cram an entire pipeline into one trigger.
+
+### Anti-patterns
+
+- **State-per-statement** — one state for every line of `perform_` logic.
+- **Multi-choke triggers** — `{"cpu", "api", "llm"}` on a single edge.
+- **Alien names** — jargon the business would not use on a whiteboard.
+- **Heavy work in `create_case_in_folder`** — prefer inert intake + a manual
+  attach/import trigger (see `case_design_patterns.md` pattern 0 / `SKILL.md`
+  Step 2).
+- **Failure states with no story** — a divert into `failed` with no retry,
+  human gate, or terminal path.
+- **Happy-path wildcards** — `*--process-->…` instead of naming real sources.
+- **Splitting “for docs” only** — narrate in docstrings and assertions; keep
+  the graph honest and lean.
+
+### Worked sketches: coarse vs split
+
+**Coarse (good starting point)** — one processing step, one choke, simple
+failure sits until someone intervenes:
+
+```text
+^new==add_attachments-->attachments_added--begin-->submitted--process-->done^
+*==abort-->aborted-->closed^
+```
+
+**Split on purpose** — OCR is flaky and CPU-bound; extraction uses an LLM;
+you want retries on OCR only, separate chokes, and a Workbench park point
+after OCR:
+
+```text
+^new==add_attachments-->attachments_added--begin-->submitted
+submitted--@FAIL<3#apply_ocr-->ocrd--extract_text-->extracted--finalize-->done^
+submitted--@FAIL>=3#give_up-->needs_review==resolve-->closed^
+*==abort-->aborted^
+```
+
+with chokes like `{"apply_ocr": {"cpu"}, "extract_text": {"llm"}}`.
+
+Same business outcome as the coarse model, but retry, resource acquisition,
+error divert, and “retest `extract_text` from an `ocrd` fixture” are expressible
+in the graph. Do not start here — arrive here when the interview surfaces those
+needs.
 
 ## FSM state-chain DSL (`fsm_state_chains`)
 
@@ -24,10 +179,17 @@ A list of chain strings, each `stateA--trigger-->stateB`, optionally chained
 | `A--trigger-->B` | **automated** edge — `case_advance()` may fire it unattended |
 | `A==trigger-->B` | **manual** edge — only an explicit `await case.trigger()` fires it; never auto-fires |
 | `guard#trigger` | binds `guard_<guard>(self, tctx) -> bool`; edge fires only when it returns truthy |
+| `guard1#guard2#trigger` | **multiple method guards** on one edge — all must pass (`conditions` = `guard_guard1`, `guard_guard2`, …). Chain as many `#`-separated method-guard tokens as you need before the trigger name. |
 | `@DWELL(>|>=|<|<=)<dur>#trigger` | factual guard: time in current state vs `1s/2m/3h/4d`. Use for **timed escapes** so a state can't rot forever (pair with a `==` human gate or an automated pipeline step). |
-| `@FAIL(>|>=|<|<=)n#trigger` | factual guard: failed-transition-attempt count since entering current state. Use for **retry-then-divert**: e.g. `@FAIL<3#retry` + `@FAIL>=3#give_up`. Default (no `@FAIL` given) is an implied `@FAIL<1` — one try, then stop. |
+| `@FAIL(>|>=|<|<=)n#trigger` | factual guard: failed-transition-attempt count since entering current state. Use for **retry-then-divert**: e.g. `@FAIL<3#retry` + `@FAIL>=3#give_up` as **separate edges**. Default (no `@FAIL` given) is an implied `@FAIL<1` — one try, then stop. |
 | `trigger~<dur>` | soft timeout on the trigger's `perform_` work (flags slow; hard-aborts at a multiple) |
 | `*--trigger-->X` / `*==trigger-->X` | wildcard source — this edge exists from every live state |
+
+Guards compose on a single connector: method guards chain with `#`, and factual
+guards compose with each other and with method guards (e.g.
+`@FAIL<3#funded#finish`, `@FAIL<3#@DWELL>30m#retry`). Soft timeout is a suffix
+and composes too (`@FAIL<3#funded#finish~3m`). At most one guard per fact name
+(`@FAIL` / `@DWELL`) on a given edge.
 
 Two defaults to keep in mind while drafting chains with the user:
 - **Auto-advance is opt-in.** If unsure whether a step should run unattended, use `==` — the case waits rather than blowing past a human gate.

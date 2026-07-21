@@ -24,6 +24,12 @@ here and tends to confuse rather than help a first-time case author. (The lone
 exception is the advanced reclassify pattern in Step 7's catalog, which names
 the one docstring to read if that specific pattern is adopted.)
 
+**Reference boundary.** Within this skill, only allude to (a) files inside the
+skill tree itself, or (b) files under `src/`. Do not point at `notebooks/`,
+personal notes, or other project paths — those change or disappear. If outside
+material would help the skill, copy it into `assets/` or `references/` here
+instead of linking out.
+
 ## Workflow
 
 1. **Interview** the developer (below) to learn the business situation.
@@ -44,9 +50,10 @@ the one docstring to read if that specific pattern is adopted.)
    summary of the finished class (lifecycle diagram, states/triggers/guards/
    assertions/assets tables) to sanity-check the whole design at a glance.
 
-For DSL grammar, hook-naming rules, the assertion convention, and `AssetSpec`
-fields, see `references/dsl_and_hooks.md` — read it before step 2 if any of
-those are unfamiliar or you need the exact syntax.
+Before drafting chains, read **FSM design principles** in
+`references/dsl_and_hooks.md` (start of that file). Then use the same file for
+DSL grammar, hook-naming rules, assertions, and `AssetSpec` fields when you
+need exact syntax.
 
 ## Step 1 — Interview
 
@@ -56,10 +63,20 @@ dumping every question at once; follow up based on what comes back. Cover:
 1. **Name the case.** "What's the recurring unit of work?" (one email thread,
    one purchase transaction, one catalog image...). If the developer can't say
    what "one" is, stop here — everything else hangs on it.
-2. **Draw the lifecycle.**
-   - What states does it pass through, start to finish?
-   - For each transition: does it happen automatically once conditions are
-     met, or does it require an explicit human/UI action (`--` vs `==`)?
+2. **Draw the lifecycle** (apply FSM design principles in
+   `references/dsl_and_hooks.md`).
+   - Restate the **primary happy path** in plain English first (initial →
+     terminal success); confirm before adding failure/edge paths.
+   - Prefer the **coarsest honest** model; only propose extra states/triggers
+     for concrete reasons (granular retry, one choke per trigger, divergent
+     error handling, CaseWorkbench isolation, pool fairness) — not "more
+     states for documentation."
+   - Check naming: triggers as present-tense verbs, states as
+     adjectives/nouns for condition or step just completed, in the users'
+     vocabulary; names must be valid Python identifier segments.
+   - For each transition: automatic once conditions are met, or explicit
+     human/UI action (`--` vs `==`)? Human gates (attach, approve, archive,
+     …) are usually `==`.
    - Where can a step fail, and should it retry or divert after N failures
      (`@FAIL`)?
    - Where can a case sit waiting on a person indefinitely — does it need a
@@ -88,8 +105,12 @@ confirm it before moving on — errors here propagate into every generated stub.
 
 ## Step 2–4 — Translate into declarations
 
-Using `references/dsl_and_hooks.md`:
-- Turn the confirmed lifecycle into `fsm_state_chains` strings.
+Using `references/dsl_and_hooks.md` (design principles first, then grammar):
+- Turn the confirmed lifecycle into `fsm_state_chains` strings — encode the
+  happy path first, then layer `@FAIL` / `@DWELL` / wildcards / secondary
+  paths. Use the principles section's split checklist and anti-patterns when
+  tempted to grow the graph.
+- Show the developer the happy-path chains before the fully loaded graph.
 - Turn the confirmed data contracts into `AssetSpec` entries (plus one
   `FileMappedPydanticMixin`/pydantic placeholder class per structured asset,
   fields named but bodies empty — field declarations aren't "meat" to defer,
