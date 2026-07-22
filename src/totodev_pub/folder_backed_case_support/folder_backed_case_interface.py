@@ -277,6 +277,19 @@ class FolderBackedCaseInterface(ABC):
     summarized). Because ``assertions/*.py`` files are code that arrived as
     data, use ``CLASS_ONLY`` or ``SKIP`` when processing case folders from
     untrusted sources.
+
+    Every sweep also runs an automatic, built-in check with no assertion method
+    required: every ``asset_aliases`` entry whose declared ``states`` claims
+    validity in the state just entered gets loaded (``case_load_asset`` /
+    ``case_load_assets``) purely to confirm the load does not raise. This
+    catches an alias whose ``states`` says "trustworthy here" while the code
+    that should have populated it hasn't run (or a loader that no longer
+    matches what's on disk) — the moment a real case reaches that state, not
+    just at bind time. It runs whether or not the state has any hand-written
+    ``case_assert_*``, and each failure is recorded exactly like any other
+    assertion failure (name ``asset_loadable:<alias>``). The only way to turn
+    it off is the same ``AssertionMode`` knob above — ``SKIP`` disables it
+    along with everything else, for performance-sensitive callers.
     """
 
     # =======================================================================

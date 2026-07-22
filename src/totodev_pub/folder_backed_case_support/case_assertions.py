@@ -23,6 +23,16 @@ per failure + one CASE_ASSERTED summary per sweep, a ``self.log`` error line,
 and the overridable ``on_assertion_failed`` hook. The machine is unaffected —
 nothing here counts toward @FAIL or raises into dispatch.
 
+A third, automatic check rides the same sweep: every asset alias whose
+declared ``states`` claims validity in the state just entered gets loaded
+(``case_load_asset``/``case_load_assets``) purely to confirm it does not
+raise — no hand-written assertion required. This catches drift between an
+alias's declared ``states`` and the code that actually populates the file. It
+is unconditional (independent of whether the class or the folder define any
+``case_assert_*`` for that state) but obeys the same ``AssertionMode`` knob as
+everything else in the sweep: ``SKIP`` turns it off along with everything
+else, for performance-sensitive callers.
+
 This module owns all assertion mechanics; FolderBackedCase only wires them in
 (the ``_CaseAdvancer`` / ``_CaseMachineFactory`` pattern).
 """
@@ -210,8 +220,9 @@ class _CaseAssertionRunner:
 
     def sweep(self, state: str) -> None:
         """Run every assertion tied to ``state`` (class methods first, name-sorted;
-        then file assertions) and close with one CASE_ASSERTED summary. Consults
-        the process-global AssertionMode afresh on every call."""
+        then the automatic asset-loadability check; then file assertions) and close
+        with one CASE_ASSERTED summary. Consults the process-global AssertionMode
+        afresh on every call."""
         mode = get_case_assertion_mode()
         if mode is AssertionMode.SKIP:
             self._journal.log_asserted(state, ran=0, failed=0, mode=mode.value)
@@ -223,11 +234,43 @@ class _CaseAssertionRunner:
             ran += 1
             fn = getattr(self._case, method_name)
             failed += self._run_one(state, slug, "method", fn, (ltx,))
+        asset_ran, asset_failed = self._check_asset_loadability(state)
+        ran += asset_ran
+        failed += asset_failed
         if mode is AssertionMode.FULL:
             file_ran, file_failed = self._sweep_files(state, ltx)
             ran += file_ran
             failed += file_failed
         self._journal.log_asserted(state, ran=ran, failed=failed, mode=mode.value)
+
+    def _check_asset_loadability(self, state: str) -> tuple[int, int]:
+        """Confirm every asset alias trusted in ``state`` (per its declared
+        ``AssetSpec.states``) can actually be loaded. Unconditional — it runs
+        whether or not any hand-written ``case_assert_*`` targets this state; the
+        only gate is the mode check already done by the caller (``sweep``)."""
+        book = type(self._case)._resolve_asset_book()
+        ran = 0
+        failed = 0
+        for alias in book.trusted_aliases(state):
+            spec = book.spec(alias)
+            loader = self._case.case_load_assets if spec.many else self._case.case_load_asset
+            ran += 1
+            failed += self._run_asset_load(state, alias, loader)
+        return ran, failed
+
+    def _run_asset_load(self, state: str, alias: str, loader: Callable) -> int:
+        """Load one asset alias purely to confirm it does not raise; return 1 on
+        failure, 0 on pass. Unlike ``_run_one``, the loaded value's truthiness is
+        irrelevant — only an exception counts as failure here."""
+        try:
+            loader(alias)
+        except Exception as exc:
+            self._record_failure(
+                state, f"asset_loadable:{alias}", "asset-load",
+                str(exc) or type(exc).__name__, type(exc).__name__,
+            )
+            return 1
+        return 0
 
     # ---- single-assertion execution (isolation boundary) ----
 

@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
+import pytest
+from pydantic import BaseModel
+
+from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case_support.case_journal import (
     CaseEventJournal, CaseEventJournalView,
 )
@@ -611,3 +615,117 @@ def test_assertion_mode_reexported_from_main_module():
         AssertionMode as ReexportedMode,
         set_case_assertion_mode as reexported_setter,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 7: automatic asset-loadability check (no hand-written assertion needed)
+# ---------------------------------------------------------------------------
+
+from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
+
+
+class AssetCheckCase(FolderBackedCase):
+    asset_aliases = [
+        AssetSpec(alias="widget", relative_path="widget.txt", loader=Path, states={"open"}),
+        AssetSpec(
+            alias="items", relative_path="items/*", loader=Path,
+            states={"open"}, many=True,
+        ),
+    ]
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    # Deliberately NO case_assert_open_* methods: proves the check runs even
+    # when the state has no hand-written assertions at all.
+
+    async def perform_begin(self, tctx):
+        pass
+
+    async def perform_finish(self, tctx):
+        pass
+
+
+def test_asset_loadability_check_passes_when_file_present(tmp_path):
+    case = AssetCheckCase.create_case_in_folder(tmp_path / "ok")
+    try:
+        case.case_assets.write("widget.txt", b"hi")
+        asyncio.run(case.begin())
+        assert case._journal.assert_failures(state="open") == []
+        summary = list(case._journal.primitive.events(label_glob=EV_ASSERTED))[0]
+        assert summary.contents().as_dict() == {"ran": 2, "failed": 0, "mode": "full"}
+    finally:
+        case.case_detach()
+
+
+def test_asset_loadability_check_fails_and_runs_without_handwritten_assertion(tmp_path):
+    case = AssetCheckCase.create_case_in_folder(tmp_path / "missing")
+    try:
+        asyncio.run(case.begin())        # widget.txt was never written
+        fails = case._journal.assert_failures(state="open")
+        assert {f.value for f in fails} == {"open.asset_loadable:widget"}
+        d = fails[0].contents().as_dict()
+        assert d["source"] == "asset-load"
+        assert d["error"] == "FileNotFoundError"
+        # 'items' is many=True and unpopulated -> an empty list, not a failure
+        summary = list(case._journal.primitive.events(label_glob=EV_ASSERTED))[0]
+        assert summary.contents().as_dict() == {"ran": 2, "failed": 1, "mode": "full"}
+    finally:
+        case.case_detach()
+
+
+def test_asset_loadability_check_disabled_by_skip_mode(tmp_path):
+    case = AssetCheckCase.create_case_in_folder(tmp_path / "skip")
+    try:
+        set_case_assertion_mode(AssertionMode.SKIP)
+        asyncio.run(case.begin())        # widget.txt missing -> would fail if it ran
+        assert case._journal.assert_failures() == []
+        summary = list(case._journal.primitive.events(label_glob=EV_ASSERTED))[0]
+        assert summary.contents().as_dict() == {"ran": 0, "failed": 0, "mode": "skip"}
+    finally:
+        case.case_detach()
+
+
+def test_asset_loadability_check_runs_under_class_only_mode(tmp_path):
+    case = AssetCheckCase.create_case_in_folder(tmp_path / "class-only")
+    try:
+        set_case_assertion_mode(AssertionMode.CLASS_ONLY)
+        asyncio.run(case.begin())        # widget.txt missing
+        fails = case._journal.assert_failures(state="open")
+        assert {f.value for f in fails} == {"open.asset_loadable:widget"}
+    finally:
+        case.case_detach()
+
+
+class ReportForm(BaseModel, FileMappedPydanticMixin):
+    count: int = 0
+
+
+class ManyAssetFailCase(FolderBackedCase):
+    asset_aliases = [
+        AssetSpec(
+            alias="reports", relative_path="reports/*.yaml", loader=ReportForm,
+            states={"open"}, many=True,
+        ),
+    ]
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+
+    async def perform_begin(self, tctx):
+        pass
+
+    async def perform_finish(self, tctx):
+        pass
+
+
+def test_asset_loadability_check_many_true_routes_through_case_load_assets(tmp_path):
+    case = ManyAssetFailCase.create_case_in_folder(tmp_path / "many-fail")
+    try:
+        asyncio.run(case.begin())        # first sweep: no report files yet, passes
+        assert case._journal.assert_failures(state="open") == []
+        (case.case_assets.folder / "reports").mkdir()
+        case.case_assets.write("reports/bad.yaml", b"count: not-a-number\n")
+        case._assertion_runner.sweep("open")   # re-sweep, as a self-loop would
+        fails = case._journal.assert_failures(state="open")
+        assert {f.value for f in fails} == {"open.asset_loadable:reports"}
+        assert fails[0].contents().as_dict()["source"] == "asset-load"
+    finally:
+        case.case_detach()
