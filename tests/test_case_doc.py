@@ -216,6 +216,15 @@ def test_to_mermaid_flowchart_style_with_wildcard_hub():
     assert "classDef initialState" in mermaid
 
 
+def test_to_mermaid_flowchart_distinguishes_auto_vs_manual_edges():
+    """Auto edges stay solid; manual edges use dotted connectors; (auto) label kept."""
+    doc = collect(SampleCase)
+    mermaid = to_mermaid(doc.fsm_graph, style="flowchart")
+    assert "new -->|intake [FAIL<1] (auto)| reviewing" in mermaid
+    assert "reviewing -.->|approve [funded]| done" in mermaid
+    assert "reviewing -->|expire [DWELL>=3600s] (auto)| expired" in mermaid
+
+
 # ---------------------------------------------------------------------------
 # render_markdown() / generate_case_docs()
 # ---------------------------------------------------------------------------

@@ -386,7 +386,8 @@ def _to_mermaid_flowchart(graph: "nx.MultiDiGraph") -> str:
         if data.get("terminal"):
             terminals.append(node_id)
     for u, v, data in graph.edges(data=True):
-        lines.append(f"    {_mermaid_id(u)} -->|{_edge_label(data)}| {_mermaid_id(v)}")
+        arrow = "-->" if data.get("auto") else "-.->"
+        lines.append(f"    {_mermaid_id(u)} {arrow}|{_edge_label(data)}| {_mermaid_id(v)}")
     if initials:
         lines.append(f"    class {','.join(initials)} initialState")
     if terminals:
