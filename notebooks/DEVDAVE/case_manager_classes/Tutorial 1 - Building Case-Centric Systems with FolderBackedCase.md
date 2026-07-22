@@ -394,7 +394,9 @@ case = InquiryCase.create_case_in_folder(folder, external_key="EMAIL-778812")
 try:
     # Channel 1 — the sweep. Attempt ONE automated step; report, never raise.
     result = await case.case_advance()
-    # result.progressed, result.trigger, result.final_state, result.exceptions
+    # result.progressed  — True when a trigger committed (even a same-state self-loop);
+    #                      compare initial_state != final_state if you need a rename.
+    # result.trigger, result.final_state, result.exceptions
 
     # Channel 2 — a direct trigger call. This is how MANUAL edges fire
     # (and it raises on failure — fail-fast for the calling human's benefit).
@@ -405,9 +407,11 @@ finally:
 
 `case_advance()` is the non-throwing reporter a scheduler loops over thousands of times: it tries
 the automated edges leaving the current state in declared order, fires the first one whose guards
-permit, and folds any exception into the returned `AdvanceResult` instead of raising. A case
-sitting at `waiting_for_approval` simply reports "nothing to do" on every sweep — parked, cheap,
-and safe — until a human decision arrives through the other channel.
+permit, and folds any exception into the returned `AdvanceResult` instead of raising. A successful
+commit sets `result.progressed` even when the case stays in the same state (a guarded auto
+self-loop); callers that care only about a renamed state compare `initial_state` to
+`final_state`. A case sitting at `waiting_for_approval` simply reports "nothing to do" on every
+sweep — parked, cheap, and safe — until a human decision arrives through the other channel.
 
 ---
 

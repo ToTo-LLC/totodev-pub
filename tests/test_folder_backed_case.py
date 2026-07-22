@@ -1611,3 +1611,111 @@ def test_bind_passes_specs_to_live_assets(tmp_path):
         assert case.case_assets.registered_aliases() == ["rlist"]
     finally:
         case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# Same-state (self-loop) edges + AdvanceResult.progressed = successful commit
+# ---------------------------------------------------------------------------
+
+
+def test_advance_result_progressed_is_successful_commit_not_state_rename():
+    from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
+
+    assert AdvanceResult("a", "b", trigger="go").progressed
+    assert bool(AdvanceResult("a", "b", trigger="go"))
+    # Same-state success still counts as progress.
+    same = AdvanceResult("a", "a", trigger="tick")
+    assert same.progressed and bool(same)
+    assert same.initial_state == same.final_state
+    # Failed attempt: trigger set but not progressed.
+    failed = AdvanceResult("a", "a", trigger="tick", exceptions=(RuntimeError("x"),))
+    assert failed.failed and not failed.progressed and not bool(failed)
+    # Pure no-op.
+    noop = AdvanceResult("a", "a")
+    assert not noop.progressed and not bool(noop)
+
+
+class _SelfLoopCase(FolderBackedCase):
+    asset_aliases = []
+    fsm_trigger_chokes = {}
+    """Guarded auto self-loop that declines after two ticks so `finish` can fire."""
+    fsm_state_chains = ["^ready--still#tick-->ready--finish-->done^"]
+    ticks: int = 0
+    fail_tick: bool = False
+
+    async def guard_still(self, tctx):
+        return self.ticks < 2
+
+    async def perform_tick(self, tctx):
+        if self.fail_tick:
+            raise RuntimeError("tick boom")
+        self.ticks += 1
+
+    async def perform_finish(self, tctx):
+        pass
+
+
+def test_guarded_auto_self_loop_progresses_without_state_rename(tmp_path):
+    async def scenario():
+        case = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-1", case_id="sl-1")
+        try:
+            result = await case.case_advance()
+            assert result.trigger == "tick"
+            assert result.progressed
+            assert result.initial_state == result.final_state == "ready"
+            assert case.ticks == 1
+            lt = case._journal.last_transition()
+            assert lt is not None
+            assert lt.from_state == "ready"
+            assert lt.to_state == "ready"
+            assert lt.trigger == "tick"
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_failed_auto_self_loop_is_not_progressed(tmp_path):
+    async def scenario():
+        case = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-2", case_id="sl-2")
+        try:
+            case.fail_tick = True
+            result = await case.case_advance()
+            assert result.trigger == "tick"
+            assert result.failed
+            assert not result.progressed
+            assert case.case_state == "ready"
+            assert case.ticks == 0
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_self_loop_guard_decline_lets_sibling_auto_edge_and_drive_finish(tmp_path):
+    from tests.case_test_utils import drive_to_completion
+
+    async def scenario():
+        case = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-3", case_id="sl-3")
+        try:
+            r1 = await case.case_advance()
+            assert r1.trigger == "tick" and r1.progressed and case.ticks == 1
+            r2 = await case.case_advance()
+            assert r2.trigger == "tick" and r2.progressed and case.ticks == 2
+            # Guard now declines; unrestricted sweep should take `finish`.
+            r3 = await case.case_advance()
+            assert r3.trigger == "finish" and r3.progressed
+            assert case.case_state == "done"
+
+            case2 = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-4", case_id="sl-4")
+            try:
+                last = await drive_to_completion(case2)
+                assert case2.case_state == "done"
+                assert last is not None and last.progressed and last.trigger == "finish"
+                assert case2.ticks == 2
+            finally:
+                case2.case_detach()
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())

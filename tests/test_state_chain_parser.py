@@ -767,3 +767,43 @@ def test_to_networkx_multi_source_transition_shares_declaration_index():
     assert a_edge["declaration_index"] == b_edge["declaration_index"] == 0
     assert [d["declaration_index"] for _, _, d in g.out_edges("a", data=True)] == [0]
     assert [d["declaration_index"] for _, _, d in g.out_edges("b", data=True)] == [0]
+
+
+# ---------------------------------------------------------------------------
+# Same-state (self-loop) edges
+# ---------------------------------------------------------------------------
+
+
+def test_unguarded_auto_self_loop_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["^a--tick-->a--go-->done^"]).validate()
+    msg = str(excinfo.value)
+    assert "auto self-loop" in msg
+    assert "tick" in msg
+    assert "method guard" in msg
+    assert "still_needed" in msg
+    assert "@DWELL" in msg or "@FAIL" in msg
+
+
+def test_method_guarded_auto_self_loop_is_accepted():
+    spec = StateChainParser.parse(["^a--ok#tick-->a--go-->done^"]).validate()
+    tick = next(t for t in spec.transitions if t["trigger"] == "tick")
+    assert tick["source"] == "a" and tick["dest"] == "a"
+    assert tick["conditions"] == ["guard_ok"]
+    assert ("a", "tick") in spec.auto_edges
+
+
+def test_unguarded_manual_self_loop_is_accepted():
+    spec = StateChainParser.parse(["^a==tick-->a--go-->done^"]).validate()
+    tick = next(t for t in spec.transitions if t["trigger"] == "tick")
+    assert tick["source"] == "a" and tick["dest"] == "a"
+    assert not tick.get("conditions")
+    assert ("a", "tick") not in spec.auto_edges
+
+
+def test_fact_only_auto_self_loop_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["^a--@DWELL>1s#tick-->a--go-->done^"]).validate()
+    msg = str(excinfo.value)
+    assert "auto self-loop" in msg
+    assert "method guard" in msg

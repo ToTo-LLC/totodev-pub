@@ -103,6 +103,14 @@ steps use `--` so `case_advance()` can fire them unattended.
 If unsure whether a step should run without a person, use `==`. Auto-advance
 is opt-in (see grammar defaults below).
 
+**Same-state edges** (`A==trigger-->A` / `A--trigger-->A`) are allowed.
+`AdvanceResult.progressed` is true whenever a trigger commits successfully,
+including when the state name does not change. An **auto** self-loop must
+declare at least one **method** guard (e.g. `ready--still_needed#tick-->ready`)
+so it cannot accidentally fire on every `case_advance()` and spin forever;
+factual `@DWELL` / `@FAIL` alone does not satisfy that check. Manual (`==`)
+self-loops need no method guard.
+
 ### Wildcard-source triggers
 
 Use `*` when the same action is valid from (almost) any live state — cancel,
@@ -178,6 +186,8 @@ A list of chain strings, each `stateA--trigger-->stateB`, optionally chained
 | `state^` | trailing `^` = a terminal state (auto-purges assets not kept, soon after entry) |
 | `A--trigger-->B` | **automated** edge — `case_advance()` may fire it unattended |
 | `A==trigger-->B` | **manual** edge — only an explicit `await case.trigger()` fires it; never auto-fires |
+| `A--guard#trigger-->A` | **auto self-loop** — same-state auto edge; **requires** ≥1 method guard (framework rejects unguarded `A--trigger-->A`) |
+| `A==trigger-->A` | **manual self-loop** — same-state manual edge; no method guard required |
 | `guard#trigger` | binds `guard_<guard>(self, tctx) -> bool`; edge fires only when it returns truthy |
 | `guard1#guard2#trigger` | **multiple method guards** on one edge — all must pass (`conditions` = `guard_guard1`, `guard_guard2`, …). Chain as many `#`-separated method-guard tokens as you need before the trigger name. |
 | `@DWELL(>|>=|<|<=)<dur>#trigger` | factual guard: time in current state vs `1s/2m/3h/4d`. Use for **timed escapes** so a state can't rot forever (pair with a `==` human gate or an automated pipeline step). |
@@ -194,9 +204,11 @@ and composes too (`@FAIL<3#funded#finish~3m`). At most one guard per fact name
 Two defaults to keep in mind while drafting chains with the user:
 - **Auto-advance is opt-in.** If unsure whether a step should run unattended, use `==` — the case waits rather than blowing past a human gate.
 - **Retry is opt-in.** No `@FAIL` guard means one attempt, then the failure just sits there (visible, not hammered).
+- **Auto self-loops need a method guard.** Prefer an intermediate state when “loop back” is really a different step; if you keep `A-->A` automated, name a method guard that eventually declines. `@DWELL` / `@FAIL` alone do not count.
 
 Validated at class-definition time: misspelled states, unreachable states, dead-end
-non-terminal states, and orphan hook methods (below) all fail at import.
+non-terminal states, unguarded auto self-loops, and orphan hook methods (below) all
+fail at import.
 
 ## Hook naming (what gets a stub)
 

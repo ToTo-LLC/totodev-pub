@@ -77,6 +77,11 @@ dumping every question at once; follow up based on what comes back. Cover:
    - For each transition: automatic once conditions are met, or explicit
      human/UI action (`--` vs `==`)? Human gates (attach, approve, archive,
      …) are usually `==`.
+   - Same-state edges (`A-->A`) are allowed. If proposing an **auto**
+     self-loop (`A--trigger-->A`), it **must** carry at least one named
+     method guard (`still_needed#trigger`); otherwise make it **manual**
+     (`A==trigger-->A`). Factual `@DWELL` / `@FAIL` alone do not satisfy
+     the auto self-loop rule (unguarded auto self-loops can spin forever).
    - Where can a step fail, and should it retry or divert after N failures
      (`@FAIL`)?
    - Where can a case sit waiting on a person indefinitely — does it need a
@@ -110,6 +115,9 @@ Using `references/dsl_and_hooks.md` (design principles first, then grammar):
   happy path first, then layer `@FAIL` / `@DWELL` / wildcards / secondary
   paths. Use the principles section's split checklist and anti-patterns when
   tempted to grow the graph.
+- When drafting any same-state edge: use `==` **or** a method-guarded `--`
+  (`ready--still_needed#tick-->ready`). Never emit an unguarded auto
+  self-loop — `FsmChainSpec.validate()` rejects it at import.
 - Show the developer the happy-path chains before the fully loaded graph.
 - Turn the confirmed data contracts into `AssetSpec` entries (plus one
   `FileMappedPydanticMixin`/pydantic placeholder class per structured asset,
@@ -261,6 +269,9 @@ Before handing the file back, confirm:
 - [ ] Every trigger named in `fsm_state_chains` has a `perform_<trigger>` (or
       an explicit note on why not).
 - [ ] Every `guard#trigger` name has a matching `guard_<guard>`.
+- [ ] Every **auto** self-loop (`A--…-->A`) has at least one named method
+      guard; otherwise the edge is `==` (manual). Factual `@DWELL`/`@FAIL`
+      alone is not enough for auto self-loops.
 - [ ] Every state has at least one `case_assert_<state>_*`, or an explicit
       note on why that state has nothing to assert.
 - [ ] `asset_aliases` states/loader/keep/many are all set (or

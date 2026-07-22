@@ -34,8 +34,8 @@ class AdvanceResult:
                        empty or a single entry.
         alerts         CASE_ALERTED messages logged during this step (e.g. from inside a hook
                        or the auto-block detector), harvested by case_advance() so a blind
-                       driver sees an alert that neither changed state nor raised. Empty when
-                       none.
+                       driver sees an alert that neither raised nor (for a no-op) committed a
+                       trigger. Empty when none.
     """
     initial_state: str
     final_state: str
@@ -45,8 +45,13 @@ class AdvanceResult:
 
     @property
     def progressed(self) -> bool:
-        """Did the case actually change state this call?"""
-        return self.final_state != self.initial_state
+        """Did a trigger commit successfully this call?
+
+        True whenever a trigger fired and did not fail — including same-state
+        (self-loop) commits where ``initial_state == final_state``. Callers that
+        need "the state name changed" compare those fields themselves.
+        """
+        return self.trigger is not None and not self.failed
 
     @property
     def blocked(self) -> bool:
@@ -65,6 +70,7 @@ class AdvanceResult:
         return bool(self.alerts)
 
     def __bool__(self) -> bool:
-        """Truthy iff the case progressed — so `if await case.case_advance():` driver loops
-        keep their natural meaning under the richer return type."""
+        """Truthy iff a trigger committed successfully — so ``if await case.case_advance():``
+        driver loops keep running after a successful same-state commit as well as a
+        state-changing one."""
         return self.progressed

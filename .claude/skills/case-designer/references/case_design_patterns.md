@@ -49,7 +49,10 @@ specifically needs create-time import.
   via kwargs (`tctx.kwargs`; keep them JSON-serializable when the manager may
   relay them). Its `perform_` copies/links those files into the case assets.
 - Transition into a very temporary state such as `attachments_added`, then
-  either loop back to `new` or enter the first real-flow state:
+  either loop back to `new` or enter the first real-flow state. Prefer a
+  distinct intermediate state over an auto self-loop on `new`; if you do
+  use a same-state auto edge, it must carry a named method guard (see
+  `dsl_and_hooks.md`).
 
 ```text
 ^new==add_attachments-->attachments_added--begin-->submitted--...

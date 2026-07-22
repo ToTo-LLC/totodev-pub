@@ -26,6 +26,12 @@ States
 Connectors  `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
 ----------
 * `A==trigger-->B` is one transition (trigger `trigger`, source `A`, dest `B`).
+  Same-state edges (`A==trigger-->A` / `A--trigger-->A`) are legal. An AUTO self-loop
+  (`A--...-->A`) MUST carry at least one method guard (see below) — validated in
+  `FsmChainSpec.validate()` — so authors cannot accidentally declare an unguarded edge
+  that fires on every `case_advance()` and spins forever / starves sibling auto edges.
+  Manual (`==`) self-loops need no method guard; factual guards (`@DWELL` / `@FAIL`) alone
+  do not satisfy the auto self-loop check.
 * `A--trigger-->B` marks the edge AUTO-ADVANCE: advance() (looped by a driver) may fire it
   unattended. `--` is opt-in (fail-safe): a `==` edge never auto-fires, so a case
   simply waits rather than silently running past a human/event gate. The connector form
@@ -37,7 +43,8 @@ Connectors  `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
   methods in their own namespace, away from ordinary helpers and lifecycle hooks. Multiple
   guards chain: `a#b#trigger` => conditions=["guard_a", "guard_b"]. Guards are what make
   multiple auto-advance edges from one state meaningful — advance() tries each auto
-  candidate in declared order and fires the first whose guard permits.
+  candidate in declared order and fires the first whose guard permits. A method guard is
+  also required on every auto self-loop (see same-state note above).
 * `@FACT<op>N#trigger` attaches a FACTUAL GUARD: an `@`-prefixed, system-computed fact
   compared against a constant with one of `< <= > >=` (equality `==`/`!=` is deliberately
   UNSUPPORTED — we cannot promise to evaluate at an exact instant/count, so an equality
@@ -341,7 +348,10 @@ class FsmChainSpec:
           - reachability: every non-initial state has an incoming edge (catches the
                 mistyped state name, whose orphan has no way in). A wildcard's declared
                 dest is exempt — it is reached only once the wildcards are injected, which
-                happens AFTER validate() so the typo checks see only the explicit graph.
+                happens AFTER validate() so the typo checks see only the explicit graph;
+          - every AUTO (`--`) self-loop (`source == dest`) carries at least one method
+                guard in `conditions` (factual `@DWELL`/`@FAIL` alone is not enough) so an
+                unguarded auto self-loop cannot spin forever on every case_advance().
         """
         if not self.states:
             return self
@@ -362,6 +372,25 @@ class FsmChainSpec:
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
             out_sources.update(srcs)
             in_dests.add(t["dest"])
+            dest = t["dest"]
+            trigger = t["trigger"]
+            conditions = t.get("conditions") or []
+            for s in srcs:
+                if s != dest:
+                    continue
+                if (s, trigger) not in self.auto_edges:
+                    continue
+                if conditions:
+                    continue
+                raise FsmChainParseError(
+                    f"auto self-loop {s!r}--{trigger}-->{dest!r} has no method guard. "
+                    "An unguarded auto self-loop can fire on every case_advance() and spin "
+                    "forever (or starve sibling auto edges from the same state). Add a "
+                    f"method guard that eventually declines, e.g. "
+                    f"{s!r}--still_needed#{trigger}-->{dest!r}, and implement "
+                    f"`async def guard_still_needed(...)-> bool`. Factual guards "
+                    "(@DWELL / @FAIL) alone do not satisfy this check."
+                )
 
         for s in self.states:
             terminal = s in self.terminal_states
