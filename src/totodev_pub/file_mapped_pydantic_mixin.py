@@ -1177,19 +1177,27 @@ class FileMappedPydanticMixin:
         """
         return bool(self._absolute_file_path and os.path.exists(self._absolute_file_path))
 
-    def file_was_modified(self, force_check: bool = False) -> bool:
+    def file_was_modified(self) -> bool:
         """
-        Check if the file on disk differs from our last loaded/saved version.
+        Check if the on-disk file differs from the snapshot taken at last successful load/save.
         
-        Args:
-            force_check: If True, bypass any cached stat results
-            
+        This is the shared on-disk change predicate (same name/signature as
+        LazyLoadedFileData.file_was_modified). It answers whether the file diverged
+        from the last load/save baseline — not whether the in-memory model is dirty
+        (use :meth:`is_modified` for that).
+        
         Returns:
-            bool: True if file size or mtime differs from last load/save
+            bool: True if a load/save baseline exists and the file's size/mtime differs
+                  (or the file is missing/unreadable). False if there is no baseline
+                  yet, or the file still matches the baseline.
         """
+        # No baseline yet — not "changed", just not loaded/saved
+        if self._file_stat is None:
+            return False
+
         if not self._absolute_file_path or not self.file_exists():
             return True
-            
+
         try:
             current_stat = os.stat(self._absolute_file_path)
             return (current_stat.st_size, current_stat.st_mtime) != self._file_stat

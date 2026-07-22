@@ -298,7 +298,8 @@ class LazyLoadedFileData:
     Change Detection:
     - By default, checks for file changes every 5 minutes
     - Set change_detection_secs=0 to disable automatic change detection
-    - Use has_changed() method to manually check for changes
+    - Use file_was_modified() to manually check whether the on-disk file diverged
+      from the last successful load (has_changed() is a backward-compatible alias)
     - When changes are detected, the file is automatically reloaded
     - Files must be stable (not modified in the last MIN_STABILITY_SECS) before loading
 
@@ -929,26 +930,41 @@ class LazyLoadedFileData:
                     
             self._loaded = True
 
-    def has_changed(self) -> bool:
+    def file_was_modified(self) -> bool:
         """
-        Check if the underlying file has been modified since last load.
+        Check if the on-disk file differs from the snapshot taken at last successful load.
+        
+        This is the shared on-disk change predicate (same name/signature as
+        FileMappedPydanticMixin.file_was_modified). It answers whether the file
+        diverged from the last load baseline — not whether in-memory data is dirty.
         
         Returns:
-            bool: True if the file has been modified (different mtime or size), False otherwise
-            
-        Raises:
-            FileNotFoundError: If the file doesn't exist
+            bool: True if a load baseline exists and the file's size/mtime differs
+                  (or the file is missing/unreadable). False if there is no baseline
+                  yet, or the file still matches the baseline.
         """
-        if not os.path.isfile(self._filepath):
-            raise FileNotFoundError(f"No such file: {self._filepath}")
-            
-        # If we haven't loaded a file yet, it hasn't "changed" - it just needs to be loaded
+        # No baseline yet — not "changed", just not loaded
         if self._last_file_mtime is None or self._last_file_size is None:
             return False
-            
-        stat = os.stat(self._filepath)
-        return (stat.st_mtime != self._last_file_mtime or 
-                stat.st_size != self._last_file_size)
+
+        if not os.path.isfile(self._filepath):
+            return True
+
+        try:
+            stat = os.stat(self._filepath)
+            return (stat.st_mtime != self._last_file_mtime or
+                    stat.st_size != self._last_file_size)
+        except OSError:
+            return True
+
+    def has_changed(self) -> bool:
+        """
+        Backward-compatible alias for :meth:`file_was_modified`.
+        
+        Prefer ``file_was_modified()`` in new code — the name clarifies that this
+        checks the on-disk file, not in-memory object dirtiness.
+        """
+        return self.file_was_modified()
 
     def as_dict(self, mutable: bool = False) -> Dict[str, Any]:
         """
@@ -981,15 +997,9 @@ class LazyLoadedFileData:
         
         if should_check_changes:
             self._last_checked_at = current_time
-            
-            # If file has changed, reload it (with exception handling)
-            try:
-                if self.has_changed():
-                    self._loaded = False  # Force reload
-            except (FileNotFoundError, OSError):
-                # If we can't check for changes (file deleted, permission issues, etc.),
-                # don't force a reload - let _ensure_loaded handle the error
-                pass
+            # Reload only when the file still exists; if it was deleted, keep cached data
+            if self.file_was_modified() and os.path.isfile(self._filepath):
+                self._loaded = False  # Force reload
         
         self._ensure_loaded()
         
@@ -1055,15 +1065,9 @@ class LazyLoadedFileData:
         
         if should_check_changes:
             self._last_checked_at = current_time
-            
-            # If file has changed, reload it (with exception handling)
-            try:
-                if self.has_changed():
-                    self._loaded = False  # Force reload
-            except (FileNotFoundError, OSError):
-                # If we can't check for changes (file deleted, permission issues, etc.),
-                # don't force a reload - let _ensure_loaded handle the error
-                pass
+            # Reload only when the file still exists; if it was deleted, keep cached data
+            if self.file_was_modified() and os.path.isfile(self._filepath):
+                self._loaded = False  # Force reload
         
         self._ensure_loaded(ignore_comments=ignore_comments)
         
