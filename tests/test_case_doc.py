@@ -9,6 +9,7 @@ created; `collect()`/`render_markdown()` only ever touch the class."""
 from __future__ import annotations
 
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -232,9 +233,66 @@ def test_to_mermaid_flowchart_distinguishes_auto_vs_manual_edges():
 # render_markdown() / generate_case_docs()
 # ---------------------------------------------------------------------------
 
+def test_render_markdown_starts_with_generation_stamp(monkeypatch):
+    """Rendered docs open with an HTML comment naming the generator, source, and stamp."""
+    fixed = datetime(2026, 7, 22, 20, 16, 30, tzinfo=timezone.utc)
+
+    class _FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    # raising=False: attribute is added by the implementation under test.
+    monkeypatch.setattr(case_doc, "datetime", _FakeDateTime, raising=False)
+
+    text = generate_case_docs(SampleCase)
+    first_line = text.splitlines()[0]
+    assert first_line.startswith("<!-- ")
+    assert first_line.endswith(" -->")
+    assert "totodev_pub.folder_backed_case_support.case_doc" in first_line
+    assert f"from {SampleCase.__module__}:{SampleCase.__name__}" in first_line
+    assert "2026-07-22T20:16:30+00:00" in first_line
+    assert any(line.startswith("# SampleCase") for line in text.splitlines()[1:])
+
+
+def test_render_markdown_surfaces_bound_method_names():
+    """DSL names stay as identity; bound methods appear with trailing ()."""
+    text = generate_case_docs(SampleCase)
+
+    # Triggers: DSL heading + perform_/before_ callables
+    assert "### `approve`" in text
+    assert "**Method:** `perform_approve()`" in text
+    assert "**Before:** `before_approve()`" in text
+
+    # Guards: DSL → method as a heading; docs stay out of a cramped table cell
+    assert "### `funded` → `guard_funded()`" in text
+    assert "**Used by:**" in text
+
+    # Assertions: full case_assert_*() name
+    assert "`case_assert_done_totals_balance()`" in text
+    assert "`case_assert_reviewing_has_ticket()`" in text
+
+    # State enter: method-only in the flags table; docstring in the hooks list
+    assert "| reviewing |" in text
+    assert "`on_enter_reviewing()`" in text
+    assert "Kick off the reviewer-assignment workflow." in text
+    # Not jammed into the On Enter cell as "method — docstring"
+    assert "`on_enter_reviewing()` — Kick off" not in text
+
+    # Overridden lifecycle hooks
+    assert "### `on_terminating()`" in text
+
+
+def test_render_markdown_asset_states_are_individually_backticked():
+    text = generate_case_docs(SampleCase)
+    # Wide CSV of bare names is harder to scan; each state is a code span.
+    assert "`reviewing`, `done`" in text or "`done`, `reviewing`" in text
+
+
 def test_render_markdown_contains_all_default_sections():
     text = generate_case_docs(SampleCase)
-    assert text.startswith("# SampleCase")
+    assert "# SampleCase" in text
+    assert text.lstrip().startswith("<!-- ")
     assert "```mermaid" in text
     assert "## States" in text
     assert "## Triggers" in text
@@ -243,6 +301,7 @@ def test_render_markdown_contains_all_default_sections():
     assert "## Asset Aliases" in text
     assert "## Overridden Lifecycle Hooks" in text
     assert "per-case file assertions" in text        # the §6 footnote
+
 
 
 def test_render_markdown_sections_are_individually_toggleable():
@@ -259,7 +318,7 @@ def test_render_markdown_sections_are_individually_toggleable():
     assert "## Assertions" not in text
     assert "## Asset Aliases" not in text
     assert "## Overridden Lifecycle Hooks" not in text
-    assert text.startswith("# SampleCase")             # header always present
+    assert "# SampleCase" in text                      # header always present
 
 
 def test_render_markdown_omits_hooks_section_when_none_overridden():
