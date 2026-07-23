@@ -367,14 +367,26 @@ implementation means deleting that one line and writing the body. The
 | `case_assert_<state>_<slug>` | `None \| str` | `return self._not_implemented(None)` | falsy = pass, so a known-unimplemented check doesn't spam `CASE_ASSERT_FAILED` events — the log WARNING is the visible signal instead |
 
 `_not_implemented` and every call to it are meant to be deleted once real
-implementations replace the stubs — say so in its docstring/comment when
-generating it.
+implementations replace the stubs — give the helper a one-line docstring to
+that effect; do **not** restate the lecture in the module docstring (see
+`generated_output_examples.md`).
 
 ## Minimal skeleton shape
 
 ```python
-from typing import Any
+"""<Business narrative: why this case exists.>
+
+IMPORTANT: This module is a rough first draft. Expect substantial follow-on
+work before production use — refining data structures, implementing
+trigger/guard/assertion bodies, tuning ``fsm_state_chains``, and hardening
+asset contracts. See ``fsm_state_chains`` on the case class for the lifecycle.
+"""
+
+from __future__ import annotations
+
 import sys
+from types import MappingProxyType
+from typing import Any, ClassVar, Mapping
 
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
@@ -383,13 +395,19 @@ from totodev_pub.folder_backed_case_support.case_type_registry import case_type_
 
 @case_type_registry.register
 class MyCase(FolderBackedCase):
-    """One <the recurring unit of work>, from <initial state> to <terminal state(s)>."""
+    """One <the recurring unit of work>, from <initial> toward <terminal(s)>."""
 
+    asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({
+        "result": frozenset({"done"}),
+    })
     fsm_state_chains = [...]
-    asset_aliases = [...]
+    asset_aliases = [
+        AssetSpec(..., states=asset_trust_states["result"], ...),
+    ]
     fsm_trigger_chokes = {...}
 
     def _not_implemented(self, retval: Any = None) -> Any:
+        """Scaffolding helper for stub hooks; remove with the stubs that call it."""
         caller = sys._getframe(1).f_code.co_qualname
         self.log.warning("STUB not implemented: %s", caller)
         return retval
@@ -407,5 +425,5 @@ class MyCase(FolderBackedCase):
         return self._not_implemented(None)  # or case_keep_files() for a real decision
 ```
 
-See `assets/case_class_template.py` in this skill for a fully worked, fully
-stubbed example built on a fictitious case type.
+See `assets/case_class_template.py` for a fully worked fictitious example, and
+`references/generated_output_examples.md` for docstring / ClassVar excerpts.

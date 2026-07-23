@@ -39,7 +39,9 @@ instead of linking out.
 3. **Draft `asset_aliases`** for the data contracts named in the interview.
 4. **Draft `fsm_trigger_chokes`** for the expensive steps named.
 5. **Generate the skeleton class file**, following the shape in
-   `assets/case_class_template.py`.
+   `assets/case_class_template.py` and the output examples in
+   `references/generated_output_examples.md` (module/class docstrings,
+   asset TODOs, `asset_trust_states` ClassVar).
 6. **Validate it binds** — actually import the generated module and fix
    whatever the framework rejects. Do not skip this.
 7. **Review optional design patterns** — consult
@@ -199,8 +201,37 @@ fix a wrong state name now than after 15 stubs reference it.
 
 Follow `assets/case_class_template.py` as the shape to imitate: same file
 layout, same stub style, same `@case_type_registry.register` decorator and
-import set. Do NOT copy its domain (permits) — only its structure. Concretely,
-for every name that appears in the confirmed `fsm_state_chains`:
+import set. Do NOT copy its domain (permits) — only its structure. For
+docstring voice, ClassVar trust map, and anti-patterns, also read
+`references/generated_output_examples.md` (short excerpts of good output).
+
+### Documentation and declaration principles
+
+- **Module docstring** — narrative of the intended business purpose: why this
+  case exists and what it models at a high level, drawn from the interview.
+  Close with an **IMPORTANT** paragraph stating this is a rough first draft
+  that needs substantial follow-on work (data structures, method bodies,
+  tuning `fsm_state_chains`, assertions, asset contracts). Point readers at
+  `fsm_state_chains` for the lifecycle — do not paste a second ASCII diagram
+  of the chains into the module header.
+- **Do not** mention who/when/how the file was constructed, or this skill.
+  **Do not** lecture in the module docstring about `_not_implemented` / “delete
+  this one line” — the call sites already show that.
+- **Class docstring** — short identity of “one X” (feeds case briefings). Put
+  the long story in the module docstring, not here.
+- **Asset models** (`FileMappedPydanticMixin` / nested pydantic) — docstring
+  states purpose (including *why* the data exists, e.g. enough identity to
+  delete an index row later). Include an explicit **TODO** to replace the
+  placeholder attribute layout.
+- **Trustworthy states** — declare a class-level
+  `asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({...})`
+  keyed by asset alias; each `AssetSpec` uses
+  `states=asset_trust_states["<alias>"]`. Do **not** emit a pile of module-level
+  `NEEDS_*` constants.
+
+### Hooks to emit
+
+For every name that appears in the confirmed `fsm_state_chains`:
 
 - One `async def perform_<trigger>(self, tctx)` for every trigger that does
   real work, docstring stating what it must read/write/call — drawn from the
@@ -227,13 +258,11 @@ stubs never hardcode their method name — then returns `retval`. Every stub's
 entire body (after its docstring) is exactly one line —
 `return self._not_implemented(<default>)` — passing whatever default its
 signature requires (`None` for hooks, `True` for guards, `None` for
-assertions). This is what lets the developer drive/simulate the whole
-lifecycle before any real logic exists, and it makes de-stubbing mechanical:
-delete that one line, write the real body. Mention in the generated file that
-`_not_implemented` and its call sites are meant to be deleted once real
-implementations land. Never write the actual `perform_`/`guard_` logic, even
-if it looks obvious or short — that is the developer's implementation to
-write, not this skill's job.
+assertions). Give `_not_implemented` a **one-line** docstring only (remove
+with the stubs that call it); do not expand that lecture into the module
+header. Never write the actual `perform_`/`guard_` logic, even if it looks
+obvious or short — that is the developer's implementation to write, not this
+skill's job.
 
 ## Step 6 — Validate it binds
 
@@ -332,8 +361,15 @@ for this case (e.g. a deliberately fully-automated pipeline). Then confirm:
 - [ ] Every state has at least one `case_assert_<state>_*`, or an explicit
       note on why that state has nothing to assert.
 - [ ] `asset_aliases` states/loader/keep/many are all set (or
-      `flexible_asset_alias_loading = True` was deliberately chosen instead).
+      `flexible_asset_alias_loading = True` was deliberately chosen instead),
+      with states taken from a class-level `asset_trust_states` ClassVar map
+      (not orphan `NEEDS_*` module constants).
 - [ ] The class carries `@case_type_registry.register`.
+- [ ] Module docstring narrates business purpose and includes the IMPORTANT
+      first-draft warning; it does **not** mention this skill, generation
+      meta, or `_not_implemented` mechanics.
+- [ ] Each asset pydantic model has a purpose docstring plus a TODO to replace
+      the placeholder attribute layout.
 - [ ] No stub contains real logic — only a responsibility docstring and a
       single `return self._not_implemented(<default>)` line.
 - [ ] If the case ingests files: initial state is inert (e.g. `new` /

@@ -1,31 +1,28 @@
-# WORKED EXAMPLE — not a real case type.
-#
-# This is a fictitious "PermitApplicationCase" showing the SHAPE a generated
-# skeleton should have: every stub's body is one deletable line —
-# `return self._not_implemented(<default>)` — which logs a WARNING (naming
-# the caller via sys._getframe) instead of raising and returns the stubbed-in
-# default, so the lifecycle can be driven/simulated before anything is filled
-# in. Replacing a stub with a real implementation means deleting that one
-# line and writing the body. Every stub's docstring states its RESPONSIBILITY
-# (what to read/write/decide) rather than implementing it, and every
-# state/trigger/guard named in fsm_state_chains gets exactly the hooks it
-# needs — no more, no less. Copy this shape; do not copy the domain (permits).
-# Swap in the real case name, states, triggers, assets, and responsibility
-# text gathered from the developer's interview answers.
-#
-# Lifecycle: see the fsm_state_chains declaration below — with three or more
-# chains, prefer the triple-quoted multiline form (one chain per line, `%%`
-# comments), which reads as its own diagram. Grammar is in
-# references/dsl_and_hooks.md. Default intake shape (SKILL.md Step 2 /
-# pattern 0): inert `new` entered from the [*] boundary, plus a manual
-# add_attachments trigger carrying filepath(s) in kwargs — not file copy
-# inside create_case_in_folder.
+# WORKED EXAMPLE — fictitious "permits" domain. Imitate this file's SHAPE only
+# (docstring roles, ClassVar trust map, stub style). Do not copy the permit
+# story into a real case. Real module docstrings are written from the interview.
+# Stub convention: references/dsl_and_hooks.md. Output examples:
+# references/generated_output_examples.md.
+
+"""Permit application lifecycle for a municipal licensing desk.
+
+A resident or business submits materials for a permit; staff validate the
+packet, check eligibility rules, and either issue the permit or deny /
+abandon the request. This case type is the recurring unit of work for one
+application from intake through a terminal outcome.
+
+IMPORTANT: This module is a rough first draft. Expect substantial follow-on work
+before production use — refining data structures, implementing trigger/guard/
+assertion bodies, tuning ``fsm_state_chains``, and hardening asset contracts.
+See ``fsm_state_chains`` on the case class for the lifecycle declaration.
+"""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, ClassVar, Mapping
 
 from pydantic import BaseModel
 
@@ -35,47 +32,52 @@ from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
 # ---------------------------------------------------------------------------
-# Data contracts — one FileMappedPydanticMixin per asset_aliases entry below.
-# Fields are placeholders: declare the shape the developer described, nothing
-# more. These are declarations, not logic, so they get no _not_implemented()
-# call — there is no behavior here to defer.
+# Data contracts — one FileMappedPydanticMixin (or Path) per asset alias.
 # ---------------------------------------------------------------------------
 
+
 class ApplicationData(BaseModel, FileMappedPydanticMixin):
-    """TODO: fields describing the incoming application itself."""
+    """Incoming application packet for this permit request.
+
+    TODO: replace this placeholder attribute layout with the real application
+    fields gathered in the interview.
+    """
+
     applicant_name: str = ""
-    # TODO: remaining fields from the developer's data-contract answers
 
 
 class EligibilityAssessment(BaseModel, FileMappedPydanticMixin):
-    """TODO: fields describing the outcome of check_eligibility."""
+    """Outcome of the eligibility check for this application.
+
+    TODO: replace this placeholder attribute layout with the real assessment
+    fields the downstream edges and assertions need.
+    """
+
     is_eligible: bool = False
-    # TODO: remaining fields
-
-
-NEEDS_APPLICATION = {
-    "submitted", "validated", "screened", "awaiting_review",
-    "approved", "issued", "denied",
-}
-NEEDS_ELIGIBILITY = {"screened", "awaiting_review", "approved", "issued"}
-# supporting_docs become trustworthy once intake has run (not in inert `new`)
-NEEDS_SUPPORTING_DOCS = {
-    "attachments_added", "submitted", "validated", "screened", "awaiting_review",
-}
 
 
 @case_type_registry.register
 class PermitApplicationCase(FolderBackedCase):
-    """One permit application, from submission to issue/denial/abandonment.
-
-    TODO: replace with the real one-paragraph description of the recurring
-    unit of work this case type models (the answer to interview step 1).
-    """
+    """One permit application, from submission to issue/denial/abandonment."""
 
     # =======================================================================
-    # Declarations — see references/dsl_and_hooks.md for the DSL grammar and
-    # AssetSpec field meanings.
+    # Declarations
     # =======================================================================
+
+    # States in which each asset alias is considered trustworthy / complete.
+    asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({
+        "application": frozenset({
+            "submitted", "validated", "screened", "awaiting_review",
+            "approved", "issued", "denied",
+        }),
+        "eligibility": frozenset({
+            "screened", "awaiting_review", "approved", "issued",
+        }),
+        "supporting_docs": frozenset({
+            "attachments_added", "submitted", "validated", "screened",
+            "awaiting_review",
+        }),
+    })
 
     fsm_state_chains = """
         %% Intake: inert initial state, manual attach (kwargs paths), then the flow.
@@ -96,44 +98,45 @@ class PermitApplicationCase(FolderBackedCase):
     """
 
     asset_aliases = [
-        AssetSpec(alias="application", relative_path="application.yaml",
-                  loader=ApplicationData, states=NEEDS_APPLICATION, keep=True),
-        AssetSpec(alias="eligibility", relative_path="eligibility.yaml",
-                  loader=EligibilityAssessment, states=NEEDS_ELIGIBILITY, keep=True),
-        AssetSpec(alias="supporting_docs", relative_path="documents/*",
-                  loader=Path, states=NEEDS_SUPPORTING_DOCS, many=True),
+        AssetSpec(
+            alias="application",
+            relative_path="application.yaml",
+            loader=ApplicationData,
+            states=asset_trust_states["application"],
+            keep=True,
+        ),
+        AssetSpec(
+            alias="eligibility",
+            relative_path="eligibility.yaml",
+            loader=EligibilityAssessment,
+            states=asset_trust_states["eligibility"],
+            keep=True,
+        ),
+        AssetSpec(
+            alias="supporting_docs",
+            relative_path="documents/*",
+            loader=Path,
+            states=asset_trust_states["supporting_docs"],
+            many=True,
+        ),
     ]
 
     fsm_trigger_chokes = {
-        # TODO: name a resource only for triggers whose perform_ work actually
-        # contends for a capacity-constrained shared dependency; leave the rest
-        # unlisted (many cases need none). Prefer one resource per trigger --
-        # chokes are semaphores, so stacking several onto one trigger slows the
-        # lifecycle. See references/dsl_and_hooks.md on trigger chokes.
-        "validate_documents": {"cpu"},   # local OCR / vector embedding
+        # Name a resource only for triggers whose perform_ contends for a
+        # capacity-constrained shared dependency; leave the rest unlisted.
+        "validate_documents": {"cpu"},
         "check_eligibility": {"llm"},
-        "issue_permit": {"api"},         # bandwidth-limited external API
+        "issue_permit": {"api"},
     }
 
-    # =======================================================================
-    # Skeleton scaffolding — DELETE this method once every stub below has a
-    # real implementation and no longer calls it. It exists only so the
-    # lifecycle can be driven/simulated (case_advance() in a test, say)
-    # before any hook is filled in: instead of a hard NotImplementedError
-    # crash, it logs a WARNING to this case's own log (naming the caller via
-    # sys._getframe so stubs need not hardcode their method name) and returns
-    # the caller's stubbed-in default (`retval`). Each stub's entire body is
-    # one `return self._not_implemented(...)` line, so implementing a method
-    # for real means deleting that single line and writing the body.
-    # =======================================================================
-
     def _not_implemented(self, retval: Any = None) -> Any:
+        """Scaffolding helper for stub hooks; remove with the stubs that call it."""
         caller = sys._getframe(1).f_code.co_qualname
         self.log.warning("STUB not implemented: %s", caller)
         return retval
 
     # =======================================================================
-    # perform_<trigger> — the work each automated/manual edge does.
+    # perform_<trigger>
     # =======================================================================
 
     async def perform_add_attachments(self, tctx) -> None:
@@ -186,7 +189,7 @@ class PermitApplicationCase(FolderBackedCase):
         return self._not_implemented(None)
 
     # =======================================================================
-    # guard_<guard> — fast, idempotent, side-effect-free data conditions.
+    # guard_<guard>
     # =======================================================================
 
     async def guard_eligible(self, tctx) -> bool:
@@ -210,16 +213,11 @@ class PermitApplicationCase(FolderBackedCase):
         return self._not_implemented(None)
 
     # =======================================================================
-    # case_assert_<state>_<slug> — one per state with an expected shape.
-    # See references/dsl_and_hooks.md: falsy = pass, message string = fail.
+    # case_assert_<state>_<slug>
     # =======================================================================
 
     def case_assert_new_is_empty(self, ltx) -> None | str:
-        """TODO(responsibility): inert parking state — no supporting_docs yet.
-        Stubbed default is None (pass) rather than a failure message, so a
-        known-unimplemented check doesn't spam CASE_ASSERT_FAILED events —
-        the WARNING in the case log is the visible signal instead.
-        """
+        """TODO(responsibility): inert parking state — no supporting_docs yet."""
         return self._not_implemented(None)
 
     def case_assert_attachments_added_has_docs(self, ltx) -> None | str:
@@ -255,15 +253,10 @@ class PermitApplicationCase(FolderBackedCase):
     # cancelled if those states have an expected shape worth checking; a
     # state with nothing to assert can legitimately have none.
 
-    # =======================================================================
-    # Termination — runtime-judged retention (declare always-keep assets via
-    # AssetSpec(keep=True) instead; use this only for a case-by-case decision).
-    # =======================================================================
-
     def on_terminating(self) -> None:
         """TODO(responsibility): name any deliverables worth keeping past
         purge that weren't already declared `keep=True` above, via
-        `self.case_keep_files(...)`. Delete this method (and the call below)
-        if declared AssetSpec.keep flags already cover everything.
+        `self.case_keep_files(...)`. Delete this method if declared
+        AssetSpec.keep flags already cover everything.
         """
         return self._not_implemented(None)
