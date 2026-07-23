@@ -1,21 +1,24 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Case documentation generator: static-analysis Markdown docs for a
-FolderBackedCase subclass.
+"""Case briefing generator: static-analysis Markdown for a FolderBackedCase
+subclass.
 
-Spec: volatile/specs/2026-07-18-case-doc-gen-mini-spec.md. Renders lifecycle
-diagram, states, triggers, guards, assertions, asset aliases, and overridden
-lifecycle hooks — all pulled from the CLASS alone (``case_type_spec()``,
-``discover_class_assertions()``, and hook docstrings). No case folder or live
-instance is ever required; this is a pure static-analysis tool, not a status
-report (see the mini-spec's non-goals).
+A **case briefing** is the class-level design handoff for a case type —
+lifecycle diagram, states, triggers, guards, assertions, asset aliases, and
+overridden lifecycle hooks — assembled from the CLASS alone
+(``case_type_spec()``, ``discover_class_assertions()``, and hook docstrings).
+No case folder or live instance is ever required; this is a pure
+static-analysis tool, not a status report (see the mini-spec's non-goals).
+
+Spec: volatile/specs/2026-07-18-case-doc-gen-mini-spec.md.
 
 Two-stage design, mirroring ``FsmChainSpec.to_networkx()``'s own "graph now,
 format later" split:
 
   * ``collect()``   — builds a ``CaseTypeDoc`` (plain data, no formatting).
-  * ``render_markdown()`` — turns a ``CaseTypeDoc`` into a Markdown string.
+  * ``render_markdown()`` — turns a ``CaseTypeDoc`` into a case briefing
+    (Markdown string).
   * ``to_mermaid()`` — renders an ``FsmChainSpec.to_networkx()`` graph as a
     Mermaid diagram; used by ``render_markdown()`` but usable standalone.
 
@@ -91,8 +94,17 @@ class CaseDocOptions:
     include_assets: bool = True
     include_hooks: bool = True
     docstring_mode: Literal["none", "first_paragraph", "full"] = "first_paragraph"
-    diagram_style: Literal["state", "flowchart"] = "state"
+    # flowchart: thick ``==>`` for manual edges, plain labels (docs default).
+    # state: stateDiagram-v2 (no thick arrows — see ``to_mermaid``); kept for
+    # DSL round-trip and ``--diagram-style state``.
+    diagram_style: Literal["state", "flowchart"] = "flowchart"
     wildcard_pseudo_state: bool = False
+    # Diagram clarity: ``to_networkx()`` always emits both the abstract
+    # ``* -> dest`` pending rule AND the concrete per-state fan-out
+    # (``wildcard_expanded``). Docs default to hiding the fan-out so the
+    # diagram keeps a single ``*`` hub edge; set True to draw every expanded
+    # edge too. The triggers table still lists both regardless.
+    include_wildcard_expanded_edges: bool = False
     include_implied_caps: bool = True
 
 
@@ -383,12 +395,11 @@ def _edge_label(data: dict) -> str:
     # the Markdown triggers table still shows them); the `~<dur>` soft-timeout is
     # included only when the author annotated it.
     #
-    # POTENTIAL FUTURE ENHANCEMENT: this label ignores `wildcard_expanded` and
-    # `pure_timed_escape` -- a synthetic wildcard fan-out edge and a normal edge
-    # render identically here (the mini-spec's §5 suggested a distinct line style,
-    # e.g. dashed, for wildcard_expanded=True). Not done for v1: unclear it earns
-    # its complexity yet -- the Markdown triggers table already surfaces both via
-    # its Wildcard column, so the diagram's plain label may be enough on its own.
+    # Wildcard fan-out: by default ``to_mermaid(..., include_wildcard_expanded=False)``
+    # omits ``wildcard_expanded`` edges entirely (keeps the abstract pending
+    # ``* -> dest`` rule). When fan-out is included, expanded and ordinary edges
+    # share the same label style; the triggers table's Wildcard column is the
+    # detailed inventory.
     trigger = data.get("trigger", "")
     if data.get("soft_timeout_is_explicit") and data.get("soft_timeout_secs"):
         trigger = f"{trigger}~{_fmt_duration(data['soft_timeout_secs'])}"
@@ -418,15 +429,32 @@ def _mermaid_state_label(label: str) -> str:
     return f'"{escaped}"'
 
 
-def to_mermaid(graph: "nx.MultiDiGraph", *, style: Literal["state", "flowchart"] = "state") -> str:
+def to_mermaid(
+    graph: "nx.MultiDiGraph",
+    *,
+    style: Literal["state", "flowchart"] = "state",
+    include_wildcard_expanded: bool = False,
+) -> str:
     """Render a ``FsmChainSpec.to_networkx()`` graph as Mermaid source. Pure
     renderer over the graph — never recomputes FSM structure.
 
-    Both styles use the SAME visual vocabulary as the chain DSL itself: an auto
-    edge is a plain arrow, a manual edge is the "double-thick" spelling (the
-    flowchart's thick ``== label ==>`` arrow; the state diagram's ``: == label``
-    label marker, since stateDiagram-v2 has only one arrow), and edge labels are
-    the edge's exact DSL text (``trigger~<dur> [guard, ...]``).
+    Styles share the same label text (``trigger~<dur> [guard, ...]``) but differ
+    in how they show auto vs manual:
+
+    * **flowchart** (documentation default via ``CaseDocOptions``): auto edges
+      use plain ``-->``; manual edges use Mermaid's thick ``==>``. Labels never
+      carry a leading ``==`` — thickness is the signal.
+    * **state** (``stateDiagram-v2``): Mermaid has only one transition arrow and
+      no ``linkStyle`` for thickness, so manual edges prefix the label with the
+      DSL's ``==`` marker (``: "== approve [funded]"``). Prefer flowchart for
+      human-facing docs; keep state when you need the DSL round-trip below.
+
+    Wildcard edges: ``to_networkx()`` emits both the abstract pending rule
+    (``* -> dest``, ``wildcard_pending``) and every concrete fan-out edge
+    (``wildcard_expanded``). ``include_wildcard_expanded`` defaults to False so
+    diagrams keep a single ``*`` hub transition; set True to also draw the
+    per-state fan-out (or hub-and-spoke spokes when the graph was built with
+    ``wildcard_pseudo_state=True``).
 
     State-style transition labels are always double-quoted so Mermaid-hostile
     characters (``[]``, ``>``, …) render correctly. Flowchart style already
@@ -440,11 +468,25 @@ def to_mermaid(graph: "nx.MultiDiGraph", *, style: Literal["state", "flowchart"]
     declares no wildcard chains (a wildcard renders via a synthetic
     ``ANY_STATE`` node, which parses as an ordinary state)."""
     if style == "flowchart":
-        return _to_mermaid_flowchart(graph)
-    return _to_mermaid_state(graph)
+        return _to_mermaid_flowchart(
+            graph, include_wildcard_expanded=include_wildcard_expanded,
+        )
+    return _to_mermaid_state(
+        graph, include_wildcard_expanded=include_wildcard_expanded,
+    )
 
 
-def _to_mermaid_state(graph: "nx.MultiDiGraph") -> str:
+def _iter_mermaid_edges(graph: "nx.MultiDiGraph", *, include_wildcard_expanded: bool):
+    """Yield ``(u, v, data)`` for edges that should appear in a Mermaid diagram."""
+    for u, v, data in graph.edges(data=True):
+        if data.get("wildcard_expanded") and not include_wildcard_expanded:
+            continue
+        yield u, v, data
+
+
+def _to_mermaid_state(
+    graph: "nx.MultiDiGraph", *, include_wildcard_expanded: bool = False,
+) -> str:
     """Render as ``stateDiagram-v2`` with quoted colon labels (Mermaid-safe)."""
     lines = ["stateDiagram-v2"]
     primary_chain = graph.graph.get("primary_chain")
@@ -458,7 +500,9 @@ def _to_mermaid_state(graph: "nx.MultiDiGraph") -> str:
     for node, data in graph.nodes(data=True):
         if data.get("terminal"):
             lines.append(f"    {_mermaid_id(node)} --> [*]")
-    for u, v, data in graph.edges(data=True):
+    for u, v, data in _iter_mermaid_edges(
+        graph, include_wildcard_expanded=include_wildcard_expanded,
+    ):
         # Manual edges carry the DSL's `==` label marker — stateDiagram-v2 has no
         # thick arrow, so the marker rides inside the label, keeping the line both
         # valid Mermaid AND valid chain DSL (see to_mermaid round-trip note).
@@ -471,11 +515,13 @@ def _to_mermaid_state(graph: "nx.MultiDiGraph") -> str:
     return "\n".join(lines)
 
 
-def _to_mermaid_flowchart(graph: "nx.MultiDiGraph") -> str:
+def _to_mermaid_flowchart(
+    graph: "nx.MultiDiGraph", *, include_wildcard_expanded: bool = False,
+) -> str:
     # POTENTIAL FUTURE ENHANCEMENT: unlike _to_mermaid_state, this renderer doesn't
     # emit a `%% primary chain: ...` title comment from graph.graph["primary_chain"].
-    # Left out for v1 for the same reason as the wildcard/timed-escape styling
-    # above -- not yet clear it's worth the asymmetry with the state-style renderer.
+    # Left out for v1 for the same reason as timed-escape styling — not yet clear
+    # it's worth the asymmetry with the state-style renderer.
     lines = [
         "flowchart TD",
         "    classDef initialState fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;",
@@ -492,7 +538,9 @@ def _to_mermaid_flowchart(graph: "nx.MultiDiGraph") -> str:
             initials.append(node_id)
         if data.get("terminal"):
             terminals.append(node_id)
-    for u, v, data in graph.edges(data=True):
+    for u, v, data in _iter_mermaid_edges(
+        graph, include_wildcard_expanded=include_wildcard_expanded,
+    ):
         # Same glyphs as the chain DSL: `-->` auto, thick `==>` manual. Labels are
         # quoted because DSL guard brackets are Mermaid shape syntax when bare.
         arrow = "-->" if data.get("auto") else "==>"
@@ -545,7 +593,7 @@ def _fmt_state_hook_cell(kind: str, state: str, doc: Optional[str]) -> str:
 
 def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOptions()) -> str:
     stamp = (
-        f"<!-- Generated by {_GENERATOR_TOOL} from {doc.source} "
+        f"<!-- Case briefing generated by {_GENERATOR_TOOL} from {doc.source} "
         f"on {datetime.now(timezone.utc).isoformat(timespec='seconds')} -->"
     )
     parts: list[str] = [stamp, f"# {doc.case_cls_name}"]
@@ -553,7 +601,11 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
         parts.append(doc.class_doc)
 
     if options.include_diagram:
-        mermaid = to_mermaid(doc.fsm_graph, style=options.diagram_style)
+        mermaid = to_mermaid(
+            doc.fsm_graph,
+            style=options.diagram_style,
+            include_wildcard_expanded=options.include_wildcard_expanded_edges,
+        )
         parts.append(f"## Lifecycle\n\n```mermaid\n{mermaid}\n```")
 
     if options.include_states_table and doc.states:
@@ -664,7 +716,7 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
 
 
 def generate_case_docs(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = CaseDocOptions()) -> str:
-    """``collect()`` + ``render_markdown()`` in one call — the library entry point."""
+    """Build a case briefing for ``case_cls`` — ``collect()`` + ``render_markdown()``."""
     return render_markdown(collect(case_cls, options=options), options=options)
 
 
@@ -675,21 +727,59 @@ def generate_case_docs(case_cls: "type[FolderBackedCase]", *, options: CaseDocOp
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m totodev_pub.folder_backed_case_support.case_doc",
-        description="Render Markdown documentation for a FolderBackedCase subclass.",
+        description=(
+            "Render a case briefing (class-level design handoff) for a "
+            "FolderBackedCase subclass. Section flags below omit parts of "
+            "the briefing; they do not change its meaning."
+        ),
     )
     parser.add_argument("target", help="dotted module path and class name, e.g. mypackage.cases:MyCase")
-    parser.add_argument("--no-diagram", dest="include_diagram", action="store_false", default=True)
-    parser.add_argument("--no-states", dest="include_states_table", action="store_false", default=True)
-    parser.add_argument("--no-triggers", dest="include_triggers_table", action="store_false", default=True)
-    parser.add_argument("--no-guards", dest="include_guards_table", action="store_false", default=True)
-    parser.add_argument("--no-assertions", dest="include_assertions", action="store_false", default=True)
-    parser.add_argument("--no-assets", dest="include_assets", action="store_false", default=True)
-    parser.add_argument("--no-hooks", dest="include_hooks", action="store_false", default=True)
+    parser.add_argument(
+        "--no-diagram", dest="include_diagram", action="store_false", default=True,
+        help="Omit the lifecycle diagram from the case briefing.",
+    )
+    parser.add_argument(
+        "--no-states", dest="include_states_table", action="store_false", default=True,
+        help="Omit the states table from the case briefing.",
+    )
+    parser.add_argument(
+        "--no-triggers", dest="include_triggers_table", action="store_false", default=True,
+        help="Omit the triggers section from the case briefing.",
+    )
+    parser.add_argument(
+        "--no-guards", dest="include_guards_table", action="store_false", default=True,
+        help="Omit the guards section from the case briefing.",
+    )
+    parser.add_argument(
+        "--no-assertions", dest="include_assertions", action="store_false", default=True,
+        help="Omit assertions from the case briefing.",
+    )
+    parser.add_argument(
+        "--no-assets", dest="include_assets", action="store_false", default=True,
+        help="Omit asset aliases from the case briefing.",
+    )
+    parser.add_argument(
+        "--no-hooks", dest="include_hooks", action="store_false", default=True,
+        help="Omit overridden lifecycle hooks from the case briefing.",
+    )
     parser.add_argument(
         "--docstrings", choices=["none", "first_paragraph", "full"], default="first_paragraph",
     )
-    parser.add_argument("--diagram-style", choices=["state", "flowchart"], default="state")
+    parser.add_argument(
+        "--diagram-style", choices=["state", "flowchart"], default="flowchart",
+        help="Mermaid style for the lifecycle diagram (default: flowchart — "
+             "thick ==> for manual edges). Use 'state' for stateDiagram-v2 / "
+             "DSL round-trip (manual edges marked with '==' in the label).",
+    )
     parser.add_argument("--wildcard-pseudo-state", action="store_true", default=False)
+    parser.add_argument(
+        "--wildcard-fanout",
+        dest="include_wildcard_expanded_edges",
+        action="store_true",
+        default=False,
+        help="Include concrete per-state wildcard fan-out edges in the Mermaid "
+             "diagram (default: only the abstract '* -> dest' pending rule).",
+    )
     parser.add_argument(
         "--no-implied-caps", dest="include_implied_caps", action="store_false", default=True,
     )
@@ -730,6 +820,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         docstring_mode=args.docstrings,
         diagram_style=args.diagram_style,
         wildcard_pseudo_state=args.wildcard_pseudo_state,
+        include_wildcard_expanded_edges=args.include_wildcard_expanded_edges,
         include_implied_caps=args.include_implied_caps,
     )
     print(generate_case_docs(case_cls, options=options))

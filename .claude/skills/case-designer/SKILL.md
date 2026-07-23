@@ -49,7 +49,7 @@ instead of linking out.
 8. **Lint the FSM and check coverage** — run the chain-DSL CLI over the final
    declaration for advisory warnings, then the checklist, before handing it
    back.
-9. **Offer a documentation report** — ask if the developer wants a rendered
+9. **Offer a case briefing** — ask if the developer wants a rendered
    summary of the finished class (lifecycle diagram, states/triggers/guards/
    assertions/assets tables) to sanity-check the whole design at a glance.
 
@@ -343,15 +343,19 @@ for this case (e.g. a deliberately fully-automated pipeline). Then confirm:
 - [ ] The chain-DSL CLI (above) reports no unaddressed lint warnings — or each
       remaining one is acknowledged as intended for this case.
 
-## Step 9 — Offer a documentation report
+## Step 9 — Offer a case briefing
 
 Once the class binds cleanly (Step 6) and the coverage checklist (Step 8) is
-satisfied, **ask** the developer whether they'd like a rendered documentation
-report for the class — don't generate it unprompted; it's a few extra seconds
-of output some developers won't want.
+satisfied, **ask** the developer whether they'd like a **case briefing** for
+the class — don't generate it unprompted; it's a few extra seconds of output
+some developers won't want.
 
-If they say yes, use the case documentation generator
-(`totodev_pub.folder_backed_case_support.case_doc`):
+A case briefing is the class-level design handoff produced by
+`totodev_pub.folder_backed_case_support.case_doc`: lifecycle diagram plus
+states/triggers/guards/assertions/asset-alias tables. It is *not* a live
+status report (no folder, no current state).
+
+If they say yes, generate it:
 
 ```python
 from totodev_pub.folder_backed_case_support.case_doc import generate_case_docs
@@ -364,14 +368,12 @@ or, equivalently, from the CLI:
 python -m totodev_pub.folder_backed_case_support.case_doc <module path>:<GeneratedClass>
 ```
 
-This is class-level only, like Step 6's import check — no case folder is
-created. It renders the lifecycle diagram plus states/triggers/guards/
-assertions/asset-alias tables, pulling the first paragraph of every docstring
-this skill just wrote. It doubles as a last sanity check in its own right: a
-trigger, guard, or state whose docstring came out thin or missing stands out
-immediately in the rendered tables — worth fixing before handing the file
-back if so.
+Like Step 6's import check, this touches the class only — no case folder is
+created. It pulls the first paragraph of every docstring this skill just
+wrote, and doubles as a last sanity check: a trigger, guard, or state whose
+docstring came out thin or missing stands out immediately in the rendered
+tables — worth fixing before handing the file back if so.
 
-Show the rendered Markdown to the developer directly (or save it alongside
-the generated class if they'd like a copy) — don't just report that it
+Show the case briefing to the developer directly (or save it alongside the
+generated class if they'd like a copy) — don't just report that it
 succeeded.
