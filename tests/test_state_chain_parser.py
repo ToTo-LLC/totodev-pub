@@ -978,6 +978,23 @@ def test_colon_form_label_marker_spells_manual_in_valid_mermaid():
     assert spec.transitions[0]["trigger"] == "stop"
 
 
+def test_colon_form_accepts_quoted_label():
+    """Optional quotes around colon labels (Mermaid-safe generated diagrams)."""
+    auto = StateChainParser.parse([
+        "[*] --> a", 'a --> b : "retry [@DWELL>14d]"', "b --> [*]",
+    ])
+    t = auto.transitions[0]
+    assert t["trigger"] == "retry"
+    assert t["_fact_guards"] == [{"name": "DWELL", "op": ">", "operand": 14 * 86400.0}]
+    assert ("a", "retry") in auto.auto_edges
+
+    manual = StateChainParser.parse([
+        "[*] --> a", 'a --> b : "== stop"', "b --> [*]",
+    ])
+    assert manual.transitions[0]["trigger"] == "stop"
+    assert ("a", "stop") not in manual.auto_edges
+
+
 def test_colon_form_carries_guards_and_timeout():
     spec = StateChainParser.parse([
         "[*] --> a", "a --> b : retry~3m [funded, @FAIL<3]", "b --> [*]",
@@ -1183,7 +1200,7 @@ def test_cli_render_state_output_is_valid_dsl(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert out.startswith("stateDiagram-v2")
-    assert "a --> b : == stop" in out
+    assert 'a --> b : "== stop"' in out
     # round-trip: the rendered diagram is itself a parseable declaration
     rt = StateChainParser.parse(out).validate()
     assert rt.terminal_states == {"b"}

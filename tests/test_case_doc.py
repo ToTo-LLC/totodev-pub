@@ -306,11 +306,13 @@ def test_cli_main_rejects_non_case_class(monkeypatch, capsys):
 
 def test_to_mermaid_state_marks_manual_edges_with_label_marker():
     """stateDiagram-v2 has no thick arrow, so manual edges carry the DSL's '=='
-    label marker — keeping the line valid Mermaid AND valid chain DSL."""
+    label marker — keeping the line valid Mermaid AND valid chain DSL.
+    Labels are always quoted so Mermaid-hostile guard characters render."""
     doc = collect(SampleCase)
     mermaid = to_mermaid(doc.fsm_graph)
-    assert "reviewing --> done : == approve [funded]" in mermaid
-    assert "new --> reviewing : intake" in mermaid          # auto: plain label
+    assert 'reviewing --> done : "== approve [funded]"' in mermaid
+    assert 'new --> reviewing : "intake"' in mermaid          # auto: plain label, quoted
+    assert 'reviewing --> expired : "expire [@DWELL>=1h]"' in mermaid
 
 
 def test_state_diagram_round_trips_through_the_parser():
@@ -352,3 +354,42 @@ def test_state_diagram_round_trips_through_the_parser():
         }
 
     assert canon(rt) == canon(spec)
+
+
+# ---------------------------------------------------------------------------
+# DWELL duration summary formatting (_fmt_dwell_duration)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "secs, expected",
+    [
+        (14 * 86400, "14d"),
+        (14 * 86400 + 20, "14d"),          # slightly over → still days
+        (14 * 86400 - 20, "14d"),          # slightly under (bidirectional)
+        (25 * 3600, "25h"),
+        (90 * 60, "90m"),                  # not near a whole hour
+        (1.5 * 86400, "36h"),              # half-day → hours, not days
+        (59, "1m"),                        # > 0.95 min → nearest minute
+        (56, "56s"),
+        (3600, "1h"),
+        (86400, "1d"),
+    ],
+)
+def test_fmt_dwell_duration_summary_units(secs, expected):
+    assert case_doc._fmt_dwell_duration(secs) == expected
+
+
+def test_fmt_fact_guard_dwell_uses_summary_units():
+    assert case_doc._fmt_fact_guard(
+        {"name": "DWELL", "op": ">", "operand": 14 * 86400.0}
+    ) == "@DWELL>14d"
+    assert case_doc._fmt_fact_guard(
+        {"name": "DWELL", "op": ">=", "operand": 3600.0}
+    ) == "@DWELL>=1h"
+
+
+def test_fmt_duration_soft_timeout_stays_exact():
+    """Soft-timeout labels keep exact divisibility (round-trip), not summary rounding."""
+    assert case_doc._fmt_duration(120) == "2m"
+    assert case_doc._fmt_duration(90) == "90s"  # 90 does not divide cleanly into minutes
+    assert case_doc._fmt_duration(14 * 86400 - 20) == f"{14 * 86400 - 20:g}s"

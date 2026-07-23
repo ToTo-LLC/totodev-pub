@@ -313,22 +313,58 @@ def collect(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = Cas
 # Mermaid diagram rendering — consumes an already-built to_networkx() graph
 # ---------------------------------------------------------------------------
 
+_DAY_SECS = 86400.0
+_HOUR_SECS = 3600.0
+_MINUTE_SECS = 60.0
+# Summary-level DWELL labels: promote to a coarser unit only when within this
+# many seconds of an exact multiple (checked both above and below the multiple).
+_DWELL_UNIT_TOLERANCE_SECS = 30.0
+
+
 def _fmt_duration(secs: float) -> str:
     """Format seconds as the DSL's `<dur>` token, choosing the largest unit that
     divides cleanly (14d, 1.5m, 90s, ...) so the output parses back to the same
-    value."""
-    for unit, size in (("d", 86400.0), ("h", 3600.0), ("m", 60.0)):
+    value. Used for soft-timeout suffixes where round-trip matters."""
+    for unit, size in (("d", _DAY_SECS), ("h", _HOUR_SECS), ("m", _MINUTE_SECS)):
         if secs >= size and secs % size == 0:
             return f"{secs / size:g}{unit}"
     return f"{secs:g}s"
 
 
+def _near_unit_multiple(secs: float, unit_secs: float) -> bool:
+    """True when ``secs`` is within tolerance of a whole number of ``unit_secs``."""
+    rem = secs % unit_secs
+    return min(rem, unit_secs - rem) < _DWELL_UNIT_TOLERANCE_SECS
+
+
+def _fmt_dwell_duration(secs: float) -> str:
+    """Format a dwell operand (always seconds) for summary diagrams / tables.
+
+    Prefer days / hours / minutes when the value is near a whole unit; otherwise
+    keep seconds. Thresholds are deliberately loose — these labels are for
+    Mermaid/tables, not exact runtime math. Soft-timeout suffixes keep using
+    :func:`_fmt_duration` (exact divisibility) so they round-trip through the
+    DSL parser.
+    """
+    secs = abs(float(secs))
+
+    if secs > 23.9 * _HOUR_SECS and _near_unit_multiple(secs, _DAY_SECS):
+        return f"{round(secs / _DAY_SECS):g}d"
+    if secs > 0.95 * _HOUR_SECS and _near_unit_multiple(secs, _HOUR_SECS):
+        return f"{round(secs / _HOUR_SECS):g}h"
+    if secs > 0.95 * _MINUTE_SECS:
+        return f"{round(secs / _MINUTE_SECS):g}m"
+    return f"{secs:g}s"
+
+
 def _fmt_fact_guard(fg: dict) -> str:
-    """Format a factual guard exactly as the DSL spells it (`@DWELL>14d`,
-    `@FAIL<3`), so diagram labels are valid DSL guard items."""
+    """Format a factual guard for diagram/table labels (`@DWELL>14d`, `@FAIL<3`).
+
+    DWELL operands are summary-formatted via :func:`_fmt_dwell_duration`.
+    """
     name, op, operand = fg["name"], fg["op"], fg["operand"]
     if name == "DWELL":
-        return f"@DWELL{op}{_fmt_duration(operand)}"
+        return f"@DWELL{op}{_fmt_dwell_duration(operand)}"
     return f"@{name}{op}{operand}"
 
 
@@ -363,6 +399,18 @@ def _mermaid_id(node: str) -> str:
     return _MERMAID_WILDCARD_ID if node == _WILDCARD_SENTINEL else node
 
 
+def _mermaid_state_label(label: str) -> str:
+    """Quote a stateDiagram-v2 transition label so Mermaid treats it as opaque text.
+
+    Characters like ``[``, ``]``, and ``>`` (common in ``@DWELL>14d`` guard lists)
+    break bare ``: label`` syntax. Always quoting keeps diagrams renderable while
+    preserving the same DSL text inside the quotes for round-trip through
+    :class:`StateChainParser` (which strips optional surrounding quotes).
+    """
+    escaped = label.replace('"', "#quot;")
+    return f'"{escaped}"'
+
+
 def to_mermaid(graph: "nx.MultiDiGraph", *, style: Literal["state", "flowchart"] = "state") -> str:
     """Render a ``FsmChainSpec.to_networkx()`` graph as Mermaid source. Pure
     renderer over the graph — never recomputes FSM structure.
@@ -373,19 +421,24 @@ def to_mermaid(graph: "nx.MultiDiGraph", *, style: Literal["state", "flowchart"]
     label marker, since stateDiagram-v2 has only one arrow), and edge labels are
     the edge's exact DSL text (``trigger~<dur> [guard, ...]``).
 
+    State-style transition labels are always double-quoted so Mermaid-hostile
+    characters (``[]``, ``>``, …) render correctly. Flowchart style already
+    quotes labels via ``|"…"|.``
+
     ROUND-TRIP: the ``state`` style's output is itself a valid
-    ``fsm_state_chains`` declaration — ``StateChainParser.parse()`` reproduces
-    the spec it was rendered from, provided the graph was built with
-    ``include_implied_caps=False`` (so no compiler-injected defaults masquerade
-    as declarations) and the spec declares no wildcard chains (a wildcard
-    renders via a synthetic ``ANY_STATE`` node, which parses as an ordinary
-    state)."""
+    ``fsm_state_chains`` declaration — ``StateChainParser.parse()`` strips the
+    optional quotes on colon labels and reproduces the spec it was rendered
+    from, provided the graph was built with ``include_implied_caps=False`` (so
+    no compiler-injected defaults masquerade as declarations) and the spec
+    declares no wildcard chains (a wildcard renders via a synthetic
+    ``ANY_STATE`` node, which parses as an ordinary state)."""
     if style == "flowchart":
         return _to_mermaid_flowchart(graph)
     return _to_mermaid_state(graph)
 
 
 def _to_mermaid_state(graph: "nx.MultiDiGraph") -> str:
+    """Render as ``stateDiagram-v2`` with quoted colon labels (Mermaid-safe)."""
     lines = ["stateDiagram-v2"]
     primary_chain = graph.graph.get("primary_chain")
     if primary_chain:
@@ -405,7 +458,9 @@ def _to_mermaid_state(graph: "nx.MultiDiGraph") -> str:
         label = _edge_label(data)
         if not data.get("auto"):
             label = f"== {label}"
-        lines.append(f"    {_mermaid_id(u)} --> {_mermaid_id(v)} : {label}")
+        lines.append(
+            f"    {_mermaid_id(u)} --> {_mermaid_id(v)} : {_mermaid_state_label(label)}"
+        )
     return "\n".join(lines)
 
 

@@ -57,10 +57,14 @@ A line may instead declare ONE edge with its label after a colon:
     A --> B : == label         (also manual: the leading `==` label marker is how a
                                 manual edge is spelled inside a plain `-->` line,
                                 keeping the line valid Mermaid stateDiagram-v2)
+    A --> B : "label"          (optional quotes — ignored by the parser; used so
+                                Mermaid can render hostile characters like
+                                `[@DWELL>14d]` in generated diagrams)
 
 Both spellings of manual are equivalent; generated diagrams emit the label-marker
-form. The colon form is one edge per line — use inline connectors for multi-hop
-chains. `[*]` boundary hops take no label and therefore have no colon form.
+form with quotes around the whole label. The colon form is one edge per line —
+use inline connectors for multi-hop chains. `[*]` boundary hops take no label and
+therefore have no colon form.
 
 Labels  `trigger[~<dur>] [guard, ...]`
 ----------
@@ -1359,6 +1363,11 @@ class StateChainParser:
             )
         src_tok, dest_tok = m.group("src"), m.group("dest")
         label = m.group("label").strip()
+        # Optional Mermaid quotes around the label (generated diagrams always
+        # quote so characters like `[` / `>` in guard lists render). Strip one
+        # layer before interpreting the `==` manual marker.
+        if len(label) >= 2 and label[0] == '"' and label[-1] == '"':
+            label = label[1:-1]
         manual = m.group("arrow") == "==>"
         if label.startswith("=="):
             manual = True
