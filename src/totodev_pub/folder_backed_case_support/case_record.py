@@ -49,7 +49,9 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     the alias loads as a list via case_load_assets>}.
 
     `fsm_state_chains` mirrors the concrete class's `fsm_state_chains` DSL declaration on
-    disk (the raw chain strings, verbatim). It is stamped ONCE at create (and re-stamped
+    disk, in canonical one-chain-per-line form (`StateChainParser.normalize_chain_lines`:
+    comments and Mermaid boilerplate stripped, whether the class declared a list or a
+    multiline string). It is stamped ONCE at create (and re-stamped
     on reclassify, alongside `asset_aliases`); no attempt is made to detect or reconcile
     later edits to the class. It lets a reader inspect a case's declared lifecycle — and
     per-alias state validity via `asset_aliases` — WITHOUT importing the concrete case
@@ -64,7 +66,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     terminal: Optional[datetime.datetime] = None  # stamped once on terminal entry
     terminal_state: Optional[str] = None  # the terminal FSM state name, stamped with `terminal`
     asset_aliases: dict[str, dict[str, Any]]  # alias -> {path, loader, states?, many?}
-    fsm_state_chains: list[str]        # the concrete class's raw state-chain DSL, verbatim
+    fsm_state_chains: list[str]        # the class's state-chain DSL, one chain per line
 
     @field_validator("asset_aliases")
     @classmethod

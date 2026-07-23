@@ -30,7 +30,7 @@ def _isolate_case_registry():
 class TicketCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^open--work-->done^"]
+    fsm_state_chains = ["[*] --> open -- work --> done --> [*]"]
 
     async def perform_work(self, tctx):
         pass
@@ -39,7 +39,7 @@ class TicketCase(FolderBackedCase):
 class TerminalCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^open--finish-->done^"]
+    fsm_state_chains = ["[*] --> open -- finish --> done --> [*]"]
 
     async def perform_finish(self, tctx):
         pass
@@ -48,7 +48,7 @@ class TerminalCase(FolderBackedCase):
 class ManualCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^waiting==push-->done^"]
+    fsm_state_chains = ["[*] --> waiting == push ==> done --> [*]"]
 
 
 def run(coro):

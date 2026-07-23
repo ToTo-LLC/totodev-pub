@@ -36,8 +36,8 @@ class WbTicketCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = [
-        "^created--triage-->triaged--price-->priced==approve-->approved^",
-        "priced==reject-->rejected^",
+        "[*] --> created -- triage --> triaged -- price --> priced == approve ==> approved --> [*]",
+        "priced == reject ==> rejected --> [*]",
     ]
 
     async def perform_triage(self, tctx):
@@ -57,7 +57,7 @@ class WbTicketCase(FolderBackedCase):
 class WbGuardedCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {"go": frozenset({"slot_a"})}
-    fsm_state_chains = ["^start--ready#go-->done^"]
+    fsm_state_chains = ["[*] --> start -- go [ready] --> done --> [*]"]
 
     async def guard_ready(self, tctx):
         return True
@@ -507,7 +507,7 @@ def test_class_index_case_modules(tmp_path, monkeypatch):
             class IndexedMiniCase(FolderBackedCase):
                 asset_aliases = []
                 fsm_trigger_chokes = {}
-                fsm_state_chains = ["^a--go-->b^"]
+                fsm_state_chains = ["[*] --> a -- go --> b --> [*]"]
                 async def perform_go(self, tctx):
                     pass
         """),
@@ -564,7 +564,7 @@ async def test_run_stop_on_problems(tmp_path):
     class ProblemCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^a--go-->b--go2-->c^"]
+        fsm_state_chains = ["[*] --> a -- go --> b -- go2 --> c --> [*]"]
 
         async def perform_go(self, tctx):
             self.case_emit_alert_event("boom")

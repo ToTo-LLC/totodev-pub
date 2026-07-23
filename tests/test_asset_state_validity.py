@@ -27,7 +27,7 @@ class ChatLog(BaseModel, FileMappedPydanticMixin):
 
 
 class TicketCase(FolderBackedCase):
-    fsm_state_chains = ["^new==open_ticket-->open==close_ticket-->closed^"]
+    fsm_state_chains = ["[*] --> new == open_ticket ==> open == close_ticket ==> closed --> [*]"]
     asset_aliases = [
         AssetSpec(
             alias="ticket",
@@ -61,7 +61,7 @@ class TicketCase(FolderBackedCase):
 
 class FlexibleCase(FolderBackedCase):
     flexible_asset_alias_loading = True
-    fsm_state_chains = ["^new==go-->done^"]
+    fsm_state_chains = ["[*] --> new == go ==> done --> [*]"]
     asset_aliases = [
         AssetSpec(alias="unguarded", relative_path="unguarded.json"),
         AssetSpec(
@@ -76,7 +76,7 @@ class FlexibleCase(FolderBackedCase):
 
 
 class ReclassSource(FolderBackedCase):
-    fsm_state_chains = ["^new==go-->shared^"]
+    fsm_state_chains = ["[*] --> new == go ==> shared --> [*]"]
     asset_aliases = [
         AssetSpec(
             alias="old",
@@ -93,7 +93,7 @@ class ReclassSource(FolderBackedCase):
 
 
 class ReclassTarget(FolderBackedCase):
-    fsm_state_chains = ["^new==go-->shared^"]
+    fsm_state_chains = ["[*] --> new == go ==> shared --> [*]"]
     asset_aliases = [
         AssetSpec(
             alias="new", relative_path="new.yaml", loader=ChatLog,
@@ -110,7 +110,7 @@ def test_empty_declaration_warns(caplog):
     class EmptyAliasesCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new--begin-->done^"]
+        fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
         async def perform_begin(self, tctx):
             pass
@@ -131,7 +131,7 @@ def test_build_time_validation_at_class_definition():
                 ),
             ]
             fsm_trigger_chokes = {}
-            fsm_state_chains = ["^new--begin-->done^"]
+            fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
             async def perform_begin(self, tctx):
                 pass

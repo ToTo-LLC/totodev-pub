@@ -266,7 +266,9 @@ class FolderBackedCase(FolderBackedCaseInterface):
             nickname=nickname,
             created=_utcnow(),
             asset_aliases=asset_aliases,
-            fsm_state_chains=list(cls.fsm_state_chains),
+            # normalize_chain_lines: the record stores the canonical one-chain-per-line
+            # list whether the class declared a list or a multiline string.
+            fsm_state_chains=StateChainParser.normalize_chain_lines(cls.fsm_state_chains),
             **fields,
         )
         # Direct save (no instance yet) — SAFE BY CONSTRUCTION: case_object_type is set to
@@ -624,7 +626,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
           PURE: touches no class state and is called exactly once per subclass (by
           __init_subclass__), whose job is to cache the result as the `_fsm` singleton.
           The default parses `fsm_state_chains`, runs the whole-graph
-          FsmChainSpec.validate(), then injects any `*--...-->` wildcard edges via
+          FsmChainSpec.validate(), then injects any `* -- ... -->` wildcard edges via
           expand_wildcards() (in that order, so the typo checks see only the explicit
           graph)."""
         return cls._fold_trigger_chokes(
@@ -795,7 +797,9 @@ class FolderBackedCase(FolderBackedCaseInterface):
         )
         fresh._record.case_object_type = new_cls.__name__   # CONSCIOUS stamp
         fresh._record.asset_aliases = type(fresh)._resolve_asset_book().to_record()
-        fresh._record.fsm_state_chains = list(type(fresh).fsm_state_chains)
+        fresh._record.fsm_state_chains = StateChainParser.normalize_chain_lines(
+            type(fresh).fsm_state_chains
+        )
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
         type(fresh)._seed_keep_rules(fresh._keep_manifest)
         return fresh

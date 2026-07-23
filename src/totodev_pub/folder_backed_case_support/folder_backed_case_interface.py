@@ -77,8 +77,8 @@ class FolderBackedCaseInterface(ABC):
 
     Key concepts
     ------------
-    - The FSM language consists of linear ``stateA--trigger-->stateB`` segments
-      (see ``fsm_state_chains``). Triggers may be preceded by gates.
+    - The FSM language consists of linear ``stateA -- trigger --> stateB``
+      segments (see ``fsm_state_chains``). Triggers may carry bracketed guards.
     - States are Live or Terminal. Automatic cleanup runs soon after entering a
       terminal state.
     - Triggers are automated or manual. Automated triggers can be triggered by
@@ -114,12 +114,14 @@ class FolderBackedCaseInterface(ABC):
         class TroubleTicketCase(FolderBackedCase):
 
             ##### CLASS CONFIG FOR CASE CLASSES #####
-            fsm_state_chains = [
-                "^new --open_ticket-->open ==close_ticket-->closed^",
-                "open --is_duplicative#mark_as_duplicate-->closed",
-                "*--@DWELL>14d#non_responsive-->auto_closed^",
-                "open --@FAIL>0#failure-->terminal^",
-            ]
+            fsm_state_chains = \"\"\"
+                [*] --> new -- open_ticket --> open == close_ticket ==> closed --> [*]
+                open --> closed : mark_as_duplicate [is_duplicative]
+                * --> auto_closed : non_responsive [@DWELL>14d]
+                auto_closed --> [*]
+                open --> terminal : failure [@FAIL>0]
+                terminal --> [*]
+            \"\"\"
 
             asset_aliases = [
                 AssetSpec(alias="ticket", relative_path="ticket_info.yaml",
@@ -170,8 +172,8 @@ class FolderBackedCaseInterface(ABC):
         ``before_<trigger>`` when no explicit ``before_<trigger>`` exists
       * ``async def before_<trigger>(self, tctx)``
       * ``async def after_<trigger>(self, tctx)``
-      * ``async def guard_<guard>(self, tctx)`` — boolean gate from
-        ``guard#trigger`` DSL
+      * ``async def guard_<guard>(self, tctx)`` — boolean gate from a
+        ``trigger [guard]`` DSL bracket
 
     Raising in a guard or ``before_`` hook aborts the transition and counts as a
     transition fail.
@@ -184,11 +186,11 @@ class FolderBackedCaseInterface(ABC):
     empty kwargs — treat them as pure questions about current case facts, not as
     work steps. Built-in factual guards:
 
-      * ``@FAIL(>|>=|<|<=)n#`` — fail count since entering current state
-      * ``@DWELL(>|>=|<|<=)dur#`` — seconds in current state (units s/m/h/d)
+      * ``@FAIL(>|>=|<|<=)n`` — fail count since entering current state
+      * ``@DWELL(>|>=|<|<=)dur`` — seconds in current state (units s/m/h/d)
 
-    By default, transitions carry an implied ``@FAIL<1#`` guard unless overridden.
-    Wildcard source ``*--guard#trigger-->X`` applies from any state.
+    By default, transitions carry an implied ``@FAIL<1`` guard unless overridden.
+    A wildcard-source edge (``* -- trigger [guard] --> X``) applies from any state.
 
     Creating hook methods — arguments to triggers
     ---------------------------------------------
@@ -296,26 +298,29 @@ class FolderBackedCaseInterface(ABC):
     # Declaration attributes — set class attributes on your subclass
     # =======================================================================
 
-    fsm_state_chains: list[str] | None = None
+    fsm_state_chains: list[str] | str | None = None
     """The ONE declarative FSM input: the default ``compile_fsm()`` parses this.
     PRIMARY extension point — set this on your subclass to define the whole
-    lifecycle.
+    lifecycle. Declare it as a multiline string (one chain per line, ``%%``
+    comments allowed, Mermaid-compatible) or a list of chain strings.
 
     DSL cheatsheet:
-      ``^state``           leading ``^`` = initial state (first declared one is default)
-      ``state^``           trailing ``^`` = terminal state
-      ``A==trigger-->B``   ``==`` connector = MANUAL edge (``await case.trigger()``)
-      ``A--trigger-->B``   ``--`` connector = AUTO edge (fired by ``case_advance()``)
-      ``guard#trigger``    binds method ``guard_<guard>`` as the edge's guard
-      ``@DWELL>14d``       factual time guard: true once dwell exceeds 14 days
-      ``@FAIL>=n``         factual guard: true once n failures accrued this dwell
-      ``~<dur>``           soft (warning) timeout for the trigger's work
-      ``*--...-->X``       wildcard source: an edge leaving every state
+      ``[*] --> state``         marks ``state`` INITIAL (first declared one is default)
+      ``state --> [*]``         marks ``state`` TERMINAL
+      ``A -- trigger --> B``    AUTO edge (fired by ``case_advance()``)
+      ``A == trigger ==> B``    MANUAL edge (``await case.trigger()``)
+      ``A --> B : trigger``     colon-labeled AUTO edge (one edge per line)
+      ``A --> B : == trigger``  colon-labeled MANUAL edge (also ``A ==> B : trigger``)
+      ``trigger [g1, g2]``      binds methods ``guard_<g1>``, ``guard_<g2>`` as guards
+      ``[@DWELL>14d]``          factual time guard: true once dwell exceeds 14 days
+      ``[@FAIL>=n]``            factual guard: true once n failures accrued this dwell
+      ``trigger~<dur>``         soft (warning) timeout for the trigger's work
+      ``* -- trigger --> X``    wildcard source: an edge leaving every state
 
     See ``StateChainParser`` for the authoritative, complete grammar.
     ``None`` means "not yet declared" — a concrete subclass MUST set this to a
-    non-empty list (unless it overrides ``compile_fsm()`` to build the
-    ``FsmChainSpec`` by hand). ``None`` and "declared []" both mean: no FSM.
+    non-empty declaration (unless it overrides ``compile_fsm()`` to build the
+    ``FsmChainSpec`` by hand). ``None`` and "declared empty" both mean: no FSM.
     """
 
     fsm_trigger_chokes: dict[str, set[str]] | None = None
@@ -582,7 +587,8 @@ class FolderBackedCaseInterface(ABC):
 
     @property
     def case_terminal_states(self) -> frozenset[str]:
-        """FSM states marked terminal for this case type (trailing ``^`` in the DSL).
+        """FSM states marked terminal for this case type (a ``state --> [*]`` hop
+        in the DSL).
 
         Class-level fact — same for every instance.
         """

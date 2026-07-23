@@ -5,6 +5,7 @@ seems ambiguous or out of date): `src/totodev_pub/folder_backed_case_support/fol
 Worked skeleton shape: `assets/case_class_template.py` in this skill.
 
 ## Contents
+
 - FSM design principles (read before drafting chains)
 - FSM state-chain DSL grammar
 - Hook naming conventions (what to stub)
@@ -97,16 +98,17 @@ graph the developer cannot yet visualize.
 ### Manual vs automated edges
 
 Human intervention — attach a document, approve an action, archive a record,
-confirm extraction — is usually a **manual** edge (`==`). Automated pipeline
-steps use `--` so `case_advance()` can fire them unattended.
+confirm extraction — is usually a **manual** edge (`== trigger ==>`). Automated
+pipeline steps use `-- trigger -->` so `case_advance()` can fire them
+unattended.
 
 If unsure whether a step should run without a person, use `==`. Auto-advance
 is opt-in (see grammar defaults below).
 
-**Same-state edges** (`A==trigger-->A` / `A--trigger-->A`) are allowed.
+**Same-state edges** (`A == trigger ==> A` / `A -- trigger --> A`) are allowed.
 `AdvanceResult.progressed` is true whenever a trigger commits successfully,
 including when the state name does not change. An **auto** self-loop must
-declare at least one **method** guard (e.g. `ready--still_needed#tick-->ready`)
+declare at least one **method** guard (e.g. `ready -- tick [still_needed] --> ready`)
 so it cannot accidentally fire on every `case_advance()` and spin forever;
 factual `@DWELL` / `@FAIL` alone does not satisfy that check. Manual (`==`)
 self-loops need no method guard.
@@ -117,7 +119,7 @@ Use `*` when the same action is valid from (almost) any live state — cancel,
 abort, admin escape:
 
 ```text
-*==abort-->aborted^
+* == abort ==> aborted --> [*]
 ```
 
 Keep wildcards for cross-cutting control actions. Do **not** wildcard the
@@ -143,7 +145,7 @@ dead-end validation harder to reason about.
   Step 2).
 - **Failure states with no story** — a divert into `failed` with no retry,
   human gate, or terminal path.
-- **Happy-path wildcards** — `*--process-->…` instead of naming real sources.
+- **Happy-path wildcards** — `* -- process --> …` instead of naming real sources.
 - **Splitting “for docs” only** — narrate in docstrings and assertions; keep
   the graph honest and lean.
 
@@ -153,8 +155,8 @@ dead-end validation harder to reason about.
 failure sits until someone intervenes:
 
 ```text
-^new==add_attachments-->attachments_added--begin-->submitted--process-->done^
-*==abort-->aborted-->closed^
+[*] --> new == add_attachments ==> attachments_added -- begin --> submitted -- process --> done --> [*]
+* == abort ==> aborted --> [*]
 ```
 
 **Split on purpose** — OCR is flaky and CPU-bound; extraction uses an LLM;
@@ -162,10 +164,10 @@ you want retries on OCR only, separate chokes, and a Workbench park point
 after OCR:
 
 ```text
-^new==add_attachments-->attachments_added--begin-->submitted
-submitted--@FAIL<3#apply_ocr-->ocrd--extract_text-->extracted--finalize-->done^
-submitted--@FAIL>=3#give_up-->needs_review==resolve-->closed^
-*==abort-->aborted^
+[*] --> new == add_attachments ==> attachments_added -- begin --> submitted
+submitted -- apply_ocr [@FAIL<3] --> ocrd -- extract_text --> extracted -- finalize --> done --> [*]
+submitted -- give_up [@FAIL>=3] --> needs_review == resolve ==> closed --> [*]
+* == abort ==> aborted --> [*]
 ```
 
 with chokes like `{"apply_ocr": {"cpu"}, "extract_text": {"llm"}}`.
@@ -177,34 +179,76 @@ needs.
 
 ## FSM state-chain DSL (`fsm_state_chains`)
 
-A list of chain strings, each `stateA--trigger-->stateB`, optionally chained
-(`A--t1-->B--t2-->C`). The parser merges all chains into one graph.
+A Mermaid-flavoured chain notation. Each chain reads left-to-right as
+alternating states and labeled connectors — `A -- t1 --> B -- t2 --> C` — and
+the parser merges all chains into one graph. `fsm_state_chains` may be a list
+of chain strings **or a single triple-quoted multiline string** (one chain per
+line); **prefer the multiline-string form once a declaration has three or more
+chains** — it reads like the diagram it is and takes `%%` comments (see
+"Multiline declarations" below).
 
 | Syntax | Meaning |
 |---|---|
-| `^state` | leading `^` = an initial state |
-| `state^` | trailing `^` = a terminal state (auto-purges assets not kept, soon after entry) |
-| `A--trigger-->B` | **automated** edge — `case_advance()` may fire it unattended |
-| `A==trigger-->B` | **manual** edge — only an explicit `await case.trigger()` fires it; never auto-fires |
-| `A--guard#trigger-->A` | **auto self-loop** — same-state auto edge; **requires** ≥1 method guard (framework rejects unguarded `A--trigger-->A`) |
-| `A==trigger-->A` | **manual self-loop** — same-state manual edge; no method guard required |
-| `guard#trigger` | binds `guard_<guard>(self, tctx) -> bool`; edge fires only when it returns truthy |
-| `guard1#guard2#trigger` | **multiple method guards** on one edge — all must pass (`conditions` = `guard_guard1`, `guard_guard2`, …). Chain as many `#`-separated method-guard tokens as you need before the trigger name. |
-| `@DWELL(>|>=|<|<=)<dur>#trigger` | factual guard: time in current state vs `1s/2m/3h/4d`. Use for **timed escapes** so a state can't rot forever (pair with a `==` human gate or an automated pipeline step). |
-| `@FAIL(>|>=|<|<=)n#trigger` | factual guard: failed-transition-attempt count since entering current state. Use for **retry-then-divert**: e.g. `@FAIL<3#retry` + `@FAIL>=3#give_up` as **separate edges**. Default (no `@FAIL` given) is an implied `@FAIL<1` — one try, then stop. |
-| `trigger~<dur>` | soft timeout on the trigger's `perform_` work (flags slow; hard-aborts at a multiple) |
-| `*--trigger-->X` / `*==trigger-->X` | wildcard source — this edge exists from every live state |
+| `[*] --> state` | boundary hop marking `state` an **initial** state (entry/root) |
+| `state --> [*]` | boundary hop marking `state` **terminal** (auto-purges assets not kept, soon after entry) |
+| `A -- trigger --> B` | **automated** edge — `case_advance()` may fire it unattended |
+| `A == trigger ==> B` | **manual** edge (matched `==`…`==>` arrows) — only an explicit `await case.trigger()` fires it; never auto-fires |
+| `A --> B : trigger` | colon-labeled single edge (Mermaid stateDiagram-v2 style), **auto**; one edge per line |
+| `A ==> B : trigger` / `A --> B : == trigger` | colon-labeled **manual** edge — both spellings are official; generated diagrams emit the `: ==` label-marker form |
+| `A -- trigger [guard] --> A` | **auto self-loop** — same-state auto edge; **requires** ≥1 method guard (framework rejects unguarded `A -- trigger --> A`) |
+| `A == trigger ==> A` | **manual self-loop** — same-state manual edge; no method guard required |
+| `trigger [guard]` | method guard in trailing brackets: binds `guard_<guard>(self, tctx) -> bool`; edge fires only when it returns truthy |
+| `trigger [guard1, guard2]` | **multiple guards** on one edge — all must pass (`conditions` = `guard_guard1`, `guard_guard2`, …). One bracket group per edge, comma-separated, trigger first. |
+| `trigger [@DWELL(>\|>=\|<\|<=)<dur>]` | factual guard: time in current state vs `1s/2m/3h/4d`. Use for **timed escapes** so a state can't rot forever (pair with a `==` human gate or an automated pipeline step). |
+| `trigger [@FAIL(>\|>=\|<\|<=)n]` | factual guard: failed-transition-attempt count since entering current state. Use for **retry-then-divert**: e.g. `retry [@FAIL<3]` + `give_up [@FAIL>=3]` as **separate edges**. Default (no `@FAIL` given) is an implied `@FAIL<1` — one try, then stop. |
+| `trigger~<dur>` | soft timeout on the trigger's `perform_` work (flags slow; hard-aborts at a multiple) — glued to the trigger name, before any bracket group |
+| `* -- trigger --> X` / `* == trigger ==> X` | wildcard source (bare `*`) — this edge exists from every live state |
 
-Guards compose on a single connector: method guards chain with `#`, and factual
-guards compose with each other and with method guards (e.g.
-`@FAIL<3#funded#finish`, `@FAIL<3#@DWELL>30m#retry`). Soft timeout is a suffix
-and composes too (`@FAIL<3#funded#finish~3m`). At most one guard per fact name
-(`@FAIL` / `@DWELL`) on a given edge.
+An edge label is always the trigger name first, then an optional glued `~<dur>`
+soft timeout, then at most **one** bracketed guard list. Method guards and
+factual guards mix freely in the same brackets, comma-separated
+(`finish [funded, @FAIL<3]`, `retry~3m [@FAIL<3, @DWELL>30m]`). At most one
+guard per fact name (`@FAIL` / `@DWELL`) on a given edge.
+
+**Bracketed `[*]` vs bare `*`:** `[*]` is the start/end **boundary**
+pseudo-state (as in Mermaid stateDiagram-v2); bare `*` is the **any-state
+wildcard source**. Boundary hops are label-less (no trigger, no colon form)
+and may sit inline at either end of a chain
+(`[*] --> a -- t --> b --> [*]`) or stand alone as their own line (`[*] --> a`).
+
+### Multiline declarations and pasted Mermaid sketches
+
+A multiline `fsm_state_chains` string is split on newlines, one chain per
+line. `%%` starts a comment (whole-line or trailing) — **not** `#` — and
+Mermaid boilerplate lines (`stateDiagram-v2`, `direction LR`, …) are ignored,
+so a sketch drawn in a Mermaid editor pastes in nearly verbatim.
+
+**Paste caution:** in this DSL `-->` means AUTO-ADVANCE, and a pure Mermaid
+sketch is all `-->` — i.e. all-auto. After pasting, mark every human/event
+gate manual (`==>` arrows, or the `: ==` label marker on a colon-form line)
+before driving the case.
+
+**CLI intake help:** the chain-DSL CLI can check a declaration and clean a raw
+sketch — use it on the user's pasted Mermaid before scaffolding:
+
+```bash
+# validate + advisory lint (warns on all-auto, shadowed auto siblings, stall risk)
+pbpaste | python -m totodev_pub.folder_backed_case_support.state_chain_cli
+
+# convert a raw sketch: slugs free-text labels, scaffolds trigger names for
+# unlabeled edges (`%% TODO` markers), comments out notes/aliases/choice states
+pbpaste | python -m totodev_pub.folder_backed_case_support.state_chain_cli --convert
+```
+
+For the notation-by-notation mapping, the semantic gaps conversion cannot
+bridge, and how to re-express Mermaid constructs the DSL lacks (choice, fork,
+composite states), see `mermaid_and_the_dsl.md` in this folder.
 
 Two defaults to keep in mind while drafting chains with the user:
+
 - **Auto-advance is opt-in.** If unsure whether a step should run unattended, use `==` — the case waits rather than blowing past a human gate.
 - **Retry is opt-in.** No `@FAIL` guard means one attempt, then the failure just sits there (visible, not hammered).
-- **Auto self-loops need a method guard.** Prefer an intermediate state when “loop back” is really a different step; if you keep `A-->A` automated, name a method guard that eventually declines. `@DWELL` / `@FAIL` alone do not count.
+- **Auto self-loops need a method guard.** Prefer an intermediate state when “loop back” is really a different step; if you keep `A -- t --> A` automated, name a method guard that eventually declines. `@DWELL` / `@FAIL` alone do not count.
 
 Validated at class-definition time: misspelled states, unreachable states, dead-end
 non-terminal states, unguarded auto self-loops, and orphan hook methods (below) all
@@ -221,7 +265,7 @@ bind time — so only stub what the chains actually name.
 | `perform_<trigger>` | `async def (self, tctx)` | the trigger's main work; auto-wired as `before_<trigger>` if no explicit `before_<trigger>` exists | every trigger named in the chains that does real work |
 | `before_<trigger>` | `async def (self, tctx)` | before the transition, only if you need this *and* a separate `perform_` | only if the developer distinguishes "before" from "perform" |
 | `after_<trigger>` | `async def (self, tctx)` | after the transition commits | only if the developer names post-transition work |
-| `guard_<guard>` | `async def (self, tctx) -> bool` | polled (possibly many times); must be fast, idempotent, side-effect free | every `guard#trigger` name used in the chains |
+| `guard_<guard>` | `async def (self, tctx) -> bool` | polled (possibly many times); must be fast, idempotent, side-effect free | every method guard named in a bracket group (`trigger [guard]`) in the chains |
 | `on_enter_<state>` | `async def (self, tctx)` | on entering `<state>` | only states the developer says need entry side effects |
 | `on_exit_<state>` | `async def (self, tctx)` | on leaving `<state>` | only states the developer says need exit side effects |
 

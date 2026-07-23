@@ -64,7 +64,7 @@ def _isolate_case_registry():
 class SimpleCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
 
 class TypedRecord(CaseRecord):
@@ -76,7 +76,7 @@ class TypedRecord(CaseRecord):
 class TypedCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
     _record_cls = TypedRecord
 
 
@@ -84,7 +84,7 @@ class ReclassTarget(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """Shares the 'new' state with SimpleCase, so reclassify from a fresh case is legal."""
-    fsm_state_chains = ["^new==go-->finished^"]
+    fsm_state_chains = ["[*] --> new == go ==> finished --> [*]"]
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +238,7 @@ def test_register_decorator_returns_class_and_registers():
     class Decorated(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
 
     # Decorator returns the class unchanged...
     assert issubclass(Decorated, FolderBackedCase)
@@ -473,7 +473,7 @@ def test_missing_fsm_trigger_chokes_raises_at_class_definition():
 
         class NoChokesCase(FolderBackedCase):
             asset_aliases = []
-            fsm_state_chains = ["^new--begin-->done^"]
+            fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
             async def perform_begin(self, tctx):
                 pass
@@ -487,7 +487,7 @@ def test_missing_fsm_trigger_chokes_raises_at_class_definition():
 def test_fsm_trigger_chokes_folded_into_spec():
     class ChokedCase(FolderBackedCase):
         asset_aliases = []
-        fsm_state_chains = ["^new--analyze-->done^"]
+        fsm_state_chains = ["[*] --> new -- analyze --> done --> [*]"]
         fsm_trigger_chokes = {
             "analyze": {"cpu", "ms-graph-api"},
         }
@@ -505,7 +505,7 @@ def test_unknown_trigger_in_fsm_trigger_chokes_raises():
 
         class BadChokeCase(FolderBackedCase):
             asset_aliases = []
-            fsm_state_chains = ["^new--analyze-->done^"]
+            fsm_state_chains = ["[*] --> new -- analyze --> done --> [*]"]
             fsm_trigger_chokes = {"typo_trigger": {"cpu"}}
 
             async def perform_analyze(self, tctx):
@@ -591,7 +591,7 @@ def test_guard_method_convention_constructs(tmp_path):
     class GuardedCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==funded#finish-->done^"]
+        fsm_state_chains = ["[*] --> new == finish [funded] ==> done --> [*]"]
 
         async def guard_funded(self, tctx):
             return True
@@ -611,7 +611,7 @@ def test_orphan_guard_method_fails_construction(tmp_path):
     class TypoGuardCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==funded#finish-->done^"]
+        fsm_state_chains = ["[*] --> new == finish [funded] ==> done --> [*]"]
 
         async def guard_funded(self, tctx):
             return True
@@ -635,7 +635,7 @@ def test_hook_missing_tctx_param_fails_construction(tmp_path):
     class NoTctxCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new--begin-->open^"]
+        fsm_state_chains = ["[*] --> new -- begin --> open --> [*]"]
 
         async def perform_begin(self):  # missing tctx
             return None
@@ -657,7 +657,7 @@ def test_perform_hook_convention_wires_and_runs(tmp_path):
     class PerformCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new--begin-->open==finish-->done^"]
+        fsm_state_chains = ["[*] --> new -- begin --> open == finish ==> done --> [*]"]
         performed = False
 
         async def perform_begin(self, tctx):
@@ -683,7 +683,7 @@ def test_legacy_underscore_perform_hook_is_rejected(tmp_path):
     class LegacyCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new--begin-->done^"]
+        fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
         async def _perform_begin(self, tctx):  # old name, no longer recognized
             return None
@@ -705,7 +705,7 @@ def test_sealed_member_override_fails_construction(tmp_path):
     class ClobberCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
 
         def case_state(self):  # clobbers the sealed base member
             return "nope"
@@ -748,7 +748,7 @@ def test_create_case_mints_id_via_uuid_generator(tmp_path):
     class UUIDCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
         case_id_generator = UUIDCaseIDGenerator()
 
     case = UUIDCase.create_case_in_folder(tmp_path / "uuid-minted")
@@ -776,7 +776,7 @@ def test_explicit_case_id_bypasses_generator(tmp_path):
     class NeverCalledCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
         case_id_generator = NeverCalled()
 
     case = NeverCalledCase.create_case_in_folder(
@@ -796,7 +796,7 @@ def test_class_attribute_case_id_generator(tmp_path):
     class ClassGenCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
         case_id_generator = StubGen()
 
     case = ClassGenCase.create_case_in_folder(tmp_path / "class-gen")
@@ -820,7 +820,7 @@ def test_per_call_generator_overrides_class_attribute(tmp_path):
     class OverrideCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
         case_id_generator = ClassGen()
 
     case = OverrideCase.create_case_in_folder(
@@ -863,7 +863,7 @@ def test_default_generator_is_shared_across_case_classes(monkeypatch):
     class OtherCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
 
     first = SimpleCase.case_id_generator.generate(case_cls=SimpleCase)
     second = OtherCase.case_id_generator.generate(case_cls=OtherCase)
@@ -893,7 +893,7 @@ class _SlowKeepaliveCase(FolderBackedCase):
     """Slow work behind both an AUTO (`go`) and a MANUAL (`step`) edge. The tests pair this with
     _use_short_ttl so the keepalive pulse is what keeps the lease from lapsing during the step."""
 
-    fsm_state_chains = ["^new--go-->open==step-->done^"]
+    fsm_state_chains = ["[*] --> new -- go --> open == step ==> done --> [*]"]
     sleep_secs: float = 0.0
 
     async def perform_go(self, tctx):
@@ -992,8 +992,8 @@ class _PinAutoCase(FolderBackedCase):
     pinning fires the chosen edge (even the later one) rather than the sweep's first pick."""
 
     fsm_state_chains = [
-        "^fork--alpha-->done_a^",
-        "fork--beta-->done_b^",
+        "[*] --> fork -- alpha --> done_a --> [*]",
+        "fork -- beta --> done_b --> [*]",
     ]
 
     async def perform_alpha(self, tctx):
@@ -1011,7 +1011,7 @@ class _OverloadCase(FolderBackedCase):
     record the kwargs they receive (to prove `trigger_kwargs` flows into `tctx.kwargs`), and
     `fail_submit` lets a test force a manual-edge failure to check it is FOLDED, not raised."""
 
-    fsm_state_chains = ["^new--go-->ready==submit-->review--gated#approve-->done^"]
+    fsm_state_chains = ["[*] --> new -- go --> ready == submit ==> review -- approve [gated] --> done --> [*]"]
     open_gate: bool = False
     fail_submit: bool = False
     go_kwargs: dict | None = None
@@ -1232,8 +1232,8 @@ class _TimedEscapeCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = [
-        "^new--go-->waiting--gated#proceed-->done^",
-        "waiting--@DWELL>30d#timeout-->done^",
+        "[*] --> new -- go --> waiting -- proceed [gated] --> done --> [*]",
+        "waiting -- timeout [@DWELL>30d] --> done --> [*]",
     ]
     open_gate: bool = False
 
@@ -1435,7 +1435,7 @@ class _ReentrancyCase(FolderBackedCase):
     """AUTO edge `go` blocks on an injected gate (asyncio.Event, set by the test after
     creation) so a test can hold ONE transition in flight and attempt a second,
     concurrent trigger call while the first is still awaiting."""
-    fsm_state_chains = ["^new--go-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new -- go --> open == finish ==> done --> [*]"]
 
     async def perform_go(self, tctx):
         await self._gate.wait()
@@ -1519,7 +1519,7 @@ class _FlakyOnceCase(FolderBackedCase):
     tolerance above 1 — an auto edge with no @FAIL annotation gets an implicit
     @FAIL<1 (one attempt, no retry), which would otherwise block the SECOND attempt
     regardless of the reentrancy guard and make this test's intent ambiguous."""
-    fsm_state_chains = ["^new--@FAIL<3#go-->done^"]
+    fsm_state_chains = ["[*] --> new -- go [@FAIL<3] --> done --> [*]"]
     fail_once: bool = True
 
     async def perform_go(self, tctx):
@@ -1556,7 +1556,7 @@ class _StampCase(FolderBackedCase):
         ),
     ]
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new--begin-->done^"]
+    fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
     async def perform_begin(self, tctx):
         pass
@@ -1567,7 +1567,7 @@ def test_missing_asset_schema_raises_at_class_definition():
 
         class UndeclaredCase(FolderBackedCase):
             fsm_trigger_chokes = {}
-            fsm_state_chains = ["^new--begin-->done^"]
+            fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
             async def perform_begin(self, tctx):
                 pass
@@ -1583,7 +1583,7 @@ def test_resolve_asset_book_projects_strings():
             ),
         ]
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new--begin-->done^"]
+        fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
         async def perform_begin(self, tctx):
             pass
@@ -1639,7 +1639,7 @@ class _SelfLoopCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """Guarded auto self-loop that declines after two ticks so `finish` can fire."""
-    fsm_state_chains = ["^ready--still#tick-->ready--finish-->done^"]
+    fsm_state_chains = ["[*] --> ready -- tick [still] --> ready -- finish --> done --> [*]"]
     ticks: int = 0
     fail_tick: bool = False
 

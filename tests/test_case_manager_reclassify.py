@@ -20,8 +20,8 @@ class IntakeCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     fsm_state_chains = [
-        "^start--sort-->sorted",
-        "sorted==never-->never_reached^",
+        "[*] --> start -- sort --> sorted",
+        "sorted == never ==> never_reached --> [*]",
     ]
 
     async def perform_sort(self, tctx):
@@ -32,7 +32,7 @@ class RoutedCase(FolderBackedCase):
     """Specialized continuation; shares the 'sorted' handoff state (as initial)."""
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^sorted--finish-->done^"]
+    fsm_state_chains = ["[*] --> sorted -- finish --> done --> [*]"]
 
     async def perform_finish(self, tctx):
         pass
@@ -42,7 +42,7 @@ class UnrelatedCase(FolderBackedCase):
     """No shared states with IntakeCase — reclassify must be refused."""
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^alpha--go-->omega^"]
+    fsm_state_chains = ["[*] --> alpha -- go --> omega --> [*]"]
 
     async def perform_go(self, tctx):
         pass

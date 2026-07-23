@@ -31,7 +31,7 @@ def _isolate_case_registry():
 class SimpleCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
 
 def test_interface_alignment_includes_invoke_helpers():

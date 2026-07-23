@@ -34,7 +34,8 @@ instead of linking out.
 
 1. **Interview** the developer (below) to learn the business situation.
 2. **Draft the lifecycle** as `fsm_state_chains`, confirm it back in plain
-   English before writing code.
+   English before writing code. (If the developer brings an existing Mermaid
+   sketch, convert it via the chain-DSL CLI first — see Step 2–4.)
 3. **Draft `asset_aliases`** for the data contracts named in the interview.
 4. **Draft `fsm_trigger_chokes`** for the expensive steps named.
 5. **Generate the skeleton class file**, following the shape in
@@ -45,7 +46,9 @@ instead of linking out.
    `references/case_design_patterns.md` and prompt the developer about whether
    any of those enhancements fit this case; fold in the ones they adopt and
    re-validate.
-8. **Check coverage** against the checklist before handing it back.
+8. **Lint the FSM and check coverage** — run the chain-DSL CLI over the final
+   declaration for advisory warnings, then the checklist, before handing it
+   back.
 9. **Offer a documentation report** — ask if the developer wants a rendered
    summary of the finished class (lifecycle diagram, states/triggers/guards/
    assertions/assets tables) to sanity-check the whole design at a glance.
@@ -75,13 +78,14 @@ dumping every question at once; follow up based on what comes back. Cover:
      adjectives/nouns for condition or step just completed, in the users'
      vocabulary; names must be valid Python identifier segments.
    - For each transition: automatic once conditions are met, or explicit
-     human/UI action (`--` vs `==`)? Human gates (attach, approve, archive,
-     …) are usually `==`.
-   - Same-state edges (`A-->A`) are allowed. If proposing an **auto**
-     self-loop (`A--trigger-->A`), it **must** carry at least one named
-     method guard (`still_needed#trigger`); otherwise make it **manual**
-     (`A==trigger-->A`). Factual `@DWELL` / `@FAIL` alone do not satisfy
-     the auto self-loop rule (unguarded auto self-loops can spin forever).
+     human/UI action (`-- trigger -->` vs `== trigger ==>`)? Human gates
+     (attach, approve, archive, …) are usually manual (`==`).
+   - Same-state edges (`A -- t --> A` / `A == t ==> A`) are allowed. If
+     proposing an **auto** self-loop (`A -- trigger --> A`), it **must**
+     carry at least one named method guard (`trigger [still_needed]`);
+     otherwise make it **manual** (`A == trigger ==> A`). Factual `@DWELL` /
+     `@FAIL` alone do not satisfy the auto self-loop rule (unguarded auto
+     self-loops can spin forever).
    - Where can a step fail, and should it retry or divert after N failures
      (`@FAIL`)?
    - Where can a case sit waiting on a person indefinitely — does it need a
@@ -108,15 +112,24 @@ If the developer gives you a rough narrative instead of clean answers to the
 above, restate the lifecycle back as a numbered list of states/transitions and
 confirm it before moving on — errors here propagate into every generated stub.
 
+If the developer already has a lifecycle sketched in another tool (Mermaid
+Live, a README diagram, an export), don't transcribe or re-interview it from
+scratch — convert it (see "Starting from a pre-existing Mermaid sketch" in
+Step 2–4) and review the result together, treating the converted text as the
+draft to confirm.
+
 ## Step 2–4 — Translate into declarations
 
 Using `references/dsl_and_hooks.md` (design principles first, then grammar):
-- Turn the confirmed lifecycle into `fsm_state_chains` strings — encode the
-  happy path first, then layer `@FAIL` / `@DWELL` / wildcards / secondary
-  paths. Use the principles section's split checklist and anti-patterns when
-  tempted to grow the graph.
+
+- Turn the confirmed lifecycle into `fsm_state_chains` — encode the happy
+  path first, then layer `@FAIL` / `@DWELL` / wildcards / secondary paths.
+  Use the principles section's split checklist and anti-patterns when
+  tempted to grow the graph. Once the declaration has three or more chains,
+  prefer a single triple-quoted multiline string (one chain per line, `%%`
+  comments) over a list of strings.
 - When drafting any same-state edge: use `==` **or** a method-guarded `--`
-  (`ready--still_needed#tick-->ready`). Never emit an unguarded auto
+  (`ready -- tick [still_needed] --> ready`). Never emit an unguarded auto
   self-loop — `FsmChainSpec.validate()` rejects it at import.
 - Show the developer the happy-path chains before the fully loaded graph.
 - Turn the confirmed data contracts into `AssetSpec` entries (plus one
@@ -126,6 +139,32 @@ Using `references/dsl_and_hooks.md` (design principles first, then grammar):
 - Turn the confirmed expensive steps into `fsm_trigger_chokes` (prefer a single
   resource per trigger — see the chokes section in `references/dsl_and_hooks.md`
   for why).
+
+### Starting from a pre-existing Mermaid sketch
+
+When the developer supplies a lifecycle already drawn elsewhere, feed it to the
+chain-DSL CLI's intake mode instead of hand-transcribing it:
+
+```bash
+# from the project venv; SOURCE may be a file, stdin (pipe/pbpaste), or a literal
+python -m totodev_pub.folder_backed_case_support.state_chain_cli --convert sketch.mmd
+```
+
+It emits a cleaned declaration: free-text labels slugged into trigger
+identifiers (originals kept in `%% was "..."` comments), unlabeled edges given
+placeholder triggers flagged `%% TODO: name this trigger`, and
+notes/aliases/choice states commented out rather than dropped. Review the
+output with the developer like any other draft — in particular, a pasted
+sketch is all `-->` (all-auto; the CLI warns about this): resolve every
+`%% TODO` and mark each human/event gate manual (`==>` or `: ==`) before
+moving on.
+
+Before that review, read `references/mermaid_and_the_dsl.md` — it maps the
+two notations, names the semantic gaps a diagram cannot express (auto vs
+manual above all — those become interview questions), and shows how to
+re-express constructs the DSL lacks (choice diamonds → guarded auto branching,
+fork/join → coarse states or separate case types, composites → flattened
+names).
 
 ### Default: inert initial state + trigger-based intake
 
@@ -138,7 +177,7 @@ e.g. `add_attachments` — into a very temporary state like `attachments_added`,
 then either loop back to `new` or advance into the first real-flow state:
 
 ```text
-^new==add_attachments-->attachments_added--begin-->submitted--...
+[*] --> new == add_attachments ==> attachments_added -- begin --> submitted -- ...
 ```
 
 **Why:** real processing (OCR, translate, parse, …) becomes a trigger operation
@@ -166,8 +205,9 @@ for every name that appears in the confirmed `fsm_state_chains`:
 - One `async def perform_<trigger>(self, tctx)` for every trigger that does
   real work, docstring stating what it must read/write/call — drawn from the
   interview, not invented.
-- One `async def guard_<guard>(self, tctx) -> bool` for every `guard#trigger`
-  name, docstring stating the condition it decides.
+- One `async def guard_<guard>(self, tctx) -> bool` for every method guard
+  named in a bracket group (`trigger [guard]`), docstring stating the
+  condition it decides.
 - `on_enter_<state>` / `on_exit_<state>` **only** for states the developer
   specifically described as needing entry/exit side effects — not every state
   needs one.
@@ -262,16 +302,33 @@ assets get an `AssetSpec` plus a pydantic class — with bodies still stubbed vi
 `_not_implemented`, never implemented. Adding a state or trigger can break the
 FSM, so **re-run the Step 6 bind check** after folding anything in.
 
-## Step 8 — Coverage checklist
+## Step 8 — FSM lint + coverage checklist
 
-Before handing the file back, confirm:
+Before the checklist, run the finished declaration through the chain-DSL CLI
+once. The Step 6 import gate proves the FSM *parses and validates*; the CLI
+adds advisory lint the import cannot — every edge auto-firing (a case that
+sprints to terminal unattended), an unguarded auto edge shadowing its declared
+siblings, and a state that can auto-block forever (all method-guarded auto
+exits, no manual exit, no timed escape):
+
+```bash
+python -c "
+from <module path> import <GeneratedClass> as C
+c = C.fsm_state_chains
+print(c if isinstance(c, str) else '\n'.join(c))" \
+  | python -m totodev_pub.folder_backed_case_support.state_chain_cli
+```
+
+Resolve each warning with the developer, or note explicitly why it is intended
+for this case (e.g. a deliberately fully-automated pipeline). Then confirm:
 
 - [ ] Every trigger named in `fsm_state_chains` has a `perform_<trigger>` (or
       an explicit note on why not).
-- [ ] Every `guard#trigger` name has a matching `guard_<guard>`.
-- [ ] Every **auto** self-loop (`A--…-->A`) has at least one named method
-      guard; otherwise the edge is `==` (manual). Factual `@DWELL`/`@FAIL`
-      alone is not enough for auto self-loops.
+- [ ] Every method guard named in a bracket group (`trigger [guard]`) has a
+      matching `guard_<guard>`.
+- [ ] Every **auto** self-loop (`A -- … --> A`) has at least one named method
+      guard; otherwise the edge is manual (`== … ==>`). Factual
+      `@DWELL`/`@FAIL` alone is not enough for auto self-loops.
 - [ ] Every state has at least one `case_assert_<state>_*`, or an explicit
       note on why that state has nothing to assert.
 - [ ] `asset_aliases` states/loader/keep/many are all set (or
@@ -283,6 +340,8 @@ Before handing the file back, confirm:
       `initial`) and intake is a kwargs-bearing trigger — **or** the
       developer explicitly chose create-time import and that tradeoff is
       noted. Do not silently put file copy/import in `create_case_in_folder`.
+- [ ] The chain-DSL CLI (above) reports no unaddressed lint warnings — or each
+      remaining one is acknowledged as intended for this case.
 
 ## Step 9 — Offer a documentation report
 

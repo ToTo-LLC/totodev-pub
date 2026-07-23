@@ -32,7 +32,7 @@ class ChainCase(FolderBackedCase):
     """Three manual edges in sequence: only the FIFO order a, b, c can walk to s3."""
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^s0==a-->s1==b-->s2==c-->s3^"]
+    fsm_state_chains = ["[*] --> s0 == a ==> s1 == b ==> s2 == c ==> s3 --> [*]"]
 
 
 @pytest.mark.asyncio

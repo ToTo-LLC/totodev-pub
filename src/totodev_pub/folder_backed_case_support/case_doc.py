@@ -313,14 +313,33 @@ def collect(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = Cas
 # Mermaid diagram rendering — consumes an already-built to_networkx() graph
 # ---------------------------------------------------------------------------
 
+def _fmt_duration(secs: float) -> str:
+    """Format seconds as the DSL's `<dur>` token, choosing the largest unit that
+    divides cleanly (14d, 1.5m, 90s, ...) so the output parses back to the same
+    value."""
+    for unit, size in (("d", 86400.0), ("h", 3600.0), ("m", 60.0)):
+        if secs >= size and secs % size == 0:
+            return f"{secs / size:g}{unit}"
+    return f"{secs:g}s"
+
+
 def _fmt_fact_guard(fg: dict) -> str:
+    """Format a factual guard exactly as the DSL spells it (`@DWELL>14d`,
+    `@FAIL<3`), so diagram labels are valid DSL guard items."""
     name, op, operand = fg["name"], fg["op"], fg["operand"]
     if name == "DWELL":
-        return f"DWELL{op}{operand:g}s"
-    return f"{name}{op}{operand}"
+        return f"@DWELL{op}{_fmt_duration(operand)}"
+    return f"@{name}{op}{operand}"
 
 
 def _edge_label(data: dict) -> str:
+    # The label is the edge's DSL spelling: `trigger[~<dur>] [guard, ...]` — the same
+    # grammar StateChainParser accepts, which is what makes a rendered state-style
+    # diagram round-trip back through the parser. Compiler-injected implicit @FAIL
+    # caps are excluded (they are framework defaults, not the author's declaration;
+    # the Markdown triggers table still shows them); the `~<dur>` soft-timeout is
+    # included only when the author annotated it.
+    #
     # POTENTIAL FUTURE ENHANCEMENT: this label ignores `wildcard_expanded` and
     # `pure_timed_escape` -- a synthetic wildcard fan-out edge and a normal edge
     # render identically here (the mini-spec's §5 suggested a distinct line style,
@@ -328,10 +347,16 @@ def _edge_label(data: dict) -> str:
     # its complexity yet -- the Markdown triggers table already surfaces both via
     # its Wildcard column, so the diagram's plain label may be enough on its own.
     trigger = data.get("trigger", "")
+    if data.get("soft_timeout_is_explicit") and data.get("soft_timeout_secs"):
+        trigger = f"{trigger}~{_fmt_duration(data['soft_timeout_secs'])}"
     guard_names = [_bare_guard_name(c) for c in data.get("conditions", [])]
-    annotations = guard_names + [_fmt_fact_guard(fg) for fg in data.get("fact_guards", [])]
-    label = f"{trigger} [{', '.join(annotations)}]" if annotations else trigger
-    return f"{label} (auto)" if data.get("auto") else label
+    facts = [
+        _fmt_fact_guard(fg)
+        for fg in data.get("fact_guards", [])
+        if not fg.get("implicit")
+    ]
+    annotations = guard_names + facts
+    return f"{trigger} [{', '.join(annotations)}]" if annotations else trigger
 
 
 def _mermaid_id(node: str) -> str:
@@ -340,7 +365,21 @@ def _mermaid_id(node: str) -> str:
 
 def to_mermaid(graph: "nx.MultiDiGraph", *, style: Literal["state", "flowchart"] = "state") -> str:
     """Render a ``FsmChainSpec.to_networkx()`` graph as Mermaid source. Pure
-    renderer over the graph — never recomputes FSM structure."""
+    renderer over the graph — never recomputes FSM structure.
+
+    Both styles use the SAME visual vocabulary as the chain DSL itself: an auto
+    edge is a plain arrow, a manual edge is the "double-thick" spelling (the
+    flowchart's thick ``== label ==>`` arrow; the state diagram's ``: == label``
+    label marker, since stateDiagram-v2 has only one arrow), and edge labels are
+    the edge's exact DSL text (``trigger~<dur> [guard, ...]``).
+
+    ROUND-TRIP: the ``state`` style's output is itself a valid
+    ``fsm_state_chains`` declaration — ``StateChainParser.parse()`` reproduces
+    the spec it was rendered from, provided the graph was built with
+    ``include_implied_caps=False`` (so no compiler-injected defaults masquerade
+    as declarations) and the spec declares no wildcard chains (a wildcard
+    renders via a synthetic ``ANY_STATE`` node, which parses as an ordinary
+    state)."""
     if style == "flowchart":
         return _to_mermaid_flowchart(graph)
     return _to_mermaid_state(graph)
@@ -360,7 +399,13 @@ def _to_mermaid_state(graph: "nx.MultiDiGraph") -> str:
         if data.get("terminal"):
             lines.append(f"    {_mermaid_id(node)} --> [*]")
     for u, v, data in graph.edges(data=True):
-        lines.append(f"    {_mermaid_id(u)} --> {_mermaid_id(v)} : {_edge_label(data)}")
+        # Manual edges carry the DSL's `==` label marker — stateDiagram-v2 has no
+        # thick arrow, so the marker rides inside the label, keeping the line both
+        # valid Mermaid AND valid chain DSL (see to_mermaid round-trip note).
+        label = _edge_label(data)
+        if not data.get("auto"):
+            label = f"== {label}"
+        lines.append(f"    {_mermaid_id(u)} --> {_mermaid_id(v)} : {label}")
     return "\n".join(lines)
 
 
@@ -386,8 +431,10 @@ def _to_mermaid_flowchart(graph: "nx.MultiDiGraph") -> str:
         if data.get("terminal"):
             terminals.append(node_id)
     for u, v, data in graph.edges(data=True):
-        arrow = "-->" if data.get("auto") else "-.->"
-        lines.append(f"    {_mermaid_id(u)} {arrow}|{_edge_label(data)}| {_mermaid_id(v)}")
+        # Same glyphs as the chain DSL: `-->` auto, thick `==>` manual. Labels are
+        # quoted because DSL guard brackets are Mermaid shape syntax when bare.
+        arrow = "-->" if data.get("auto") else "==>"
+        lines.append(f'    {_mermaid_id(u)} {arrow}|"{_edge_label(data)}"| {_mermaid_id(v)}')
     if initials:
         lines.append(f"    class {','.join(initials)} initialState")
     if terminals:

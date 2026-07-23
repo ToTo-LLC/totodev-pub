@@ -285,7 +285,7 @@ Here's the part that has no equivalent in tutorials #1–#2: some data doesn't a
 automated guard `guard_answers_complete` notices when enough of it exists:
 
 ```python
-"waiting_for_answers--answers_complete#compose_reply-->drafted",
+waiting_for_answers -- compose_reply~1m [answers_complete] --> drafted
 ```
 
 So when the web tier's "submit expert answer" form is used, there is nothing to `fire()` — the

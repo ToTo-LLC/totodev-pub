@@ -13,21 +13,13 @@
 # Swap in the real case name, states, triggers, assets, and responsibility
 # text gathered from the developer's interview answers.
 #
-# Lifecycle drawn (see references/dsl_and_hooks.md for the DSL grammar).
-# Default intake shape (SKILL.md Step 2 / pattern 0): inert ^new + manual
-# add_attachments(kwargs paths) — not file copy inside create_case_in_folder.
-#
-#   ^new ==add_attachments--> attachments_added --begin--> submitted
-#   submitted --@FAIL<3#validate_documents~2m--> validated
-#   submitted --@FAIL>=3#flag_incomplete--> needs_attention
-#   validated --check_eligibility~1m--> screened
-#   screened --eligible#route_to_reviewer--> awaiting_review
-#   awaiting_review ==approve--> approved --issue_permit~30s--> issued^
-#   awaiting_review ==deny--> denied^
-#   awaiting_review --@DWELL>5d#escalate--> needs_attention
-#   needs_attention ==reassign--> awaiting_review
-#   needs_attention ==abandon--> abandoned^
-#   *==cancel--> cancelled^
+# Lifecycle: see the fsm_state_chains declaration below — with three or more
+# chains, prefer the triple-quoted multiline form (one chain per line, `%%`
+# comments), which reads as its own diagram. Grammar is in
+# references/dsl_and_hooks.md. Default intake shape (SKILL.md Step 2 /
+# pattern 0): inert `new` entered from the [*] boundary, plus a manual
+# add_attachments trigger carrying filepath(s) in kwargs — not file copy
+# inside create_case_in_folder.
 
 from __future__ import annotations
 
@@ -85,19 +77,23 @@ class PermitApplicationCase(FolderBackedCase):
     # AssetSpec field meanings.
     # =======================================================================
 
-    fsm_state_chains = [
-        "^new==add_attachments-->attachments_added--begin-->submitted",
-        "submitted--@FAIL<3#validate_documents~2m-->validated",
-        "submitted--@FAIL>=3#flag_incomplete-->needs_attention",
-        "validated--check_eligibility~1m-->screened",
-        "screened--eligible#route_to_reviewer-->awaiting_review",
-        "awaiting_review==approve-->approved--issue_permit~30s-->issued^",
-        "awaiting_review==deny-->denied^",
-        "awaiting_review--@DWELL>5d#escalate-->needs_attention",
-        "needs_attention==reassign-->awaiting_review",
-        "needs_attention==abandon-->abandoned^",
-        "*==cancel-->cancelled^",
-    ]
+    fsm_state_chains = """
+        %% Intake: inert initial state, manual attach (kwargs paths), then the flow.
+        [*] --> new == add_attachments ==> attachments_added -- begin --> submitted
+        %% Validation with retry-then-divert (a @FAIL pair on separate edges).
+        submitted -- validate_documents~2m [@FAIL<3] --> validated
+        submitted -- flag_incomplete [@FAIL>=3] --> needs_attention
+        validated -- check_eligibility~1m --> screened
+        screened -- route_to_reviewer [eligible] --> awaiting_review
+        %% Human decision gates are manual (==); a dwell escape guards the wait.
+        awaiting_review == approve ==> approved -- issue_permit~30s --> issued --> [*]
+        awaiting_review == deny ==> denied --> [*]
+        awaiting_review -- escalate [@DWELL>5d] --> needs_attention
+        needs_attention == reassign ==> awaiting_review
+        needs_attention == abandon ==> abandoned --> [*]
+        %% Cross-cutting escape: bare * = wildcard source ("from any live state").
+        * == cancel ==> cancelled --> [*]
+    """
 
     asset_aliases = [
         AssetSpec(alias="application", relative_path="application.yaml",

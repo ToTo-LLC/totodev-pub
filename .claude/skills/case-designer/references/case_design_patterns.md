@@ -43,6 +43,7 @@ defined in `dsl_and_hooks.md`; read it if any syntax here is unfamiliar.
 specifically needs create-time import.
 
 **Shape:**
+
 - Initial state is **inert and empty**, named outside the domain (`new`,
   `initial`, …) — not `submitted` / `received` / `uploaded`.
 - A **manual** trigger (e.g. `add_attachments`) takes a filepath or filepaths
@@ -55,8 +56,8 @@ specifically needs create-time import.
   `dsl_and_hooks.md`).
 
 ```text
-^new==add_attachments-->attachments_added--begin-->submitted--...
-# or: attachments_added--accept-->new   (then a separate edge starts the flow)
+[*] --> new == add_attachments ==> attachments_added -- begin --> submitted -- ...
+%% or: attachments_added -- accept --> new   (then a separate edge starts the flow)
 ```
 
 **Why not `create_case_in_folder`:** trigger ops get semantics, event tracking,
@@ -74,9 +75,11 @@ per-file status. `add_attachments` (or equivalent) gets a normal
 ### 1. Pre-final data extraction
 
 **When:** the case produces something worth keeping, but a terminal state
-(`state^`) auto-purges every asset not explicitly kept, soon after entry.
+(`state --> [*]`) auto-purges every asset not explicitly kept, soon after
+entry.
 
 **Shape — three options, roughly increasing in cost:**
+
 - **(a) Externalize on the way in.** An `on_enter_<terminal>` (or the
   `perform_` of the trigger into it) copies/writes the deliverable *outside* the
   case folder before the purge runs. Good when the destination is another
@@ -87,7 +90,7 @@ per-file status. `add_attachments` (or equivalent) gets a normal
   the data can just stay in the (now-retained) case folder.
 - **(c) Delay the purge with a manual pre-final gate.** Insert a non-terminal
   "done, pending pickup" state exited only by a manual (`==`) trigger, e.g.
-  `...--finish-->extract_pending==confirm_extracted-->done^`. The case parks in
+  `... -- finish --> extract_pending == confirm_extracted ==> done --> [*]`. The case parks in
   `extract_pending` (it will not auto-advance past a `==` edge) until an
   external process reads the data and fires `confirm_extracted`. Use when a
   separate consumer must pull the data on its own schedule.
@@ -117,8 +120,8 @@ late/terminal ones. If review is optional, don't gate advancement on it.
 input) and simply re-running it is a reasonable response.
 
 **Shape:** a `@FAIL` guard pair on the edge —
-`working--@FAIL<3#do_thing-->done` plus
-`working--@FAIL>=3#give_up-->needs_attention`. `@FAIL` counts failed transition
+`working -- do_thing [@FAIL<3] --> done` plus
+`working -- give_up [@FAIL>=3] --> needs_attention`. `@FAIL` counts failed transition
 attempts since entering the current state; a raised exception in the
 `perform_`/`before_`/`guard_` counts as one attempt.
 
@@ -133,8 +136,9 @@ an abandon) rather than leaving the case wedged — see #5.
 (waiting on a person, wedged on a repeated failure) could sit forever.
 
 **Shape:** a `@DWELL` escape, often from the wildcard source so it applies
-everywhere: `*--@DWELL>30d#mark_abandoned-->abandoned^`. Or narrow it to the
-states that actually rot: `awaiting_review--@DWELL>14d#mark_abandoned-->abandoned^`.
+everywhere: `* -- mark_abandoned [@DWELL>30d] --> abandoned --> [*]`. Or
+narrow it to the states that actually rot:
+`awaiting_review -- mark_abandoned [@DWELL>14d] --> abandoned --> [*]`.
 
 **Notes:** `@DWELL` measures time in the *current* state, so a case that keeps
 transitioning normally never trips it — only genuinely idle ones. This is the
@@ -147,9 +151,11 @@ while attempting a trigger aborts that transition and blocks forward progress;
 with no retry (#3), no divert, and no expiry (#4), the case stalls quietly.
 
 **Shape / options (usually a combination):**
+
 - Add a **divert edge** off the failing state to a human-triaged state:
-  `working--@FAIL>=3#escalate-->needs_attention`, with
-  `needs_attention==reassign-->working` and `needs_attention==abandon-->abandoned^`.
+  `working -- escalate [@FAIL>=3] --> needs_attention`, with
+  `needs_attention == reassign ==> working` and
+  `needs_attention == abandon ==> abandoned --> [*]`.
 - **Alert an operator** from the hook that detects the integrity problem via
   `self.case_emit_alert_event("what went wrong")` — a type-agnostic
   dashboard/fleet-scan marker. Use sparingly, for real deviations, not routine
@@ -186,14 +192,14 @@ rule applies.
 
 Convert the automated (`--`) edge into a costly, external, or irreversible step
 into a manual (`==`) one, so a human explicitly authorizes it
-(`ready==approve_send-->sending`). The case parks until someone/something fires
+(`ready == approve_send ==> sending`). The case parks until someone/something fires
 the trigger. Pair with expiry (#4). This is the same mechanism as 1c, applied
 for authorization rather than data pickup.
 
 ### 8. Failure diversion (dead-letter) state
 
 A concrete companion to #5: one dedicated `needs_attention` / `error` state that
-several failing steps divert into (via `@FAIL>=n#...` edges), with manual exits
+several failing steps divert into (via `[@FAIL>=n]`-guarded edges), with manual exits
 to retry-from-scratch, reassign, or abandon. Keeps failure handling in one
 inspectable place instead of scattered per-step dead-ends.
 
@@ -244,12 +250,13 @@ authoritative contract — it is outside this skill's normal interface-only
 scope, so read it before implementing.)
 
 **Shape — a "front-door" case plus one specialized case per family:**
+
 - A **classifier / intake case** (e.g. `NewMailIntakeCase`) does the common
   initial processing, then advances to a **penultimate handoff state** named
   something like `classified`. Give that state a *manual* exit to a terminal
   state it is **never actually meant to reach**, purely to satisfy the FSM's
   "non-terminal states need an exit" rule, e.g.
-  `...--identify-->classified==never-->closed^`. Because the edge is manual
+  `... -- identify --> classified == never ==> closed --> [*]`. Because the edge is manual
   (`==`), the case simply **parks** in `classified` and waits.
 - An **external force** (a watcher, the manager, an operator) notices cases
   sitting in `classified`, decides the family, and calls
@@ -258,11 +265,12 @@ scope, so read it before implementing.)
 - Each **specialized case type** (`InvoiceCase`, `SpamCase`, ...) must declare a
   state also named `classified` (the shared handoff name) — and since that state
   is reached *only* via reclassify, not by any edge, declare it **initial**
-  (`^classified`) so the parser's reachability check passes; give it automated
-  edges onward into that family's real processing:
-  `^classified--extract-->extracting--post-->posted^`.
+  (`[*] --> classified`) so the parser's reachability check passes; give it
+  automated edges onward into that family's real processing:
+  `[*] --> classified -- extract --> extracting -- post --> posted --> [*]`.
 
 **Notes / tradeoffs:**
+
 - The handoff state name is the whole contract between front door and
   specialists — keep it identical and stable across all of them.
 - Assets carry over by folder, not by schema: if the intake wrote assets the

@@ -1,13 +1,16 @@
+import io
+
 import pytest
 
 from totodev_pub.folder_backed_case_support.constants import DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS
 from totodev_pub.folder_backed_case_support.exceptions import FsmBindingError
 from totodev_pub.folder_backed_case_support.exceptions import FsmChainParseError
 from totodev_pub.folder_backed_case_support.state_chain_parser import StateChainParser
+from totodev_pub.folder_backed_case_support.state_chain_parser import main as cli_main
 
 
 def test_auto_edge_uses_double_dash_connector():
-    spec = StateChainParser.parse(["^new--begin-->open==finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new -- begin --> open == finish ==> done --> [*]"])
 
     assert ("new", "begin") in spec.auto_edges
     assert spec.pipeline == ["begin"]
@@ -18,11 +21,11 @@ def test_auto_edge_uses_double_dash_connector():
 
 def test_legacy_star_auto_edge_syntax_is_rejected():
     with pytest.raises(FsmChainParseError):
-        StateChainParser.parse(["^new--*begin-->open--finish-->done^"])
+        StateChainParser.parse(["[*] --> new -- *begin --> open -- finish --> done --> [*]"])
 
 
 def test_missing_hook_for_auto_trigger_is_rejected():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         pass
@@ -35,7 +38,7 @@ def test_missing_hook_for_auto_trigger_is_rejected():
 
 
 def test_missing_hook_for_manual_trigger_is_allowed():
-    spec = StateChainParser.parse(["^new==assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new == assign ==> assigned --> [*]"])
 
     class Carrier:
         pass
@@ -44,7 +47,7 @@ def test_missing_hook_for_manual_trigger_is_allowed():
 
 
 def test_required_auto_hook_must_be_async():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         def perform_assign(self, tctx):
@@ -59,7 +62,7 @@ def test_required_auto_hook_must_be_async():
 
 def test_implied_carrier_attributes_require_auto_hooks_only():
     spec = StateChainParser.parse(
-        ["^new--assign-->assigned==notify-->done^"]
+        ["[*] --> new -- assign --> assigned == notify ==> done --> [*]"]
     )
 
     required, optional = spec.implied_carrier_attributes()
@@ -69,11 +72,11 @@ def test_implied_carrier_attributes_require_auto_hooks_only():
 
 def test_hyphenated_state_name_is_rejected():
     with pytest.raises(FsmChainParseError):
-        StateChainParser.parse(["^new-item--begin-->open^"])
+        StateChainParser.parse(["[*] --> new-item -- begin --> open --> [*]"])
 
 
 def test_orphan_detection_error_mode_rejects_unknown_hook_methods():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         async def perform_assign(self, tctx):
@@ -90,7 +93,7 @@ def test_orphan_detection_error_mode_rejects_unknown_hook_methods():
 
 
 def test_orphan_detection_warn_mode_emits_warning():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         async def perform_assign(self, tctx):
@@ -104,7 +107,7 @@ def test_orphan_detection_warn_mode_emits_warning():
 
 
 def test_orphan_detection_off_mode_suppresses_orphan_checks():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         async def perform_assign(self, tctx):
@@ -117,7 +120,7 @@ def test_orphan_detection_off_mode_suppresses_orphan_checks():
 
 
 def test_orphan_detection_requires_valid_mode():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         async def perform_assign(self, tctx):
@@ -132,14 +135,14 @@ def test_orphan_detection_requires_valid_mode():
 # ---------------------------------------------------------------------------
 
 def test_method_guard_token_maps_to_guard_prefix():
-    spec = StateChainParser.parse(["^new==funded#approved#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded, approved] ==> done --> [*]"])
 
     conds = spec.transitions[-1]["conditions"]
     assert conds == ["guard_funded", "guard_approved"]
 
 
 def test_missing_guard_method_is_rejected_with_prefixed_name():
-    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded] ==> done --> [*]"])
 
     class Carrier:
         async def funded(self, tctx):  # bare name: not the guard_ convention
@@ -152,7 +155,7 @@ def test_missing_guard_method_is_rejected_with_prefixed_name():
 
 
 def test_async_guard_method_binds_cleanly():
-    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded] ==> done --> [*]"])
 
     class Carrier:
         async def guard_funded(self, tctx):
@@ -162,7 +165,7 @@ def test_async_guard_method_binds_cleanly():
 
 
 def test_sync_guard_method_is_rejected():
-    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded] ==> done --> [*]"])
 
     class Carrier:
         def guard_funded(self, tctx):  # sync: must be async
@@ -176,7 +179,7 @@ def test_sync_guard_method_is_rejected():
 
 
 def test_orphan_detection_error_mode_rejects_unknown_guard_method():
-    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded] ==> done --> [*]"])
 
     class Carrier:
         async def guard_funded(self, tctx):
@@ -194,7 +197,7 @@ def test_orphan_detection_error_mode_rejects_unknown_guard_method():
 
 
 def test_orphan_detection_warn_mode_flags_unknown_guard_method():
-    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded] ==> done --> [*]"])
 
     class Carrier:
         async def guard_funded(self, tctx):
@@ -208,7 +211,7 @@ def test_orphan_detection_warn_mode_flags_unknown_guard_method():
 
 
 def test_orphan_detection_off_mode_allows_unknown_guard_method():
-    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded] ==> done --> [*]"])
 
     class Carrier:
         async def guard_funded(self, tctx):
@@ -224,7 +227,7 @@ def test_factual_guards_do_not_imply_guard_methods():
     """`@DWELL`/`@FAIL` are compiled by the base class; they live in `_fact_guards`, not
     `conditions`, so they impose no `guard_<name>` carrier method and contribute nothing
     to the declared-guard set used by orphan detection."""
-    spec = StateChainParser.parse(["^new--@DWELL>30m#timeout-->done^"])
+    spec = StateChainParser.parse(["[*] --> new -- timeout [@DWELL>30m] --> done --> [*]"])
 
     assert spec._declared_guard_tokens() == set()
     assert "conditions" not in spec.transitions[-1]
@@ -241,7 +244,7 @@ def test_factual_guards_do_not_imply_guard_methods():
 # ---------------------------------------------------------------------------
 
 def test_hook_without_tctx_param_is_rejected():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         async def perform_assign(self):  # missing the tctx parameter
@@ -255,7 +258,7 @@ def test_hook_without_tctx_param_is_rejected():
 
 
 def test_guard_without_tctx_param_is_rejected():
-    spec = StateChainParser.parse(["^new==funded#finish-->done^"])
+    spec = StateChainParser.parse(["[*] --> new == finish [funded] ==> done --> [*]"])
 
     class Carrier:
         async def guard_funded(self):  # missing the tctx parameter
@@ -269,7 +272,7 @@ def test_guard_without_tctx_param_is_rejected():
 
 
 def test_hook_with_varargs_accepts_tctx():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         async def perform_assign(self, *args):  # *args can receive the single tctx
@@ -279,7 +282,7 @@ def test_hook_with_varargs_accepts_tctx():
 
 
 def test_require_tctx_false_skips_arity_check():
-    spec = StateChainParser.parse(["^new--assign-->assigned^"])
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
         async def perform_assign(self):  # no tctx, but the scan is disabled
@@ -307,7 +310,7 @@ def test_to_networkx_missing_dependency_raises_import_error(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    spec = StateChainParser.parse(["^new--go-->done^"])
+    spec = StateChainParser.parse(["[*] --> new -- go --> done --> [*]"])
     with pytest.raises(ImportError) as excinfo:
         spec.to_networkx()
     assert "networkx" in str(excinfo.value)
@@ -315,7 +318,7 @@ def test_to_networkx_missing_dependency_raises_import_error(monkeypatch):
 
 def test_to_networkx_maps_state_flags_to_node_attributes():
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["^new--go-->open==finish-->done^"]).validate()
+    spec = StateChainParser.parse(["[*] --> new -- go --> open == finish ==> done --> [*]"]).validate()
 
     g = spec.to_networkx()
 
@@ -334,7 +337,7 @@ def test_to_networkx_maps_state_flags_to_node_attributes():
 def test_to_networkx_edge_attributes_capture_guards_auto_and_facts():
     pytest.importorskip("networkx")
     spec = StateChainParser.parse(
-        ["^new--@FAIL<3#funded#finish-->done^"]
+        ["[*] --> new -- finish [funded, @FAIL<3] --> done --> [*]"]
     ).validate().classify()
 
     g = spec.to_networkx()
@@ -357,7 +360,7 @@ def test_to_networkx_edge_attributes_capture_guards_auto_and_facts():
 def test_to_networkx_flags_pure_timed_escape_edges_and_states():
     pytest.importorskip("networkx")
     spec = StateChainParser.parse(
-        ["^new--go-->waiting--@DWELL>=30m#timeout-->done^"]
+        ["[*] --> new -- go --> waiting -- timeout [@DWELL>=30m] --> done --> [*]"]
     ).validate().classify()
 
     g = spec.to_networkx()
@@ -370,7 +373,7 @@ def test_to_networkx_flags_pure_timed_escape_edges_and_states():
 
 def test_to_networkx_carries_trigger_timeout_and_choke_metadata():
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["^new--assign~20s-->done^"]).validate()
+    spec = StateChainParser.parse(["[*] --> new -- assign~20s --> done --> [*]"]).validate()
     spec.trigger_chokes = {"assign": frozenset({"db"})}
 
     g = spec.to_networkx()
@@ -387,8 +390,8 @@ def test_to_networkx_is_multigraph_and_keeps_parallel_edges_distinct():
     DiGraph would collapse same-(source,dest) edges; MultiDiGraph must keep both."""
     pytest.importorskip("networkx")
     spec = StateChainParser.parse([
-        "^fork--gated#alpha-->done^",
-        "fork--@DWELL>1h#beta-->done^",
+        "[*] --> fork -- alpha [gated] --> done --> [*]",
+        "fork -- beta [@DWELL>1h] --> done",
     ]).validate()
 
     g = spec.to_networkx()
@@ -402,7 +405,7 @@ def test_to_networkx_is_multigraph_and_keeps_parallel_edges_distinct():
 
 def test_to_networkx_pending_wildcard_renders_as_sentinel_node_and_edge():
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["*==cancel-->cancelled^"])
+    spec = StateChainParser.parse(["* == cancel ==> cancelled --> [*]"])
 
     g = spec.to_networkx()
 
@@ -417,8 +420,8 @@ def test_to_networkx_pending_wildcard_renders_as_sentinel_node_and_edge():
 def test_to_networkx_wildcard_expansion_adds_concrete_edges_alongside_sentinel():
     pytest.importorskip("networkx")
     spec = StateChainParser.parse([
-        "^new--go-->open==finish-->done^",
-        "*==cancel-->cancelled^",
+        "[*] --> new -- go --> open == finish ==> done --> [*]",
+        "* == cancel ==> cancelled --> [*]",
     ]).validate().expand_wildcards()
 
     g = spec.to_networkx()
@@ -438,7 +441,7 @@ def test_to_networkx_fact_guards_include_dwell_and_explicit_fail():
     carrier method) show up on the edge exactly as declared."""
     pytest.importorskip("networkx")
     spec = StateChainParser.parse(
-        ["^new--@FAIL<3#retry-->waiting--@DWELL>=2h#timeout-->done^"]
+        ["[*] --> new -- retry [@FAIL<3] --> waiting -- timeout [@DWELL>=2h] --> done --> [*]"]
     ).validate().classify()
 
     g = spec.to_networkx()
@@ -456,7 +459,7 @@ def test_to_networkx_shows_implicit_fail_cap_after_apply_implicit_fail_cap():
     it does, the injected cap is visible on the edge, marked `"implicit": True` so it can be
     told apart from an author-written `@FAIL` guard (which never carries that key)."""
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["^new--go-->done^"]).validate().classify()
+    spec = StateChainParser.parse(["[*] --> new -- go --> done --> [*]"]).validate().classify()
 
     g_before = spec.to_networkx()
     _, _, before = next(iter(g_before.edges(data=True)))
@@ -477,7 +480,7 @@ def test_to_networkx_shows_implicit_fail_cap_after_apply_implicit_fail_cap():
 def test_to_networkx_excludes_implicit_fail_cap_when_disabled():
     pytest.importorskip("networkx")
     spec = (
-        StateChainParser.parse(["^new--go-->done^"])
+        StateChainParser.parse(["[*] --> new -- go --> done --> [*]"])
         .validate().classify().apply_implicit_fail_cap()
     )
 
@@ -495,7 +498,7 @@ def test_to_networkx_keeps_explicit_fail_guard_regardless_of_flag():
     after apply_implicit_fail_cap() runs (which exempts edges with an explicit @FAIL)."""
     pytest.importorskip("networkx")
     spec = (
-        StateChainParser.parse(["^new--@FAIL<3#go-->done^"])
+        StateChainParser.parse(["[*] --> new -- go [@FAIL<3] --> done --> [*]"])
         .validate().classify().apply_implicit_fail_cap()
     )
 
@@ -507,7 +510,7 @@ def test_to_networkx_keeps_explicit_fail_guard_regardless_of_flag():
 
 def test_to_networkx_fills_default_soft_timeout_when_enabled():
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["^new--go-->waiting--assign~20s-->done^"]).validate()
+    spec = StateChainParser.parse(["[*] --> new -- go --> waiting -- assign~20s --> done --> [*]"]).validate()
 
     g = spec.to_networkx()
 
@@ -522,7 +525,7 @@ def test_to_networkx_fills_default_soft_timeout_when_enabled():
 
 def test_to_networkx_omits_default_soft_timeout_when_disabled():
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["^new--go-->waiting--assign~20s-->done^"]).validate()
+    spec = StateChainParser.parse(["[*] --> new -- go --> waiting -- assign~20s --> done --> [*]"]).validate()
 
     g = spec.to_networkx(include_implied_caps=False)
 
@@ -538,7 +541,7 @@ def test_to_networkx_omits_default_soft_timeout_when_disabled():
 
 def test_to_networkx_include_implied_caps_applies_to_pending_wildcard_edges_too():
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["*--go-->done^"])
+    spec = StateChainParser.parse(["* -- go --> done --> [*]"])
 
     g_default = spec.to_networkx()
     _, _, with_default = next(iter(g_default.edges(data=True)))
@@ -558,8 +561,8 @@ def test_to_networkx_include_implied_caps_applies_to_pending_wildcard_edges_too(
 def test_to_networkx_default_draws_wildcard_expansion_as_direct_edges():
     pytest.importorskip("networkx")
     spec = StateChainParser.parse([
-        "^new--go-->open==finish-->done^",
-        "*==cancel-->cancelled^",
+        "[*] --> new -- go --> open == finish ==> done --> [*]",
+        "* == cancel ==> cancelled --> [*]",
     ]).validate().expand_wildcards()
 
     g = spec.to_networkx()  # wildcard_pseudo_state=False by default
@@ -573,8 +576,8 @@ def test_to_networkx_default_draws_wildcard_expansion_as_direct_edges():
 def test_to_networkx_pseudo_state_routes_expanded_wildcard_edges_through_hub():
     pytest.importorskip("networkx")
     spec = StateChainParser.parse([
-        "^new--go-->open==finish-->done^",
-        "*==cancel-->cancelled^",
+        "[*] --> new -- go --> open == finish ==> done --> [*]",
+        "* == cancel ==> cancelled --> [*]",
     ]).validate().expand_wildcards()
 
     g = spec.to_networkx(wildcard_pseudo_state=True)
@@ -613,9 +616,9 @@ def test_to_networkx_pseudo_state_dedupes_hub_edges_by_guard_not_just_trigger():
     must still produce two distinct hub -> dest edges -- guards are part of edge identity."""
     pytest.importorskip("networkx")
     spec = StateChainParser.parse([
-        "^a--x-->done^",
-        "b--gated#x-->done^",
-        "*==escape-->done^",
+        "[*] --> a -- x --> done --> [*]",
+        "b -- x [gated] --> done",
+        "* == escape ==> done",
     ])
     # hand-craft two differently-guarded concrete "wildcard-expanded" edges sharing a
     # trigger+dest, the way expand_wildcards() would if two distinct wildcard chains both
@@ -640,7 +643,7 @@ def test_to_networkx_pseudo_state_dedupes_hub_edges_by_guard_not_just_trigger():
 def test_to_networkx_graph_level_metadata():
     pytest.importorskip("networkx")
     spec = StateChainParser.parse(
-        ["^new--go-->open==finish-->done^"]
+        ["[*] --> new -- go --> open == finish ==> done --> [*]"]
     ).validate()
 
     g = spec.to_networkx()
@@ -651,7 +654,7 @@ def test_to_networkx_graph_level_metadata():
     assert g.graph["states_order"] == ["new", "open", "done"]
     assert g.graph["triggers"] == ["go", "finish"]
     assert g.graph["pipeline"] == ["go"]
-    assert g.graph["primary_chain"] == "^new--go-->open==finish-->done^"
+    assert g.graph["primary_chain"] == "[*] --> new -- go --> open == finish ==> done --> [*]"
 
 
 # ---------------------------------------------------------------------------
@@ -667,9 +670,9 @@ def test_to_networkx_declaration_index_restores_auto_attempt_order():
     # Destinations B, C, B: NetworkX adjacency yields t1,t3,t2 (grouped by dest),
     # while declaration / advance order is t1,t2,t3.
     spec = StateChainParser.parse([
-        "^fork--t1-->B^",
-        "fork--t2-->C^",
-        "fork--t3-->B^",
+        "[*] --> fork -- t1 --> B --> [*]",
+        "fork -- t2 --> C --> [*]",
+        "fork -- t3 --> B",
     ]).validate()
 
     g = spec.to_networkx()
@@ -697,8 +700,8 @@ def test_to_networkx_wildcard_expanded_edges_sort_after_explicit():
     greater than every explicit transition's index — matching runtime attempt order."""
     pytest.importorskip("networkx")
     spec = StateChainParser.parse([
-        "^new--go-->open==finish-->done^",
-        "*--timeout-->expired^",
+        "[*] --> new -- go --> open == finish ==> done --> [*]",
+        "* -- timeout --> expired --> [*]",
     ]).validate().expand_wildcards()
 
     g = spec.to_networkx()
@@ -723,8 +726,8 @@ def test_to_networkx_hub_spokes_keep_index_artifacts_are_none():
     deduplicated *->dest hub edges and abstract pending-rule edges get None."""
     pytest.importorskip("networkx")
     spec = StateChainParser.parse([
-        "^new--go-->open==finish-->done^",
-        "*--timeout-->expired^",
+        "[*] --> new -- go --> open == finish ==> done --> [*]",
+        "* -- timeout --> expired --> [*]",
     ]).validate().expand_wildcards()
 
     g = spec.to_networkx(wildcard_pseudo_state=True)
@@ -752,7 +755,7 @@ def test_to_networkx_multi_source_transition_shares_declaration_index():
     """A hand-built multi-source transition dict fans out to one edge per source that
     all share the same transitions-list index; within each source the index is unique."""
     pytest.importorskip("networkx")
-    spec = StateChainParser.parse(["^a--x-->done^", "^b--y-->done^"]).validate()
+    spec = StateChainParser.parse(["[*] --> a -- x --> done --> [*]", "[*] --> b -- y --> done"]).validate()
     # Replace the two single-source edges with one multi-source dict at a known index.
     shared = {"trigger": "shared", "source": ["a", "b"], "dest": "done"}
     spec.transitions = [shared]
@@ -776,7 +779,7 @@ def test_to_networkx_multi_source_transition_shares_declaration_index():
 
 def test_unguarded_auto_self_loop_is_rejected():
     with pytest.raises(FsmChainParseError) as excinfo:
-        StateChainParser.parse(["^a--tick-->a--go-->done^"]).validate()
+        StateChainParser.parse(["[*] --> a -- tick --> a -- go --> done --> [*]"]).validate()
     msg = str(excinfo.value)
     assert "auto self-loop" in msg
     assert "tick" in msg
@@ -786,7 +789,7 @@ def test_unguarded_auto_self_loop_is_rejected():
 
 
 def test_method_guarded_auto_self_loop_is_accepted():
-    spec = StateChainParser.parse(["^a--ok#tick-->a--go-->done^"]).validate()
+    spec = StateChainParser.parse(["[*] --> a -- tick [ok] --> a -- go --> done --> [*]"]).validate()
     tick = next(t for t in spec.transitions if t["trigger"] == "tick")
     assert tick["source"] == "a" and tick["dest"] == "a"
     assert tick["conditions"] == ["guard_ok"]
@@ -794,7 +797,7 @@ def test_method_guarded_auto_self_loop_is_accepted():
 
 
 def test_unguarded_manual_self_loop_is_accepted():
-    spec = StateChainParser.parse(["^a==tick-->a--go-->done^"]).validate()
+    spec = StateChainParser.parse(["[*] --> a == tick ==> a -- go --> done --> [*]"]).validate()
     tick = next(t for t in spec.transitions if t["trigger"] == "tick")
     assert tick["source"] == "a" and tick["dest"] == "a"
     assert not tick.get("conditions")
@@ -803,7 +806,538 @@ def test_unguarded_manual_self_loop_is_accepted():
 
 def test_fact_only_auto_self_loop_is_rejected():
     with pytest.raises(FsmChainParseError) as excinfo:
-        StateChainParser.parse(["^a--@DWELL>1s#tick-->a--go-->done^"]).validate()
+        StateChainParser.parse(["[*] --> a -- tick [@DWELL>1s] --> a -- go --> done --> [*]"]).validate()
     msg = str(excinfo.value)
     assert "auto self-loop" in msg
     assert "method guard" in msg
+
+# ---------------------------------------------------------------------------
+# Multiline-string declarations, %% comments, and Mermaid boilerplate
+# ---------------------------------------------------------------------------
+
+
+def test_multiline_string_declaration_parses_like_a_list():
+    spec = StateChainParser.parse("""
+        [*] --> new -- begin --> open == finish ==> done --> [*]
+        open --> abandoned : give_up
+        abandoned --> [*]
+    """)
+    assert spec.states == ["new", "open", "done", "abandoned"]
+    assert spec.initial_state == "new"
+    assert spec.terminal_states == {"done", "abandoned"}
+    assert ("open", "give_up") in spec.auto_edges
+
+
+def test_percent_comments_and_mermaid_boilerplate_are_ignored():
+    spec = StateChainParser.parse("""
+        stateDiagram-v2
+        direction LR
+        %% a whole-line comment
+        [*] --> a -- go --> b --> [*]   %% a trailing comment
+        flowchart TD
+    """)
+    assert spec.states == ["a", "b"]
+    assert spec.initial_states == {"a"}
+    assert spec.terminal_states == {"b"}
+
+
+def test_list_entries_may_contain_newlines_and_comments():
+    spec = StateChainParser.parse([
+        "[*] --> a -- go --> b --> [*]  %% inline comment",
+        "a --> c : divert\nc --> [*]",
+    ])
+    assert spec.terminal_states == {"b", "c"}
+
+
+def test_python_style_comment_line_is_rejected_with_hint():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse("# lifecycle\n[*] --> a -- go --> b --> [*]")
+    assert "%%" in str(excinfo.value)
+
+
+def test_normalize_chain_lines_returns_canonical_line_list():
+    lines = StateChainParser.normalize_chain_lines("""
+        stateDiagram-v2
+        %% comment
+        [*] --> a -- go --> b --> [*]
+        a --> c : divert   %% trailing
+    """)
+    assert lines == [
+        "[*] --> a -- go --> b --> [*]",
+        "a --> c : divert",
+    ]
+    assert StateChainParser.normalize_chain_lines(None) == []
+    assert StateChainParser.normalize_chain_lines([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Boundary hops: [*] --> state (initial) and state --> [*] (terminal)
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_boundary_lines_mark_initial_and_terminal():
+    spec = StateChainParser.parse([
+        "a -- go --> b",
+        "[*] --> a",
+        "b --> [*]",
+    ]).validate()
+    assert spec.initial_states == {"a"}
+    assert spec.terminal_states == {"b"}
+    assert len(spec.transitions) == 1  # boundary hops are markers, not transitions
+
+
+def test_inline_boundary_hops_at_both_chain_ends():
+    spec = StateChainParser.parse(["[*] --> only --> [*]"])
+    assert spec.initial_states == {"only"}
+    assert spec.terminal_states == {"only"}
+    assert spec.transitions == []
+
+
+def test_first_initial_marked_state_wins_as_default():
+    spec = StateChainParser.parse([
+        "[*] --> first -- go --> second --> [*]",
+        "[*] --> second",
+    ])
+    assert spec.initial_states == {"first", "second"}
+    assert spec.initial_state == "first"
+
+
+def test_boundary_hop_with_label_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["[*] -- go --> a --> [*]"])
+    assert "boundary hop takes no trigger label" in str(excinfo.value)
+
+
+def test_interior_boundary_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["a -- go --> [*] -- more --> b"])
+    assert "chain's ends" in str(excinfo.value)
+
+
+def test_boundary_to_boundary_is_rejected():
+    with pytest.raises(FsmChainParseError):
+        StateChainParser.parse(["[*] --> [*]"])
+
+
+def test_manual_arrow_boundary_hop_is_rejected():
+    with pytest.raises(FsmChainParseError):
+        StateChainParser.parse(["closed ==> [*]"])
+
+
+def test_bare_connector_between_real_states_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["a --> b"])
+    assert "without a trigger label" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Matched connector arrows: -- label --> (auto) vs == label ==> (manual)
+# ---------------------------------------------------------------------------
+
+
+def test_mismatched_connector_arrows_are_rejected():
+    for chain in ("a == t --> b", "a -- t ==> b"):
+        with pytest.raises(FsmChainParseError) as excinfo:
+            StateChainParser.parse([chain])
+        assert "matched pairs" in str(excinfo.value)
+
+
+def test_crammed_connectors_parse_without_spaces():
+    spec = StateChainParser.parse(["[*]-->a--go-->b==stop==>c-->[*]"])
+    assert spec.initial_states == {"a"}
+    assert spec.terminal_states == {"c"}
+    assert ("a", "go") in spec.auto_edges
+    assert ("b", "stop") not in spec.auto_edges
+
+
+# ---------------------------------------------------------------------------
+# Colon-labeled single edges (Mermaid stateDiagram-v2 style)
+# ---------------------------------------------------------------------------
+
+
+def test_colon_form_plain_arrow_is_auto():
+    spec = StateChainParser.parse([
+        "[*] --> a", "a --> b : go", "b --> [*]",
+    ])
+    assert ("a", "go") in spec.auto_edges
+
+
+def test_colon_form_thick_arrow_is_manual():
+    spec = StateChainParser.parse([
+        "[*] --> a", "a ==> b : stop", "b --> [*]",
+    ])
+    assert ("a", "stop") not in spec.auto_edges
+    assert spec.triggers == ["stop"]
+
+
+def test_colon_form_label_marker_spells_manual_in_valid_mermaid():
+    spec = StateChainParser.parse([
+        "[*] --> a", "a --> b : == stop", "b --> [*]",
+    ])
+    assert ("a", "stop") not in spec.auto_edges
+    assert spec.transitions[0]["trigger"] == "stop"
+
+
+def test_colon_form_carries_guards_and_timeout():
+    spec = StateChainParser.parse([
+        "[*] --> a", "a --> b : retry~3m [funded, @FAIL<3]", "b --> [*]",
+    ])
+    t = spec.transitions[0]
+    assert t["conditions"] == ["guard_funded"]
+    assert t["_fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+    assert spec.trigger_timeouts == {"retry": 180.0}
+
+
+def test_colon_form_wildcard_source():
+    spec = StateChainParser.parse([
+        "[*] --> a -- go --> b --> [*]",
+        "* --> expired : timeout [@DWELL>1d]",
+        "expired --> [*]",
+    ]).validate().expand_wildcards()
+    assert spec.pending_wildcards[0]["trigger"] == "timeout"
+    assert spec.pending_wildcards[0]["auto"] is True
+    assert ("a", "timeout") in spec.auto_edges  # injected by expansion
+
+
+def test_colon_form_multi_hop_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["a --> b --> c : go"])
+    assert "ONE edge per line" in str(excinfo.value)
+
+
+def test_colon_form_boundary_endpoint_is_rejected():
+    for chain in ("[*] --> a : go", "a --> [*] : go"):
+        with pytest.raises(FsmChainParseError) as excinfo:
+            StateChainParser.parse([chain])
+        assert "takes no label" in str(excinfo.value)
+
+
+def test_colon_form_missing_trigger_is_rejected():
+    with pytest.raises(FsmChainParseError):
+        StateChainParser.parse(["a --> b :"])
+
+
+# ---------------------------------------------------------------------------
+# Bracketed guard lists
+# ---------------------------------------------------------------------------
+
+
+def test_guard_order_is_preserved_across_kinds():
+    spec = StateChainParser.parse(
+        ["[*] --> a -- go [one, @FAIL<2, two, @DWELL>5m] --> b --> [*]"]
+    )
+    t = spec.transitions[0]
+    assert t["conditions"] == ["guard_one", "guard_two"]
+    assert t["_fact_guards"] == [
+        {"name": "FAIL", "op": "<", "operand": 2},
+        {"name": "DWELL", "op": ">", "operand": 300.0},
+    ]
+
+
+def test_duplicate_fact_guard_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["[*] --> a -- go [@FAIL<2, @FAIL>5] --> b --> [*]"])
+    assert "at most one @FAIL" in str(excinfo.value)
+
+
+def test_empty_guard_list_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["a --> b : go []"])
+    assert "empty guard list" in str(excinfo.value)
+
+
+def test_stray_comma_in_guard_list_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["a --> b : go [one,, two]"])
+    assert "stray comma" in str(excinfo.value)
+
+
+def test_unclosed_bracket_is_rejected():
+    with pytest.raises(FsmChainParseError):
+        StateChainParser.parse(["a --> b : go [one"])
+
+
+def test_invalid_guard_token_is_rejected():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["a --> b : go [not a name!]"])
+    assert "invalid guard" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Expunged syntax gets pointed, forward-phrased errors
+# ---------------------------------------------------------------------------
+
+
+def test_caret_marker_is_rejected_with_boundary_hint():
+    for chain in ("^new -- go --> b", "a -- go --> done^"):
+        with pytest.raises(FsmChainParseError) as excinfo:
+            StateChainParser.parse([chain])
+        msg = str(excinfo.value)
+        assert "'[*] --> state'" in msg or "state --> [*]" in msg
+
+
+def test_hash_guard_separator_is_rejected_with_bracket_hint():
+    for chain in (
+        "a -- funded#finish --> b",
+        "a --> b : funded # finish",
+    ):
+        with pytest.raises(FsmChainParseError) as excinfo:
+            StateChainParser.parse([chain])
+        assert "bracket" in str(excinfo.value)
+
+
+def test_wildcard_cannot_be_marked_initial():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["[*] --> * -- go --> b"])
+    assert "wildcard" in str(excinfo.value)
+
+
+def test_wildcard_only_valid_as_source():
+    with pytest.raises(FsmChainParseError) as excinfo:
+        StateChainParser.parse(["a -- go --> *"])
+    assert "SOURCE" in str(excinfo.value)
+
+
+def test_wildcard_chain_allows_trailing_terminal_hop():
+    spec = StateChainParser.parse(["* -- timeout --> expired --> [*]"])
+    assert spec.terminal_states == {"expired"}
+    assert spec.pending_wildcards[0]["dest"] == "expired"
+
+
+# ---------------------------------------------------------------------------
+# CLI (main(); runnable via the state_chain_cli launcher module)
+# ---------------------------------------------------------------------------
+
+def test_cli_validates_literal_chain_and_prints_summary(capsys):
+    rc = cli_main(["[*] --> new -- go --> open == stop ==> done --> [*]"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.startswith("OK: 3 states, 2 transitions")
+    assert "initial: new" in out
+    assert "terminal: done" in out
+    assert "2 triggers" not in out                # spot-check format below instead
+    assert "triggers: 2 (1 auto, 1 manual)" in out
+
+
+def test_cli_summary_includes_wildcards_and_timed_escapes(capsys):
+    rc = cli_main([
+        "[*] --> a -- go --> b --> [*]\n"
+        "* --> expired : timeout [@DWELL>1d]\n"
+        "expired --> [*]"
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "wildcard rule(s)" in out
+    assert "timed escapes: a" in out
+
+
+def test_cli_parse_error_exits_1_with_pointed_message(capsys):
+    rc = cli_main(["^new -- go --> b"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert "'[*] --> state'" in captured.err
+
+
+def test_cli_whole_graph_validation_failure_exits_1(capsys):
+    rc = cli_main(["[*] --> a -- go --> b"])       # no terminal declared
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "terminal" in captured.err
+
+
+def test_cli_no_validate_accepts_partial_snippet(capsys):
+    rc = cli_main(["--no-validate", "a -- go --> b"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.startswith("OK: 2 states, 1 transitions")
+
+
+def test_cli_reads_stdin_by_default(capsys, monkeypatch):
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO("[*] --> a -- go --> b --> [*]\n")
+    )
+    rc = cli_main([])
+    assert rc == 0
+    assert "OK:" in capsys.readouterr().out
+
+
+def test_cli_reads_declaration_from_file(capsys, tmp_path):
+    f = tmp_path / "lifecycle.fsm"
+    f.write_text("%% comment\n[*] --> a -- go --> b --> [*]\n")
+    rc = cli_main([str(f)])
+    assert rc == 0
+    assert "OK:" in capsys.readouterr().out
+
+
+def test_cli_rejects_source_that_is_neither_file_nor_chain(capsys):
+    rc = cli_main(["definitely_not_a_file"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "not a file" in captured.err
+
+
+def test_cli_render_state_output_is_valid_dsl(capsys):
+    pytest.importorskip("networkx")
+    rc = cli_main(["--render", "[*] --> a == stop ==> b --> [*]"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.startswith("stateDiagram-v2")
+    assert "a --> b : == stop" in out
+    # round-trip: the rendered diagram is itself a parseable declaration
+    rt = StateChainParser.parse(out).validate()
+    assert rt.terminal_states == {"b"}
+    assert ("a", "stop") not in rt.auto_edges
+
+
+def test_cli_render_flowchart_uses_thick_manual_arrow(capsys):
+    pytest.importorskip("networkx")
+    rc = cli_main(["--render", "--style", "flowchart",
+                   "[*] --> a == stop ==> b --> [*]"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.startswith("flowchart TD")
+    assert 'a ==>|"stop"| b' in out
+
+
+def test_cli_launcher_module_wraps_the_same_main():
+    from totodev_pub.folder_backed_case_support import state_chain_cli
+    assert state_chain_cli.main is cli_main
+
+
+# ---------------------------------------------------------------------------
+# lint_spec(): advisory warnings (CLI layer)
+# ---------------------------------------------------------------------------
+
+from totodev_pub.folder_backed_case_support.state_chain_parser import lint_spec  # noqa: E402
+
+
+def _linted(decl: str) -> list[str]:
+    return lint_spec(
+        StateChainParser.parse(decl).validate().expand_wildcards().classify()
+    )
+
+
+def test_lint_flags_all_auto_declaration():
+    warns = _linted("[*] --> a -- go --> b -- more --> c --> [*]")
+    assert any("no manual edges" in w for w in warns)
+
+
+def test_lint_quiet_on_mixed_manual_auto():
+    warns = _linted("[*] --> a -- go --> b == stop ==> c --> [*]")
+    assert not any("no manual edges" in w for w in warns)
+
+
+def test_lint_single_edge_all_auto_is_not_flagged():
+    # One-edge specs are trivially all-auto; flagging them would be noise.
+    warns = _linted("[*] --> a -- go --> b --> [*]")
+    assert not any("no manual edges" in w for w in warns)
+
+
+def test_lint_flags_unguarded_auto_edge_shadowing_siblings():
+    warns = _linted(
+        "[*] --> a -- go --> b --> [*]\n"
+        "a -- divert [ready] --> c\n"
+        "c --> [*]\n"
+        "a == bail ==> c"
+    )
+    assert any("'go' is unguarded" in w and "'divert'" in w for w in warns)
+
+
+def test_lint_guarded_branching_is_not_flagged_as_shadowing():
+    warns = _linted(
+        "[*] --> a -- go [fast] --> b --> [*]\n"
+        "a -- divert [@FAIL>=1] --> c\n"
+        "c --> [*]\n"
+        "a == bail ==> c"
+    )
+    assert not any("unguarded" in w for w in warns)
+
+
+def test_lint_flags_permanent_auto_block_risk():
+    warns = _linted(
+        "[*] --> a -- go --> waiting\n"
+        "waiting -- proceed [ready] --> done\n"
+        "done --> [*]\n"
+        "a == abort ==> done"
+    )
+    assert any("waiting" in w and "auto-blocks" in w for w in warns)
+
+
+def test_lint_timed_escape_silences_auto_block_warning():
+    warns = _linted(
+        "[*] --> a -- go --> waiting\n"
+        "waiting -- proceed [ready] --> done\n"
+        "waiting -- give_up [@DWELL>2d] --> done\n"
+        "done --> [*]\n"
+        "a == abort ==> done"
+    )
+    assert not any("auto-blocks" in w for w in warns)
+
+
+def test_lint_manual_exit_silences_auto_block_warning():
+    warns = _linted(
+        "[*] --> a -- go --> waiting\n"
+        "waiting -- proceed [ready] --> done\n"
+        "waiting == nudge ==> done\n"
+        "done --> [*]"
+    )
+    assert not any("auto-blocks" in w for w in warns)
+
+
+# ---------------------------------------------------------------------------
+# CLI: lint warnings, --quiet, --convert
+# ---------------------------------------------------------------------------
+
+
+def test_cli_prints_lint_warnings_to_stderr(capsys):
+    rc = cli_main(["[*] --> a -- go --> b -- more --> c --> [*]"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "OK:" in captured.out
+    assert "warning: no manual edges" in captured.err
+
+
+def test_cli_quiet_suppresses_lint_warnings(capsys):
+    rc = cli_main(["--quiet", "[*] --> a -- go --> b -- more --> c --> [*]"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.err == ""
+
+
+def test_cli_unlabeled_edge_error_carries_convert_hint(capsys):
+    rc = cli_main(["a --> b\n[*] --> a\nb --> [*]"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--convert" in captured.err
+
+
+def test_cli_convert_emits_dsl_notes_and_lint(capsys):
+    sketch = (
+        "stateDiagram-v2\n"
+        "[*] --> new\n"
+        "new --> review : Open Ticket!\n"
+        "review --> approved\n"
+        "approved --> [*]\n"
+    )
+    rc = cli_main(["--convert", sketch])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert 'new --> review : open_ticket   %% was "Open Ticket!"' in captured.out
+    assert "%% TODO: name this trigger" in captured.out
+    assert "ok: converted output parses and validates" in captured.err
+    assert "warning: no manual edges" in captured.err
+
+
+def test_cli_convert_reports_but_tolerates_validation_gap(capsys):
+    # A partial sketch (no terminal) converts fine but cannot validate yet.
+    rc = cli_main(["--convert", "[*] --> a\na --> b : go"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "does not validate yet" in captured.err
+
+
+def test_cli_convert_and_render_are_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli_main(["--convert", "--render", "a --> b : t"])
+    assert exc_info.value.code == 2

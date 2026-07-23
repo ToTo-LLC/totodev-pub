@@ -43,8 +43,8 @@ class _FactoryCase(FolderBackedCase):
     auto edge `bail` — enough surface to test wiring, fact guards, and the timed wrapper."""
 
     fsm_state_chains = [
-        "^new--go-->open==finish-->done^",
-        "open--@FAIL>=2#bail-->failed^",
+        "[*] --> new -- go --> open == finish ==> done --> [*]",
+        "open -- bail [@FAIL>=2] --> failed --> [*]",
     ]
 
     sleep_secs: float = 0.0

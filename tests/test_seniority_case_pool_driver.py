@@ -30,7 +30,7 @@ class BurstCase(FolderBackedCase):
 
     asset_aliases = []
     fsm_trigger_chokes = {"a": {"cpu"}, "b": {"cpu"}}
-    fsm_state_chains = ["^s0--a-->s1--b-->waiting==done-->done^"]
+    fsm_state_chains = ["[*] --> s0 -- a --> s1 -- b --> waiting == done ==> done --> [*]"]
 
     async def perform_a(self, tctx):
         pass
@@ -47,7 +47,7 @@ class WakeCase(FolderBackedCase):
 
     asset_aliases = []
     fsm_trigger_chokes = {"resume": {"cpu"}, "work": {"cpu"}}
-    fsm_state_chains = ["^idle==resume-->active--work-->done^"]
+    fsm_state_chains = ["[*] --> idle == resume ==> active -- work --> done --> [*]"]
 
     async def perform_resume(self, tctx):
         pass
@@ -59,7 +59,7 @@ class WakeCase(FolderBackedCase):
 class ChokedStepCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {"step": {"cpu"}}
-    fsm_state_chains = ["^s0--step-->s1^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
     async def perform_step(self, tctx):
         await self._gate.wait()
@@ -68,7 +68,7 @@ class ChokedStepCase(FolderBackedCase):
 class FastChokedCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {"step": {"cpu"}}
-    fsm_state_chains = ["^s0--step-->s1^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
     async def perform_step(self, tctx):
         pass
@@ -77,7 +77,7 @@ class FastChokedCase(FolderBackedCase):
 class PlainAutoCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^s0--step-->s1^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
     async def perform_step(self, tctx):
         pass
@@ -88,7 +88,7 @@ class GuardedNoopCase(FolderBackedCase):
 
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^hold--blockit#go-->done^"]
+    fsm_state_chains = ["[*] --> hold -- go [blockit] --> done --> [*]"]
 
     async def guard_blockit(self, tctx):
         return False
@@ -102,7 +102,7 @@ class LongAutoCase(FolderBackedCase):
 
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^s0--a-->s1--b-->s2--c-->s3^"]
+    fsm_state_chains = ["[*] --> s0 -- a --> s1 -- b --> s2 -- c --> s3 --> [*]"]
 
     async def perform_a(self, tctx):
         pass

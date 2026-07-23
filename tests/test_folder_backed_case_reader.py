@@ -24,7 +24,7 @@ from totodev_pub.lazy_loaded_file_data import LazyLoadedFileData
 class SimpleCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
 
 def test_get_case_reader_factory(tmp_path):
@@ -189,7 +189,7 @@ class SlowWorkCase(FolderBackedCase):
 
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new--work-->done^"]
+    fsm_state_chains = ["[*] --> new -- work --> done --> [*]"]
 
     sleep_secs: float = 0.3
 
@@ -265,7 +265,7 @@ class ReceiptCase(FolderBackedCase):
         ),
     ]
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new--begin-->done^"]
+    fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
     async def perform_begin(self, tctx):
         pass
@@ -301,7 +301,7 @@ class TypedReceiptCase(FolderBackedCase):
         ),
     ]
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new--begin-->done^"]
+    fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
     async def perform_begin(self, tctx):
         pass

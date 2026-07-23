@@ -27,13 +27,13 @@ class SampleCase(FolderBackedCase):
     Extra detail that should not appear in a first-paragraph render.
     """
 
-    fsm_state_chains = [
-        "^new--intake-->reviewing",
-        "reviewing==funded#approve-->done^",
-        "reviewing==funded#fasttrack-->done^",
-        "reviewing--@DWELL>=1h#expire-->expired^",
-        "*==cancel-->cancelled^",
-    ]
+    fsm_state_chains = """
+        [*] --> new -- intake --> reviewing
+        reviewing == approve [funded] ==> done --> [*]
+        reviewing == fasttrack [funded] ==> done
+        reviewing -- expire [@DWELL>=1h] --> expired --> [*]
+        * == cancel ==> cancelled --> [*]
+    """
     fsm_trigger_chokes = {"approve": {"finance-api"}}
     asset_aliases = [
         AssetSpec(
@@ -76,7 +76,7 @@ class SampleCase(FolderBackedCase):
 class UndocumentedCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new--go-->done^"]
+    fsm_state_chains = ["[*] --> new -- go --> done --> [*]"]
 
     async def perform_go(self, tctx):
         pass
@@ -217,12 +217,15 @@ def test_to_mermaid_flowchart_style_with_wildcard_hub():
 
 
 def test_to_mermaid_flowchart_distinguishes_auto_vs_manual_edges():
-    """Auto edges stay solid; manual edges use dotted connectors; (auto) label kept."""
+    """Same glyphs as the chain DSL: auto edges are plain '-->'; manual edges are the
+    double-thick '==>'. Labels are the edge's DSL text, quoted (guard brackets are
+    Mermaid shape syntax when bare); compiler-injected implicit @FAIL caps are not
+    part of the author's declaration and stay out of the label."""
     doc = collect(SampleCase)
     mermaid = to_mermaid(doc.fsm_graph, style="flowchart")
-    assert "new -->|intake [FAIL<1] (auto)| reviewing" in mermaid
-    assert "reviewing -.->|approve [funded]| done" in mermaid
-    assert "reviewing -->|expire [DWELL>=3600s] (auto)| expired" in mermaid
+    assert 'new -->|"intake"| reviewing' in mermaid
+    assert 'reviewing ==>|"approve [funded]"| done' in mermaid
+    assert 'reviewing -->|"expire [@DWELL>=1h]"| expired' in mermaid
 
 
 # ---------------------------------------------------------------------------
@@ -295,3 +298,57 @@ def test_cli_main_rejects_non_case_class(monkeypatch, capsys):
         case_doc.main(["fake_module:NotACase"])
     assert exc_info.value.code == 2
     assert "not a FolderBackedCase subclass" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Round-trip: the state-style diagram is itself valid fsm_state_chains DSL
+# ---------------------------------------------------------------------------
+
+def test_to_mermaid_state_marks_manual_edges_with_label_marker():
+    """stateDiagram-v2 has no thick arrow, so manual edges carry the DSL's '=='
+    label marker — keeping the line valid Mermaid AND valid chain DSL."""
+    doc = collect(SampleCase)
+    mermaid = to_mermaid(doc.fsm_graph)
+    assert "reviewing --> done : == approve [funded]" in mermaid
+    assert "new --> reviewing : intake" in mermaid          # auto: plain label
+
+
+def test_state_diagram_round_trips_through_the_parser():
+    """to_mermaid(state) output parses back to the spec it rendered — the contract
+    that keeps the diagram grammar and the chain grammar from drifting apart.
+    Scope (see to_mermaid docstring): graph built with include_implied_caps=False,
+    spec without wildcard chains."""
+    from totodev_pub.folder_backed_case_support.state_chain_parser import (
+        StateChainParser,
+    )
+
+    decl = """
+        [*] --> new -- intake --> reviewing
+        reviewing == approve [funded] ==> done --> [*]
+        reviewing == fasttrack [funded] ==> done
+        reviewing -- expire~90s [@DWELL>=1.5h] --> expired --> [*]
+        reviewing --> parked : shelve [@FAIL<3, triaged]
+        parked --> [*]
+    """
+    spec = StateChainParser.parse(decl).validate()
+    mermaid = to_mermaid(spec.to_networkx(include_implied_caps=False))
+    rt = StateChainParser.parse(mermaid).validate()
+
+    def canon(s):
+        def edge(t):
+            facts = tuple(sorted(
+                (fg["name"], fg["op"], fg["operand"]) for fg in t.get("_fact_guards", [])
+            ))
+            return (t["trigger"], t["source"], t["dest"],
+                    tuple(t.get("conditions", [])), facts)
+        return {
+            "states": sorted(s.states),
+            "transitions": sorted(edge(t) for t in s.transitions),
+            "initial_states": sorted(s.initial_states),
+            "initial_state": s.initial_state,
+            "terminal_states": sorted(s.terminal_states),
+            "auto_edges": sorted(s.auto_edges),
+            "trigger_timeouts": s.trigger_timeouts,
+        }
+
+    assert canon(rt) == canon(spec)

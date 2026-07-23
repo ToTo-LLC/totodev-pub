@@ -2,87 +2,124 @@
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
 """
-StateChainParser: a tiny, Mermaid-flavoured DSL for declaring a case's finite-state
-machine as a list of chain strings, plus the dumb data structure it renders into.
+StateChainParser: a Mermaid-flavoured DSL for declaring a case's finite-state
+machine as chain strings, plus the dumb data structure it renders into.
 
-A chain reads left-to-right as alternating states and the connectors that join them:
+A declaration is a list of chain strings, or a single multiline string (one chain
+per line, `%%` comments allowed). Each chain reads left-to-right as alternating
+states and the connectors that join them:
 
-    "^new==assign-->assigned--begin-->in_process--funded#finish-->closed^"
+    fsm_state_chains = \"\"\"
+        %% ticket lifecycle
+        [*] --> new -- open_ticket --> open == close_ticket ==> closed --> [*]
+        open --> closed : mark_as_duplicate [is_duplicative]
+        * --> auto_closed : non_responsive [@DWELL>14d]
+    \"\"\"
 
 States
 ------
 * A bare name is an ordinary state. Names use `[A-Za-z0-9_]` only (no dashes), so
   identifier-based hook conventions like `on_enter_<state>`/`on_exit_<state>` map
   directly to DSL state names.
-* A LEADING `^` marks an INITIAL state (a valid entry/root): `^new`. Initial states
-  are also the reachability anchors (they are exempt from the "must have an incoming
-  edge" rule), which is how an entry reached only via case_reclassify_to() is declared.
-* A TRAILING `^` marks a TERMINAL state: `closed^`. Entering one fires the
-  two-phase termination hook.
-* Initial and terminal are independent flags and may compose (`^x^`). A run of trailing
-  markers is tolerated; any trailing glyph other than `^` is rejected, keeping the marker
-  namespace closed against silent typos.
+* `[*]` is the BOUNDARY pseudo-state (as in Mermaid stateDiagram-v2). A label-less
+  `[*] --> state` hop marks `state` INITIAL (a valid entry/root); a label-less
+  `state --> [*]` hop marks it TERMINAL (entering one fires the two-phase
+  termination hook). Hops may sit inline at a chain's ends
+  (`[*] --> a -- t --> b --> [*]`) or stand alone as their own line
+  (`[*] --> a`). Initial states are also the reachability anchors (they are
+  exempt from the "must have an incoming edge" rule), which is how an entry
+  reached only via case_reclassify_to() is declared. Initial and terminal are
+  independent flags and may compose (`[*] --> x --> [*]`).
 
-Connectors  `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`
+Connectors
 ----------
-* `A==trigger-->B` is one transition (trigger `trigger`, source `A`, dest `B`).
-  Same-state edges (`A==trigger-->A` / `A--trigger-->A`) are legal. An AUTO self-loop
-  (`A--...-->A`) MUST carry at least one method guard (see below) — validated in
+Two matched-arrow connector forms join states, each carrying a label:
+
+* `A -- label --> B` marks the edge AUTO-ADVANCE: advance() (looped by a driver) may
+  fire it unattended.
+* `A == label ==> B` marks the edge MANUAL: only a direct `await case.trigger()` (or a
+  pinned `case_advance(trigger, ...)`) fires it. Auto is opt-in (fail-safe): a manual
+  edge never auto-fires, so a case simply waits rather than silently running past a
+  human/event gate. The connector form itself carries this "may auto-fire" policy.
+* Same-state edges (`A -- label --> A` / `A == label ==> A`) are legal. An AUTO
+  self-loop MUST carry at least one method guard — validated in
   `FsmChainSpec.validate()` — so authors cannot accidentally declare an unguarded edge
   that fires on every `case_advance()` and spins forever / starves sibling auto edges.
-  Manual (`==`) self-loops need no method guard; factual guards (`@DWELL` / `@FAIL`) alone
-  do not satisfy the auto self-loop check.
-* `A--trigger-->B` marks the edge AUTO-ADVANCE: advance() (looped by a driver) may fire it
-  unattended. `--` is opt-in (fail-safe): a `==` edge never auto-fires, so a case
-  simply waits rather than silently running past a human/event gate. The connector form
-  itself carries this "may auto-fire" policy.
-* `cond#trigger` attaches a GUARD: the leading `#`-separated identifiers name method
-  guards. Each guard token is mapped to a `guard_<token>` carrier method and stored in the
-  transition's `conditions` (e.g. `funded#finish` => conditions=["guard_funded"], trigger
-  "finish"; the carrier defines `async def guard_funded`). The `guard_` prefix keeps guard
-  methods in their own namespace, away from ordinary helpers and lifecycle hooks. Multiple
-  guards chain: `a#b#trigger` => conditions=["guard_a", "guard_b"]. Guards are what make
-  multiple auto-advance edges from one state meaningful — advance() tries each auto
-  candidate in declared order and fires the first whose guard permits. A method guard is
-  also required on every auto self-loop (see same-state note above).
-* `@FACT<op>N#trigger` attaches a FACTUAL GUARD: an `@`-prefixed, system-computed fact
-  compared against a constant with one of `< <= > >=` (equality `==`/`!=` is deliberately
-  UNSUPPORTED — we cannot promise to evaluate at an exact instant/count, so an equality
-  test would create false expectations). Two facts are recognized:
-    * `@DWELL<op><dur>` — seconds spent in the SOURCE state (dwell since the latest
-      CASE_STATE_ENTERED). The operand is a duration, units s|m|h|d, float allowed
-      (`@DWELL>90s`, `@DWELL>=1.5h`, `@DWELL>0.5d`). `case_dwell_secs` on the case computes it.
-      A `>`/`>=` dwell guard is SELF-RELAXING (it ripens with time) and is what gives a
-      state a guaranteed TIMED ESCAPE (see classify()/AutoAdvanceBlocked).
-    * `@FAIL<op>N` — count of `CASE_TRANSITION_FAILED` events logged since the current state
-      was entered (failed pre-commit attempts to LEAVE this state). The operand is a bare
-      integer, NO unit (`@FAIL<3`, `@FAIL>=3`). State-scoped: every failed attempt in this
-      dwell counts regardless of which trigger raised. This is the retry knob — list a
-      `@FAIL<n` retry edge first and an optional `@FAIL>=n` divert edge second. RETRY IS
-      OPT-IN: an auto edge that declares no `@FAIL` gets an implicit `@FAIL<1` (one attempt,
-      no retry) via apply_implicit_fail_cap(); a pure timed-escape edge is exempt and
-      tolerates unlimited failures (logically `@FAIL>=0`).
-  A factual guard is a pure FACT, NOT a promise to fire — something must still attempt the
-  trigger. At most one guard PER FACT NAME per connector; facts compose with each other and
-  with method guards (e.g. `@FAIL<3#@DWELL>30m#retry`).
-* `trigger~<dur>` attaches a SOFT TIMEOUT to the trigger's work — a SUFFIX (the `~` reads
-  "approximately"), the only suffix decoration, because unlike the prefix guards it bounds
-  the trigger's EXECUTION rather than gating entry. The duration uses the @DWELL units
-  (s|m|h|d, float allowed, unit required): `assign~20s`, `fetch~1.5m`. It is the point past
-  which the step is considered SLOW (a warning), NOT a hard kill; the hard-abort ceiling is
-  derived by the case as a multiple of this value. Most triggers are expected to be fast and
-  go un-annotated (they inherit the case's default); annotate the ones known to be slow. The
-  budget is keyed by TRIGGER (it is a property of `perform_<trigger>`), so the same trigger
-  may not be annotated with two different durations. Composes with everything:
-  `@FAIL<3#funded#finish~3m`. (Stored in FsmChainSpec.trigger_timeouts; consumed by the
-  case, which owns the warn/abort/log behavior.)
+  Manual self-loops need no method guard; factual guards (`@DWELL` / `@FAIL`) alone do
+  not satisfy the auto self-loop check.
 
-Wildcard ("from any source") chains  `*[--|==]...-->DEST`
+Colon-labeled single edges (Mermaid stateDiagram-v2 style)
 ----------
-* A chain that BEGINS with `*--` or `*==` declares one edge whose source is ANY otherwise
-  non-terminal state: `*==cancel-->cancelled^` means "from anywhere, `cancel` => cancelled";
-  `*--timeout-->expired^` is the auto-advance variant. The connector carries the usual
-  guards and `~<dur>` soft-timeout like any other.
+A line may instead declare ONE edge with its label after a colon:
+
+    A --> B : label            (auto)
+    A ==> B : label            (manual)
+    A --> B : == label         (also manual: the leading `==` label marker is how a
+                                manual edge is spelled inside a plain `-->` line,
+                                keeping the line valid Mermaid stateDiagram-v2)
+
+Both spellings of manual are equivalent; generated diagrams emit the label-marker
+form. The colon form is one edge per line — use inline connectors for multi-hop
+chains. `[*]` boundary hops take no label and therefore have no colon form.
+
+Labels  `trigger[~<dur>] [guard, ...]`
+----------
+* The label's first token is the TRIGGER name.
+* `trigger~<dur>` attaches a SOFT TIMEOUT to the trigger's work — glued to the trigger
+  name (the `~` reads "approximately") because it bounds the trigger's EXECUTION
+  rather than gating entry. The duration uses units s|m|h|d, float allowed, unit
+  required: `assign~20s`, `fetch~1.5m`. It is the point past which the step is
+  considered SLOW (a warning), NOT a hard kill; the hard-abort ceiling is derived by
+  the case as a multiple of this value. Most triggers are expected to be fast and go
+  un-annotated (they inherit the case's default); annotate the ones known to be slow.
+  The budget is keyed by TRIGGER (it is a property of `perform_<trigger>`), so the
+  same trigger may not be annotated with two different durations. (Stored in
+  FsmChainSpec.trigger_timeouts; consumed by the case, which owns the warn/abort/log
+  behavior.)
+* A bracketed, comma-separated GUARD LIST may follow the trigger: `finish [funded]`,
+  `retry~3m [@FAIL<3, @DWELL>30m]`. All guards must pass for the edge to fire
+  (conjunction). Two kinds of item may appear:
+    * A bare identifier names a METHOD GUARD: each token is mapped to a
+      `guard_<token>` carrier method and stored in the transition's `conditions`
+      (e.g. `finish [funded]` => conditions=["guard_funded"]; the carrier defines
+      `async def guard_funded`). The `guard_` prefix keeps guard methods in their own
+      namespace, away from ordinary helpers and lifecycle hooks. Guards are what make
+      multiple auto-advance edges from one state meaningful — advance() tries each
+      auto candidate in declared order and fires the first whose guards permit. A
+      method guard is also required on every auto self-loop (see above).
+    * `@FACT<op>N` is a FACTUAL GUARD: an `@`-prefixed, system-computed fact compared
+      against a constant with one of `< <= > >=` (equality `==`/`!=` is deliberately
+      UNSUPPORTED — we cannot promise to evaluate at an exact instant/count, so an
+      equality test would create false expectations). Two facts are recognized:
+        * `@DWELL<op><dur>` — seconds spent in the SOURCE state (dwell since the
+          latest CASE_STATE_ENTERED). The operand is a duration, units s|m|h|d, float
+          allowed (`@DWELL>90s`, `@DWELL>=1.5h`, `@DWELL>0.5d`). `case_dwell_secs` on
+          the case computes it. A `>`/`>=` dwell guard is SELF-RELAXING (it ripens
+          with time) and is what gives a state a guaranteed TIMED ESCAPE (see
+          classify()/AutoAdvanceBlocked).
+        * `@FAIL<op>N` — count of `CASE_TRANSITION_FAILED` events logged since the
+          current state was entered (failed pre-commit attempts to LEAVE this state).
+          The operand is a bare integer, NO unit (`@FAIL<3`, `@FAIL>=3`).
+          State-scoped: every failed attempt in this dwell counts regardless of which
+          trigger raised. This is the retry knob — list a `[@FAIL<n]` retry edge
+          first and an optional `[@FAIL>=n]` divert edge second. RETRY IS OPT-IN: an
+          auto edge that declares no `@FAIL` gets an implicit `@FAIL<1` (one attempt,
+          no retry) via apply_implicit_fail_cap(); a pure timed-escape edge is exempt
+          and tolerates unlimited failures (logically `@FAIL>=0`).
+      A factual guard is a pure FACT, NOT a promise to fire — something must still
+      attempt the trigger. At most one guard PER FACT NAME per label; facts compose
+      with each other and with method guards (e.g. `retry~3m [funded, @FAIL<3]`).
+
+Wildcard ("from any source") chains  `* -- label --> DEST`
+----------
+* A chain whose source is the bare `*` declares one edge whose source is ANY otherwise
+  non-terminal state: `* == cancel ==> cancelled` means "from anywhere, `cancel` =>
+  cancelled"; `* -- timeout --> expired` is the auto-advance variant (colon form works
+  too: `* --> expired : timeout`). The label carries the usual guards and `~<dur>`
+  soft-timeout like any other, and a trailing boundary hop is allowed
+  (`* -- timeout --> expired --> [*]`).
+* NOTE the distinction: bracketed `[*]` is the START/END boundary pseudo-state; bare
+  `*` is the ANY-STATE wildcard source.
 * Exactly one transition (one destination) per wildcard chain. The concrete per-source
   edges are deduced AFTER all chains parse and AFTER validate(): terminal states and the
   destination itself (no self-loop) are excluded, and an EXPLICIT edge for the same
@@ -91,11 +128,40 @@ Wildcard ("from any source") chains  `*[--|==]...-->DEST`
   they can never mask a forgotten exit or a misspelled state — a state whose ONLY outgoing
   edge would be a wildcard is still flagged; declare an explicit edge.
 
+Multiline strings, comments, and pasted Mermaid
+----------
+* `fsm_state_chains` may be a single (typically triple-quoted) string: it is split on
+  newlines, one chain per line. `%%` starts a comment (whole-line or trailing), as in
+  Mermaid. Blank lines are skipped, and Mermaid boilerplate lines
+  (`stateDiagram-v2`, `flowchart TD`, `direction LR`, ...) are ignored — so a sketch
+  drawn in a Mermaid editor pastes in nearly verbatim. CAUTION when pasting: `-->`
+  means AUTO-ADVANCE here, and a pure Mermaid sketch is all `-->` — mark the edges
+  that must wait for a human/event as manual (`==>` or the `: ==` label marker)
+  before driving the case.
+* A list of chain strings works identically (each entry may itself contain newlines
+  and comments).
+
 Conventions
 -----------
 * Chains COLLECTIVELY must declare at least one initial and one terminal state.
-* The DEFAULT initial state (used by create_case_in_folder) is the first initial-marked state
-  encountered scanning chains in order — so an initial in the first chain wins.
+* The DEFAULT initial state (used by create_case_in_folder) is the first
+  initial-marked state encountered scanning chains in order — so an initial in the
+  first chain wins.
+
+CLI
+---
+A declaration can be checked or rendered from the shell (see `main()` / the
+`state_chain_cli` launcher module):
+
+    python -m totodev_pub.folder_backed_case_support.state_chain_cli "<chains>"
+    pbpaste | python -m totodev_pub.folder_backed_case_support.state_chain_cli --render
+    pbpaste | python -m totodev_pub.folder_backed_case_support.state_chain_cli --convert
+
+The default mode parses + validates, prints a short summary (or the pointed
+parse error, exit 1), and appends advisory lint warnings (`lint_spec`;
+`--quiet` suppresses). `--render` emits Mermaid source instead. `--convert`
+takes a raw (near-)Mermaid sketch — unlabeled edges, free-text labels, notes —
+and emits a cleaned declaration with `%% TODO` markers (see `mermaid_intake`).
 
 The parser is PURE and instance-unaware: `StateChainParser.parse(chains)` returns an
 `FsmChainSpec` and binds to nothing. Whole-graph semantic checks live in the separate,
@@ -129,13 +195,6 @@ from totodev_pub.optional_dependencies import raise_missing_dependency
 # directly representable as Python suffix identifiers for hook conventions.
 _NAME_RE = re.compile(r"[A-Za-z0-9_]+")
 
-# A FACTUAL-GUARD segment: `@NAME<op>NUMBER[unit]` with op in < <= > >= (NO ==/!=). The
-# optional s|m|h|d unit belongs to time facts (@DWELL); count facts (@FAIL) take a bare int.
-_FACT_GUARD_SEGMENT = r"@\s*[A-Za-z][A-Za-z0-9_]*\s*(?:<=|>=|<|>)\s*\d+(?:\.\d+)?\s*[smhd]?"
-
-# One connector label segment: a guard/trigger identifier OR a `@FACT<op>N` factual guard.
-_LABEL_SEGMENT = r"(?:" + _FACT_GUARD_SEGMENT + r"|[A-Za-z_]\w*)"
-
 # A SOFT-TIMEOUT suffix on the trigger: `~<dur>` (e.g. `assign~20s`). `~` reads
 # "approximately", matching the soft semantics: it is the duration past which the step is
 # considered SLOW, not a hard kill. The unit is accepted loosely here (optional) so a
@@ -143,18 +202,25 @@ _LABEL_SEGMENT = r"(?:" + _FACT_GUARD_SEGMENT + r"|[A-Za-z_]\w*)"
 # whole-connector parse failure — exactly how @DWELL handles its unit.
 _TIMEOUT_SUFFIX = r"(?:\s*~\s*\d+(?:\.\d+)?\s*[smhd]?)?"
 
-# The connector between two states: `[--|==][cond#...][@FACT<op>N#...]trigger[~<dur>]-->`.
-#   group 1: connector kind (`--` auto-advance, `==` manual).
-#   group 2: the label — a `#`-separated run of segments (method guards / factual guards,
-#            then the trigger), optionally followed by a `~<dur>` soft-timeout suffix on the
-#            trigger. Identifier segments are valid Python identifiers because `transitions`
-#            turns the trigger into a method and resolves condition names against the model;
-#            `@...` segments are factual guards (see _parse_fact_guard); the `~<dur>` suffix
-#            is split off the trigger in _parse_label (see _parse_trigger_timeout).
+# A connector label: `trigger[~<dur>]` optionally followed by a bracketed guard list.
+# The bracket CONTENTS are deliberately loose (`[^\][]*` — anything but nested brackets):
+# guard items get their pointed diagnostics from _parse_label, not a whole-connector
+# parse failure. The trigger head is tight (an identifier), which is what makes the
+# closing arrow after the label unambiguous.
+_LABEL_BODY = (
+    r"[A-Za-z_]\w*" + _TIMEOUT_SUFFIX + r"(?:\s*\[[^\][]*\])?"
+)
+
+# The connector between two states, in two matched-arrow forms plus the bare boundary hop:
+#   `-- label -->`  auto-advance edge
+#   `== label ==>`  manual edge
+#   `-->`           bare, label-less hop — legal ONLY adjacent to the `[*]` boundary
+# A mismatched pair (`== label -->` / `-- label ==>`) is caught after the match and
+# rejected with a pointed message. Alternation order matters: the labeled form is tried
+# first so a bare `-->` can never split a labeled connector apart.
 _CONNECTOR_RE = re.compile(
-    r"(--|==)\s*"
-    r"(" + _LABEL_SEGMENT + r"(?:\s*#\s*" + _LABEL_SEGMENT + r")*" + _TIMEOUT_SUFFIX + r")"
-    r"\s*-->"
+    r"(?P<open>--|==)\s*(?P<label>" + _LABEL_BODY + r")\s*(?P<close>-->|==>)"
+    r"|(?P<bare>-->)"
 )
 
 # A `@NAME<op>NUMBER[unit]` factual-guard token (the four ordering comparators only).
@@ -172,9 +238,32 @@ _TIME_FACTS = {"DWELL"}
 _COUNT_FACTS = {"FAIL"}
 _RELAXING_OPS = {">", ">="}
 
-_INITIAL_MARKER = "^"      # LEADING on a state name
-_TERMINAL_MARKER = "^"     # TRAILING on a state name
-_WILDCARD_SOURCE = "*"     # a lone `*` in the first state slot => "from any source"
+_BOUNDARY = "[*]"          # the start/end pseudo-state (Mermaid stateDiagram-v2)
+_WILDCARD_SOURCE = "*"     # a bare `*` in the source slot => "from any source"
+
+# A colon-form line: `SRC --> DEST : label` / `SRC ==> DEST : label` (one edge per line).
+# The label side is validated by _parse_label; a leading `==` label marker spells MANUAL
+# inside a plain `-->` line (keeping it valid Mermaid stateDiagram-v2). SRC/DEST use a
+# tight charset (names plus the `[*]`/`*`/`^` glyphs, which get their own pointed
+# diagnostics) so a multi-hop chain with a colon fails THIS regex — and gets the
+# one-edge-per-line message — rather than half-matching.
+_COLON_FORM_RE = re.compile(
+    r"^(?P<src>[\w^\[\]*]+)\s*(?P<arrow>-->|==>)\s*(?P<dest>[\w^\[\]*]+)\s*:\s*(?P<label>.*)$"
+)
+
+# An edge label, decomposed: `trigger[~<dur>] [guard, ...]`. The timeout's duration and
+# the guard-list CONTENTS are loose here — their strict validation (with pointed
+# messages) lives in _parse_trigger_timeout / _parse_label.
+_LABEL_PARSE_RE = re.compile(
+    r"^(?P<trigger>[A-Za-z_]\w*(?:\s*~\s*[^\s\][]+)?)\s*(?:\[(?P<guards>[^\][]*)\])?$"
+)
+
+# Mermaid boilerplate lines silently ignored in multiline declarations, so a diagram
+# sketched in a Mermaid editor pastes in nearly verbatim.
+_MERMAID_BOILERPLATE_RE = re.compile(
+    r"^(?:stateDiagram(?:-v2)?|flowchart(?:\s+\w+)?|graph(?:\s+\w+)?|direction\s+\w+)\s*$",
+    re.IGNORECASE,
+)
 
 # Transition-dict keys whose (string) values name a callable resolved against the carrier
 # object — the explicitly-referenced callbacks a carrier MUST provide. `_fact_guards` is
@@ -185,7 +274,7 @@ _CARRIER_CALLBACK_KEYS = ("conditions", "unless", "before", "after", "prepare")
 # The canonical method-name PREFIXES for the two conventions the parser/base bind by name.
 # Both are kept as named constants (not bare literals) so the parser, the binding check, and
 # the orphan scan can never disagree about a namespace:
-#   * guard methods   `guard_<token>`   — a `<token>#trigger` DSL guard resolves here.
+#   * guard methods   `guard_<token>`   — a `trigger [<token>]` DSL guard resolves here.
 #   * trigger actions `perform_<trigger>` — the side-effect hook wired to the edge's `before`.
 # The trigger action hook intentionally carries NO leading underscore, matching the other
 # implicit conventions (`on_enter_`, `on_exit_`, `before_`, `after_`); it is a discoverable
@@ -255,14 +344,17 @@ class FsmChainSpec:
                        A dict MAY also carry the private key "_fact_guards" (a list of
                        {"name","op","operand"} factual guards, e.g. @DWELL/@FAIL) — stripped
                        and compiled into `conditions` callables before reaching the machine.
-        terminal_states  states marked terminal (trailing `^`).
-        initial_states states marked initial (leading `^`); also reachability anchors.
+        terminal_states  states marked terminal (a `state --> [*]` boundary hop).
+        initial_states states marked initial (a `[*] --> state` boundary hop); also
+                       reachability anchors.
         initial_state  the DEFAULT entry state (first initial-marked, in chain order).
-        auto_edges     {(source, trigger)} edges eligible for advance() (`--` connector).
+        auto_edges     {(source, trigger)} edges eligible for advance() (`--`/`-->`
+                       connector; manual `==`/`==>` edges are absent).
         pipeline       distinct auto-advance trigger names, in first-seen order (display).
         triggers       every distinct trigger name, in first-seen order.
         primary_chain  the raw first chain string, kept for DEBUG logging / diagrams.
-        pending_wildcards  unresolved `*--...-->dest` edges; expanded by expand_wildcards().
+        pending_wildcards  unresolved `* -- ... --> dest` edges; expanded by
+                       expand_wildcards().
         wildcard_dests dests of pending wildcards; exempt from validate()'s reachability
                        check (they are reached only once the wildcards are injected).
         timed_escape_states  states that own at least one auto edge guarded SOLELY by a
@@ -339,7 +431,8 @@ class FsmChainSpec:
         not-yet-configured subclass) is a no-op.
 
         Checks:
-          - at least one initial (`^name`) and one terminal (`name^`) state exist;
+          - at least one initial (`[*] --> name`) and one terminal (`name --> [*]`)
+                state exist;
           - V1: a terminal state has NO outgoing edge (it is the end of the road);
           - V2: a non-terminal state HAS an outgoing edge (a dead-end that isn't `^` is
                 almost always a forgotten exit or a missing `^` — the one legitimate
@@ -357,13 +450,13 @@ class FsmChainSpec:
             return self
         if not self.initial_states:
             raise FsmChainParseError(
-                "no initial state declared; mark at least one entry state with a LEADING "
-                "'^', e.g. '^new--...'"
+                "no initial state declared; mark at least one entry state with a "
+                "'[*] --> state' boundary hop, e.g. '[*] --> new'"
             )
         if not self.terminal_states:
             raise FsmChainParseError(
-                "no terminal state declared; mark at least one end state with a TRAILING "
-                "'^', e.g. '...-->closed^'"
+                "no terminal state declared; mark at least one end state with a "
+                "'state --> [*]' boundary hop, e.g. 'closed --> [*]'"
             )
 
         out_sources: set[str] = set()
@@ -383,11 +476,11 @@ class FsmChainSpec:
                 if conditions:
                     continue
                 raise FsmChainParseError(
-                    f"auto self-loop {s!r}--{trigger}-->{dest!r} has no method guard. "
+                    f"auto self-loop '{s} -- {trigger} --> {dest}' has no method guard. "
                     "An unguarded auto self-loop can fire on every case_advance() and spin "
                     "forever (or starve sibling auto edges from the same state). Add a "
                     f"method guard that eventually declines, e.g. "
-                    f"{s!r}--still_needed#{trigger}-->{dest!r}, and implement "
+                    f"'{s} -- {trigger} [still_needed] --> {dest}', and implement "
                     f"`async def guard_still_needed(...)-> bool`. Factual guards "
                     "(@DWELL / @FAIL) alone do not satisfy this check."
                 )
@@ -396,27 +489,27 @@ class FsmChainSpec:
             terminal = s in self.terminal_states
             if terminal and s in out_sources:
                 raise FsmChainParseError(
-                    f"state {s!r} is marked terminal ('^') but has an outgoing transition; "
-                    "terminal states cannot be left"
+                    f"state {s!r} is marked terminal ('{s} --> [*]') but has an outgoing "
+                    "transition; terminal states cannot be left"
                 )
             if not terminal and s not in out_sources:
                 raise FsmChainParseError(
                     f"state {s!r} has no outgoing transition and is not marked terminal; add "
-                    "a trailing '^' if it is an end state, or give it a transition (a state "
-                    "left only via case_reclassify_to() should declare its successor's entry as "
-                    "initial, or use a trivial edge — see the reclassify docs)"
+                    f"a '{s} --> [*]' hop if it is an end state, or give it a transition (a "
+                    "state left only via case_reclassify_to() should declare its successor's "
+                    "entry as initial, or use a trivial edge — see the reclassify docs)"
                 )
             if (s not in self.initial_states and s not in in_dests
                     and s not in self.wildcard_dests):
                 raise FsmChainParseError(
                     f"state {s!r} is unreachable: it has no incoming transition and is not "
-                    "marked initial ('^name'). If this is a deliberate entry point, mark it "
-                    "initial; otherwise it is probably a misspelled state name"
+                    f"marked initial ('[*] --> {s}'). If this is a deliberate entry point, "
+                    "mark it initial; otherwise it is probably a misspelled state name"
                 )
         return self
 
     def expand_wildcards(self) -> "FsmChainSpec":
-        """Inject the concrete per-source edges for any `*--...-->dest` wildcard chains,
+        """Inject the concrete per-source edges for any `* -- ... --> dest` wildcard chains,
         then return self for chaining. Call AFTER validate() so the typo-catching checks
         run against only the explicit graph (the default compile_fsm does exactly this;
         a hand-built override decides for itself). A no-op when there are no wildcards.
@@ -462,8 +555,8 @@ class FsmChainSpec:
     def classify(self) -> "FsmChainSpec":
         """Compute `timed_escape_states`: states that can never be permanently auto-blocked
         because they own an auto edge guaranteed to become fireable by the mere passage of
-        time. Run AFTER expand_wildcards() so a blanket `*--@DWELL>=2d#timeout-->expired^`
-        net is reflected. Returns self for chaining.
+        time. Run AFTER expand_wildcards() so a blanket
+        `* -- timeout [@DWELL>=2d] --> expired` net is reflected. Returns self for chaining.
 
         A state qualifies if it has an auto edge whose guards are satisfiable BY WAITING
         ALONE — i.e. the edge carries at least one self-relaxing time fact (`@DWELL` with
@@ -550,9 +643,9 @@ class FsmChainSpec:
         edge; NetworkX auto-assigns the multi-edge key.
 
         Nodes are every name in `states`, with attributes:
-          * initial          -- state in `initial_states` (a leading '^name')
+          * initial          -- state in `initial_states` (a '[*] --> name' hop)
           * default_initial  -- state == `initial_state` (the create_case_in_folder default)
-          * terminal         -- state in `terminal_states` (a trailing 'name^')
+          * terminal         -- state in `terminal_states` (a 'name --> [*]' hop)
           * timed_escape      -- state in `timed_escape_states` (set only if classify() has
                                  run; False otherwise -- this is the one field whose fidelity
                                  depends on compile stage, since it is itself computed by a
@@ -804,7 +897,7 @@ class FsmChainSpec:
         """The carrier-method names this FSM implies, as (required, optional):
           * required — every method-guard / explicitly-named callback the spec references;
             these MUST exist on the carrier (a missing one is a typo, not a choice). DSL
-            method guards appear here in their `guard_<token>` form (e.g. a `funded#...`
+            method guards appear here in their `guard_<token>` form (e.g. a `[funded]`
             guard implies a required `guard_funded`). Plus action hooks for triggers
             reachable from any auto edge (`--`), because unattended paths must be explicit.
           * optional — per-trigger ACTION methods derived from `hook_patterns` (default
@@ -847,10 +940,10 @@ class FsmChainSpec:
 
         Checks:
           * EXISTENCE — every method guard / explicitly-named callback the spec references
-            must be defined on `obj`. A DSL method guard `<token>#trigger` resolves to the
+            must be defined on `obj`. A DSL method guard `trigger [<token>]` resolves to the
             carrier method `guard_<token>` (see _GUARD_METHOD_PREFIX), so that is the name
             that must exist. Plus `perform_<trigger>` for any trigger reachable from an auto
-            edge (`==`) must exist, even if it is a no-op.
+            edge (`--`) must exist, even if it is a no-op.
           * ASYNC (force_async, default True) — every referenced callable that IS present —
             required names, required auto-edge hooks, and any optional action method that
             happens to exist — must be a coroutine function. The case family is driven through
@@ -953,8 +1046,8 @@ class FsmChainSpec:
     def _declared_guard_tokens(self) -> set[str]:
         """The bare guard tokens this FSM references — the part AFTER the `guard_` prefix of
         every `guard_<token>` name found in any transition's `conditions`/`unless`. These are
-        exactly the `guard_<token>` carrier methods the parser emits for a `<token>#trigger`
-        DSL segment, plus any `guard_`-prefixed name a hand-built compile_fsm() override put
+        exactly the `guard_<token>` carrier methods the parser emits for a `trigger [<token>]`
+        DSL guard, plus any `guard_`-prefixed name a hand-built compile_fsm() override put
         there. Used by orphan detection to tell a real guard method from a `guard_`-prefixed
         typo. Callables and non-`guard_` strings are ignored (the former are already resolved;
         the latter are not part of the guard convention)."""
@@ -1060,33 +1153,63 @@ class FsmChainSpec:
 
 
 class StateChainParser:
-    """Stateless renderer from chain strings to an FsmChainSpec. Use the classmethod
+    """Stateless renderer from chain declarations to an FsmChainSpec. Use the classmethod
     `parse`; there is nothing to instantiate. `parse` raises on SYNTACTIC/structural
     problems; whole-graph semantic rules live in FsmChainSpec.validate()."""
 
     @classmethod
-    def parse(cls, chains: Optional[list[str]]) -> FsmChainSpec:
-        """Render `chains` into an FsmChainSpec. Empty/None -> empty spec. Raises
-        FsmChainParseError (with the offending chain + index) on malformed input. Does NOT
-        run the whole-graph checks (call FsmChainSpec.validate()) and does NOT expand
-        `*[--|==]...-->` wildcard chains (call FsmChainSpec.expand_wildcards(),
-        AFTER validate)."""
-        spec = FsmChainSpec.empty()
+    def normalize_chain_lines(cls, chains: list[str] | str | None) -> list[str]:
+        """Flatten a chain declaration — a list of chain strings or a single (typically
+        triple-quoted, multiline) string — into the substantive chain lines the parser
+        consumes: split on newlines, strip `%%` comments (whole-line or trailing), drop
+        blank lines and Mermaid boilerplate lines (`stateDiagram-v2`, `flowchart TD`,
+        `direction LR`, ...). Empty/None -> []. This is also the canonical form the
+        case record persists. Raises FsmChainParseError on a non-string entry or a
+        '#'-style comment line."""
         if not chains:
-            return spec
-        if isinstance(chains, str):
-            raise FsmChainParseError(
-                "expected a list of chain strings, got a single string; "
-                "wrap it in a list, e.g. ['^a--t-->b^']"
-            )
+            return []
+        entries = [chains] if isinstance(chains, str) else list(chains)
+        lines: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, str):
+                raise FsmChainParseError(
+                    f"chain entries must be strings, got {type(entry).__name__}"
+                )
+            for raw_line in entry.splitlines():
+                line = raw_line.split("%%", 1)[0].strip()
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    raise FsmChainParseError(
+                        "comments in fsm_state_chains use '%%' (as in Mermaid)",
+                        chain=raw_line.strip(),
+                    )
+                if _MERMAID_BOILERPLATE_RE.match(line):
+                    continue
+                lines.append(line)
+        return lines
 
-        # (trigger, source, conditions, min_dwell) -> dest, to catch genuinely
+    @classmethod
+    def parse(cls, chains: list[str] | str | None) -> FsmChainSpec:
+        """Render a chain declaration into an FsmChainSpec. Accepts a list of chain
+        strings or a single multiline string; see `normalize_chain_lines` for the
+        comment/boilerplate handling. Empty/None -> empty spec. Raises
+        FsmChainParseError (with the offending chain + index) on malformed input. Does
+        NOT run the whole-graph checks (call FsmChainSpec.validate()) and does NOT
+        expand `* -- ... --> dest` wildcard chains (call
+        FsmChainSpec.expand_wildcards(), AFTER validate)."""
+        spec = FsmChainSpec.empty()
+        lines = cls.normalize_chain_lines(chains)
+        if not lines:
+            return spec
+
+        # (trigger, source, conditions, fact_guards) -> dest, to catch genuinely
         # nondeterministic duplicates (identical guard, different dest) while allowing
         # guarded branching.
         seen_edges: dict[tuple, str] = {}
 
-        for idx, raw in enumerate(chains):
-            cls._parse_chain(raw, idx, spec, seen_edges, primary=(idx == 0))
+        for idx, line in enumerate(lines):
+            cls._parse_chain(line, idx, spec, seen_edges, primary=(idx == 0))
         return spec
 
     # ---- per-chain ----
@@ -1094,184 +1217,327 @@ class StateChainParser:
     @classmethod
     def _parse_chain(
         cls,
-        raw: str,
+        chain: str,
         idx: int,
         spec: FsmChainSpec,
         seen_edges: dict[tuple, str],
         *,
         primary: bool,
     ) -> None:
-        if not isinstance(raw, str):
-            raise FsmChainParseError(
-                f"chain entries must be strings, got {type(raw).__name__}", index=idx
-            )
-        chain = raw.strip()
-        if not chain:
-            raise FsmChainParseError("empty chain string", chain=raw, index=idx)
-
-        parts = _CONNECTOR_RE.split(chain)   # [state, connector, label, state, connector, label, ...]
-        state_tokens = parts[0::3]
-        connectors = parts[1::3]
-        labels = parts[2::3]
-
         if primary:
             spec.primary_chain = chain
 
-        # A chain whose first state slot is a lone `*` is a "from any source" wildcard:
-        # its concrete edges are deduced later by FsmChainSpec.expand_wildcards().
-        if state_tokens and state_tokens[0].strip() == _WILDCARD_SOURCE:
-            cls._parse_wildcard_chain(state_tokens, connectors, labels, raw, idx, spec)
+        # '#' has no legal use inside a chain (comments are '%%'; guards are
+        # bracketed) — catch it here so it always gets the guard-bracket hint
+        # rather than a shape-dependent tokenizer message.
+        if "#" in chain:
+            raise FsmChainParseError(
+                "'#' has no meaning in a chain; guards are written in brackets after "
+                "the trigger ('trigger [guard1, @DWELL>30m]') and comments use '%%'",
+                chain=chain, index=idx,
+            )
+
+        # A colon anywhere marks the Mermaid-stateDiagram-style single-edge form; the
+        # colon has no other meaning in the grammar.
+        if ":" in chain:
+            cls._parse_colon_form(chain, idx, spec, seen_edges)
             return
 
-        node_names: list[str] = []
-        for tok in state_tokens:
-            name, initial, terminal = cls._parse_state_token(tok, raw, idx)
-            node_names.append(name)
-            cls._add_state(spec, name, initial=initial, terminal=terminal)
+        tokens, connectors = cls._tokenize_chain(chain, idx)
 
-        for i, label in enumerate(labels):
-            auto = connectors[i] == "--"
-            conditions, fact_guards, trigger, soft_secs = cls._parse_label(label, raw, idx)
-            cls._add_transition(
-                spec, trigger, node_names[i], node_names[i + 1],
-                conditions=conditions, fact_guards=fact_guards, auto=auto,
-                soft_secs=soft_secs, raw=raw, idx=idx, seen_edges=seen_edges,
+        # Boundary hops first: a leading `[*] --> S` marks S initial, a trailing
+        # `S --> [*]` marks S terminal. Stripping them leaves pure states/edges.
+        initial_first = terminal_last = False
+        if tokens[0] == _BOUNDARY:
+            if len(tokens) < 2 or tokens[1] == _BOUNDARY:
+                raise FsmChainParseError(
+                    "a '[*] -->' boundary hop must lead to a state, e.g. '[*] --> new'",
+                    chain=chain, index=idx,
+                )
+            cls._require_bare_boundary_hop(connectors[0], chain, idx)
+            initial_first = True
+            tokens, connectors = tokens[1:], connectors[1:]
+        if len(tokens) > 1 and tokens[-1] == _BOUNDARY:
+            cls._require_bare_boundary_hop(connectors[-1], chain, idx)
+            terminal_last = True
+            tokens, connectors = tokens[:-1], connectors[:-1]
+        if _BOUNDARY in tokens:
+            raise FsmChainParseError(
+                "'[*]' (the start/end boundary) may only appear at a chain's ends: "
+                "'[*] --> first' and/or 'last --> [*]'",
+                chain=chain, index=idx,
             )
+        for c in connectors:
+            if c["label"] is None:
+                raise FsmChainParseError(
+                    "connector without a trigger label; only '[*]' boundary hops may "
+                    "omit it — write '-- trigger -->' (auto) or '== trigger ==>' (manual)",
+                    chain=chain, index=idx,
+                )
+
+        # A chain whose first state slot is a bare `*` is a "from any source" wildcard:
+        # its concrete edges are deduced later by FsmChainSpec.expand_wildcards().
+        if tokens[0] == _WILDCARD_SOURCE:
+            if initial_first:
+                raise FsmChainParseError(
+                    "the any-state wildcard '*' cannot be marked initial ('[*] --> *')",
+                    chain=chain, index=idx,
+                )
+            cls._parse_wildcard_chain(tokens, connectors, terminal_last, chain, idx, spec)
+            return
+
+        names = [cls._parse_state_token(t, chain, idx) for t in tokens]
+        for pos, name in enumerate(names):
+            cls._add_state(
+                spec, name,
+                initial=(initial_first and pos == 0),
+                terminal=(terminal_last and pos == len(names) - 1),
+            )
+        for i, c in enumerate(connectors):
+            conditions, fact_guards, trigger, soft_secs = cls._parse_label(
+                c["label"], chain, idx,
+            )
+            cls._add_transition(
+                spec, trigger, names[i], names[i + 1],
+                conditions=conditions, fact_guards=fact_guards, auto=not c["manual"],
+                soft_secs=soft_secs, raw=chain, idx=idx, seen_edges=seen_edges,
+            )
+
+    @classmethod
+    def _tokenize_chain(cls, chain: str, idx: int) -> tuple[list[str], list[dict]]:
+        """Split a chain into its state tokens and connectors, alternating. Each
+        connector is a dict {"manual": bool | None, "label": str | None}; a bare `-->`
+        boundary hop has both None. Mismatched arrow pairs (`== ... -->`) are rejected
+        here with a pointed message."""
+        tokens: list[str] = []
+        connectors: list[dict] = []
+        pos = 0
+        for m in _CONNECTOR_RE.finditer(chain):
+            tokens.append(chain[pos:m.start()].strip())
+            if m.group("bare"):
+                connectors.append({"manual": None, "label": None})
+            else:
+                opener, closer = m.group("open"), m.group("close")
+                if (opener == "--") != (closer == "-->"):
+                    raise FsmChainParseError(
+                        f"mismatched connector arrows in {m.group(0).strip()!r}; auto "
+                        "edges are written '-- trigger -->' and manual edges "
+                        "'== trigger ==>' (matched pairs)",
+                        chain=chain, index=idx,
+                    )
+                connectors.append({"manual": opener == "==", "label": m.group("label")})
+            pos = m.end()
+        tokens.append(chain[pos:].strip())
+        return tokens, connectors
+
+    @staticmethod
+    def _require_bare_boundary_hop(connector: dict, chain: str, idx: int) -> None:
+        if connector["label"] is not None:
+            raise FsmChainParseError(
+                "a '[*]' boundary hop takes no trigger label — it is an initial/terminal "
+                "marker, not a transition; write a bare '[*] --> state' or "
+                "'state --> [*]'",
+                chain=chain, index=idx,
+            )
+
+    @classmethod
+    def _parse_colon_form(
+        cls, chain: str, idx: int, spec: FsmChainSpec, seen_edges: dict[tuple, str],
+    ) -> None:
+        """Parse a Mermaid-stateDiagram-style single edge: `SRC --> DEST : label` (auto)
+        or `SRC ==> DEST : label` / `SRC --> DEST : == label` (manual — the leading `==`
+        label marker keeps the line valid Mermaid stateDiagram-v2). One edge per line;
+        multi-hop chains use inline `-- label -->` connectors instead."""
+        m = _COLON_FORM_RE.match(chain)
+        if m is None:
+            raise FsmChainParseError(
+                "could not parse colon-labeled edge; write 'SRC --> DEST : trigger' "
+                "(auto) or 'SRC ==> DEST : trigger' / 'SRC --> DEST : == trigger' "
+                "(manual) — ONE edge per line (multi-hop chains use inline "
+                "'-- trigger -->' labels and no colon)",
+                chain=chain, index=idx,
+            )
+        src_tok, dest_tok = m.group("src"), m.group("dest")
+        label = m.group("label").strip()
+        manual = m.group("arrow") == "==>"
+        if label.startswith("=="):
+            manual = True
+            label = label[2:].strip()
+        if not label:
+            raise FsmChainParseError(
+                "colon-labeled edge is missing its trigger (e.g. 'a --> b : finish')",
+                chain=chain, index=idx,
+            )
+        if _BOUNDARY in (src_tok, dest_tok):
+            raise FsmChainParseError(
+                "a '[*]' boundary hop takes no label — write a bare '[*] --> state' or "
+                "'state --> [*]' (its own line, or inline at a chain's ends)",
+                chain=chain, index=idx,
+            )
+        conditions, fact_guards, trigger, soft_secs = cls._parse_label(label, chain, idx)
+
+        if src_tok == _WILDCARD_SOURCE:
+            dest = cls._parse_state_token(dest_tok, chain, idx)
+            cls._add_state(spec, dest, initial=False, terminal=False)
+            cls._record_trigger_timeout(spec, trigger, soft_secs, chain, idx)
+            spec.pending_wildcards.append({
+                "trigger": trigger, "dest": dest, "conditions": conditions,
+                "fact_guards": fact_guards, "auto": not manual,
+            })
+            spec.wildcard_dests.add(dest)
+            return
+
+        src = cls._parse_state_token(src_tok, chain, idx)
+        dest = cls._parse_state_token(dest_tok, chain, idx)
+        cls._add_state(spec, src, initial=False, terminal=False)
+        cls._add_state(spec, dest, initial=False, terminal=False)
+        cls._add_transition(
+            spec, trigger, src, dest,
+            conditions=conditions, fact_guards=fact_guards, auto=not manual,
+            soft_secs=soft_secs, raw=chain, idx=idx, seen_edges=seen_edges,
+        )
 
     @classmethod
     def _parse_wildcard_chain(
         cls,
-        state_tokens: list[str],
-        connectors: list[str],
-        labels: list[str],
-        raw: str,
+        tokens: list[str],
+        connectors: list[dict],
+        terminal_last: bool,
+        chain: str,
         idx: int,
         spec: FsmChainSpec,
     ) -> None:
-        """Register a single `*[--|==][guards#]trigger[~<dur>]-->DEST` wildcard edge.
-        Must contain exactly ONE transition to a single destination; the concrete
-        per-source edges are deduced by FsmChainSpec.expand_wildcards() once every
-        state is known."""
-        if len(labels) != 1 or len(state_tokens) != 2:
+        """Register a single `* -- trigger --> DEST` / `* == trigger ==> DEST` wildcard
+        edge. Must contain exactly ONE transition to a single destination (a trailing
+        `--> [*]` terminal hop is allowed); the concrete per-source edges are deduced
+        by FsmChainSpec.expand_wildcards() once every state is known."""
+        if len(tokens) != 2 or len(connectors) != 1:
             raise FsmChainParseError(
-                "a wildcard '*--...-->' or '*==...-->' chain must contain exactly ONE transition to a "
-                "single destination, e.g. '*==cancel-->cancelled^'",
-                chain=raw, index=idx,
+                "a wildcard chain must contain exactly ONE transition to a single "
+                "destination, e.g. '* == cancel ==> cancelled'",
+                chain=chain, index=idx,
             )
-        name, initial, terminal = cls._parse_state_token(state_tokens[1], raw, idx)
-        cls._add_state(spec, name, initial=initial, terminal=terminal)
-        auto = connectors[0] == "--"
-        conditions, fact_guards, trigger, soft_secs = cls._parse_label(labels[0], raw, idx)
-        cls._record_trigger_timeout(spec, trigger, soft_secs, raw, idx)
+        dest = cls._parse_state_token(tokens[1], chain, idx)
+        cls._add_state(spec, dest, initial=False, terminal=terminal_last)
+        c = connectors[0]
+        conditions, fact_guards, trigger, soft_secs = cls._parse_label(
+            c["label"], chain, idx,
+        )
+        cls._record_trigger_timeout(spec, trigger, soft_secs, chain, idx)
         spec.pending_wildcards.append({
-            "trigger": trigger, "dest": name, "conditions": conditions,
-            "fact_guards": fact_guards, "auto": auto,
+            "trigger": trigger, "dest": dest, "conditions": conditions,
+            "fact_guards": fact_guards, "auto": not c["manual"],
         })
-        spec.wildcard_dests.add(name)
+        spec.wildcard_dests.add(dest)
 
     @classmethod
-    def _parse_state_token(cls, token: str, raw: str, idx: int) -> tuple[str, bool, bool]:
-        """Split a state token into (name, is_initial, is_terminal). Validates the name
-        charset, the leading initial marker, and the trailing marker run."""
+    def _parse_state_token(cls, token: str, raw: str, idx: int) -> str:
+        """Validate a state token and return its name. States are bare
+        `[A-Za-z0-9_]` identifiers; `[*]` (boundary) and `*` (wildcard source) are
+        recognized by the callers before this runs, so their appearance here is a
+        placement error and gets a pointed message."""
         tok = token.strip()
         if not tok:
             raise FsmChainParseError(
-                "empty state name (check for stray or malformed `-->` arrows)",
+                "empty state name (check for stray or malformed arrows)",
                 chain=raw, index=idx,
             )
-        initial = False
-        if tok[0] == _INITIAL_MARKER:
-            initial = True
-            tok = tok[1:].strip()
-            if not tok:
-                raise FsmChainParseError(
-                    "leading '^' (initial marker) with no state name after it",
-                    chain=raw, index=idx,
-                )
-        m = _NAME_RE.match(tok)
-        if m is None or m.start() != 0:
+        if tok == _WILDCARD_SOURCE:
             raise FsmChainParseError(
-                f"invalid state name {token.strip()!r}; names use letters/digits/underscores "
-                "only (mark initial with a LEADING '^', terminal with a TRAILING '^')",
+                "the any-state wildcard '*' may only appear as a chain's SOURCE, "
+                "e.g. '* == cancel ==> cancelled'",
                 chain=raw, index=idx,
             )
-        name = m.group(0)
-        terminal = cls._parse_trailing_markers(tok[m.end():], name, token, raw, idx)
-        return name, initial, terminal
-
-    @classmethod
-    def _parse_trailing_markers(
-        cls, rest: str, name: str, token: str, raw: str, idx: int
-    ) -> bool:
-        """Read the run of trailing marker glyphs after a state name. Only `^` (terminal)
-        is active; anything else fails as unknown, keeping the marker namespace closed
-        against silent typos."""
-        terminal = False
-        for ch in rest:
-            if ch == _TERMINAL_MARKER:
-                terminal = True
-            elif ch.isspace():
-                continue
-            else:
-                if "--" in token or "->" in token:
-                    raise FsmChainParseError(
-                        f"could not parse {token.strip()!r}; a transition must be written "
-                        "`A--trigger-->B` (auto) or `A==trigger-->B` (manual)",
-                        chain=raw, index=idx,
-                    )
-                raise FsmChainParseError(
-                    f"unknown marker {ch!r} on state {name!r}; only a trailing '^' (terminal) "
-                    "is supported",
-                    chain=raw, index=idx,
-                )
-        return terminal
+        if "^" in tok:
+            raise FsmChainParseError(
+                f"unknown marker '^' in {tok!r}; an initial state is declared with a "
+                "'[*] --> state' hop and a terminal state with 'state --> [*]'",
+                chain=raw, index=idx,
+            )
+        if any(ch in tok for ch in "-=>"):
+            raise FsmChainParseError(
+                f"could not parse {tok!r}; transitions are written "
+                "'A -- trigger --> B' (auto) or 'A == trigger ==> B' (manual), and "
+                "'[*]' boundary hops use a bare '-->'",
+                chain=raw, index=idx,
+            )
+        if _NAME_RE.fullmatch(tok) is None:
+            raise FsmChainParseError(
+                f"invalid state name {tok!r}; names use letters/digits/underscores only",
+                chain=raw, index=idx,
+            )
+        return tok
 
     @classmethod
     def _parse_label(
         cls, label: str, raw: str, idx: int
     ) -> tuple[list[str], list[dict], str, Optional[float]]:
-        """Split a connector label into (conditions, fact_guards, trigger, soft_secs). The
-        final `#`-delimited token is the trigger (optionally carrying a `~<dur>` SOFT-timeout
-        suffix, split off here); preceding tokens are either method-guard names or
-        `@FACT<op>N` factual guards (parsed by _parse_fact_guard). The trigger itself may not
-        be a factual guard, and at most one guard per FACT NAME is allowed. `soft_secs` is the
-        annotated soft-timeout in seconds, or None when un-annotated.
-
-        Each method-guard token `tok` is mapped to the carrier-method name `guard_<tok>` (see
-        _GUARD_METHOD_PREFIX) before it enters `conditions`, so `funded#finish` yields
-        conditions=["guard_funded"] — the carrier must define `async def guard_funded`."""
-        tokens = [p.strip() for p in label.split("#")]
-        if any(not t for t in tokens):
+        """Split an edge label into (conditions, fact_guards, trigger, soft_secs).
+        Grammar: `trigger[~<dur>] [guard, ...]` — the trigger (optionally carrying a
+        `~<dur>` SOFT-timeout suffix, split off here; see _parse_trigger_timeout)
+        followed by an optional bracketed, comma-separated guard list. Each bare guard
+        token `tok` is mapped to the carrier-method name `guard_<tok>` (see
+        _GUARD_METHOD_PREFIX) before it enters `conditions`, so `finish [funded]`
+        yields conditions=["guard_funded"] — the carrier must define
+        `async def guard_funded`. `@`-prefixed items are factual guards (see
+        _parse_fact_guard); at most one per FACT NAME. `soft_secs` is the annotated
+        soft-timeout in seconds, or None when un-annotated."""
+        text = label.strip()
+        if "#" in text:
             raise FsmChainParseError(
-                f"malformed connector label {label.strip()!r}; use `trigger` or "
-                "`guard#trigger` (no empty segments)",
+                f"'#' in edge label {text!r}; guards are written in brackets after the "
+                "trigger: 'trigger [guard1, @DWELL>30m]'",
                 chain=raw, index=idx,
             )
-        trigger = tokens[-1]
+        m = _LABEL_PARSE_RE.match(text)
+        if m is None:
+            raise FsmChainParseError(
+                f"malformed edge label {text!r}; write 'trigger', 'trigger~<dur>', or "
+                "'trigger [guard, ...]' (guards comma-separated in one bracket group "
+                "after the trigger)",
+                chain=raw, index=idx,
+            )
+        trigger = m.group("trigger")
         soft_secs: Optional[float] = None
         if "~" in trigger:                       # split the `~<dur>` soft-timeout off the trigger
             trigger, soft_secs = cls._parse_trigger_timeout(trigger, raw, idx)
-        if trigger.startswith("@"):
-            raise FsmChainParseError(
-                f"a connector's trigger cannot be a factual guard ({trigger!r}); the final "
-                "'#'-segment must be the trigger name (e.g. '@DWELL>60m#expire')",
-                chain=raw, index=idx,
-            )
+
         conditions: list[str] = []
         fact_guards: list[dict] = []
         seen_facts: set[str] = set()
-        for tok in tokens[:-1]:
-            if tok.startswith("@"):
-                fg = cls._parse_fact_guard(tok, raw, idx)
-                if fg["name"] in seen_facts:
+        guards_text = m.group("guards")
+        if guards_text is not None:
+            if not guards_text.strip():
+                raise FsmChainParseError(
+                    f"empty guard list in {text!r}; drop the brackets or name at least "
+                    "one guard",
+                    chain=raw, index=idx,
+                )
+            for tok in guards_text.split(","):
+                tok = tok.strip()
+                if not tok:
                     raise FsmChainParseError(
-                        f"at most one @{fg['name']} guard is allowed per connector",
+                        f"empty guard item in {text!r} (check for a stray comma)",
                         chain=raw, index=idx,
                     )
-                seen_facts.add(fg["name"])
-                fact_guards.append(fg)
-            else:
-                conditions.append(f"{_GUARD_METHOD_PREFIX}{tok}")
+                if tok.startswith("@"):
+                    fg = cls._parse_fact_guard(tok, raw, idx)
+                    if fg["name"] in seen_facts:
+                        raise FsmChainParseError(
+                            f"at most one @{fg['name']} guard is allowed per edge",
+                            chain=raw, index=idx,
+                        )
+                    seen_facts.add(fg["name"])
+                    fact_guards.append(fg)
+                elif _NAME_RE.fullmatch(tok) and not tok[0].isdigit():
+                    conditions.append(f"{_GUARD_METHOD_PREFIX}{tok}")
+                else:
+                    raise FsmChainParseError(
+                        f"invalid guard {tok!r} in {text!r}; a guard is a bare "
+                        "method-guard name (resolved as guard_<name>) or a factual "
+                        "guard like '@FAIL<3' / '@DWELL>=30m'",
+                        chain=raw, index=idx,
+                    )
         return conditions, fact_guards, trigger, soft_secs
 
     @staticmethod
@@ -1426,3 +1692,243 @@ class StateChainParser:
             spec.auto_edges.add((source, trigger))
             if trigger not in spec.pipeline:
                 spec.pipeline.append(trigger)
+
+
+# ---------------------------------------------------------------------------
+# Lint — advisory design-smell warnings (CLI layer, not the library contract)
+# ---------------------------------------------------------------------------
+
+def lint_spec(spec: FsmChainSpec) -> list[str]:
+    """Advisory warnings for a parsed spec — things that are LEGAL but usually mean
+    the declaration isn't finished (e.g. a freshly pasted Mermaid sketch). Returns
+    human-readable warning strings; empty when nothing looks off.
+
+    Deliberately NOT part of parse()/validate(): a program compiling a class
+    declaration should not receive opinions; a human at a terminal should. Run it
+    AFTER the compile pipeline (validate/expand_wildcards/classify — so wildcard
+    edges are concrete and timed-escape data is present) and BEFORE
+    apply_implicit_fail_cap (so guardedness reflects what the author declared, not
+    compiler defaults).
+
+    Checks:
+      * NO MANUAL EDGES — every edge auto-fires on case_advance(). A pure Mermaid
+        sketch is all `-->` (auto), so this is the signature of a paste that has
+        not yet had its human/event gates marked manual.
+      * SHADOWED AUTO SIBLINGS — a state whose UNGUARDED auto edge is declared
+        before other auto edges: advance() fires the first permitting edge, so the
+        later ones can fire only after the first FAILS. Legal (it is the
+        retry/divert idiom when @FAIL guards are involved) but with no guards at
+        all it usually means a forgotten guard on an intended branch.
+      * PERMANENT AUTO-BLOCK RISK — a non-terminal state whose every exit is an
+        auto edge gated by a method guard: no manual exit, no timed escape. If the
+        guards never ripen, the case stalls there forever (see AutoAdvanceBlocked).
+    """
+    found: list[str] = []
+    if not spec.transitions:
+        return found
+
+    def _sources(t: dict) -> list[str]:
+        src = t["source"]
+        return list(src) if isinstance(src, (list, tuple)) else [src]
+
+    any_manual = any(
+        (s, t["trigger"]) not in spec.auto_edges
+        for t in spec.transitions for s in _sources(t)
+    ) or any(not w["auto"] for w in spec.pending_wildcards)
+    if not any_manual and len(spec.transitions) >= 2:
+        found.append(
+            "no manual edges anywhere: every edge auto-fires on case_advance(). A "
+            "pasted Mermaid sketch is all '-->' (auto) — mark the human/event gates "
+            "manual ('== trigger ==>' or ': == trigger') before driving a case"
+        )
+
+    for state in spec.states:
+        auto_entries: list[tuple[str, bool]] = []   # (trigger, guarded) in declared order
+        auto_ts: list[dict] = []
+        manual_exit = False
+        for t in spec.transitions:
+            if state not in _sources(t):
+                continue
+            if (state, t["trigger"]) in spec.auto_edges:
+                guarded = bool(t.get("conditions")) or bool(t.get("_fact_guards"))
+                auto_entries.append((t["trigger"], guarded))
+                auto_ts.append(t)
+            else:
+                manual_exit = True
+
+        for i, (trig, guarded) in enumerate(auto_entries):
+            if not guarded and i < len(auto_entries) - 1:
+                shadowed = ", ".join(f"'{tr}'" for tr, _ in auto_entries[i + 1:])
+                found.append(
+                    f"state '{state}': auto edge '{trig}' is unguarded and declared "
+                    f"first, so sibling auto edge(s) {shadowed} can fire only after "
+                    f"'{trig}' FAILS; add a guard to '{trig}' if branching is intended"
+                )
+                break
+
+        if (auto_ts and not manual_exit
+                and state not in spec.terminal_states
+                and state not in spec.timed_escape_states
+                and all(t.get("conditions") for t in auto_ts)):
+            found.append(
+                f"state '{state}': every exit is an auto edge gated by a method "
+                "guard — no manual exit, no timed escape. If the guards never "
+                "ripen, the case auto-blocks here forever; consider a "
+                "'[@DWELL>...]' escape net or a manual edge"
+            )
+    return found
+
+
+# ---------------------------------------------------------------------------
+# CLI — validate a chain declaration, or render it as a Mermaid diagram
+# ---------------------------------------------------------------------------
+# Mirrors case_doc's module-as-CLI pattern. Validation needs nothing beyond this
+# module; --render goes through to_networkx() -> case_doc.to_mermaid(), both
+# imported/raised lazily so the parser keeps its zero-dependency core.
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Implementation behind ``python -m totodev_pub.folder_backed_case_support.state_chain_cli``
+    (that shim module is the runnable target; running THIS module with ``-m``
+    would re-execute it under runpy, since the package __init__ already imports it).
+
+    SOURCE is a file path, ``-`` for stdin (the default), or a literal chain
+    string (recognized by containing a ``-->``/``==>`` arrow) — so a Mermaid
+    sketch can be piped straight in and checked, or a single chain tried
+    inline. Default mode parses and runs the whole-graph checks, printing a
+    short summary; ``--render`` emits Mermaid source on stdout instead (the
+    ``state`` style's output is itself a valid declaration — see
+    ``case_doc.to_mermaid``). Exit codes: 0 success, 1 parse/validation
+    failure, 2 usage error.
+    """
+    import argparse
+    import sys
+    from pathlib import Path
+
+    ap = argparse.ArgumentParser(
+        prog="python -m totodev_pub.folder_backed_case_support.state_chain_cli",
+        description=(
+            "Validate an fsm_state_chains declaration, or render it as a Mermaid "
+            "diagram. SOURCE is a file path, '-' for stdin (default), or a literal "
+            "chain string."
+        ),
+    )
+    ap.add_argument(
+        "source", nargs="?", default="-",
+        help="file path, '-' for stdin (default), or a literal chain string",
+    )
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--render", action="store_true",
+        help="emit a Mermaid diagram on stdout instead of a validation summary",
+    )
+    mode.add_argument(
+        "--convert", action="store_true",
+        help="treat the input as a (near-)Mermaid sketch: emit a cleaned, valid "
+             "chain declaration on stdout, with %%%%-TODO markers wherever a human "
+             "must decide (see mermaid_intake)",
+    )
+    ap.add_argument(
+        "--style", choices=("state", "flowchart"), default="state",
+        help="Mermaid dialect for --render (default: state, whose output is "
+             "itself valid chain DSL)",
+    )
+    ap.add_argument(
+        "--no-validate", action="store_true",
+        help="parse only, skipping the whole-graph checks (for deliberately "
+             "partial snippets that lack an initial/terminal state)",
+    )
+    ap.add_argument(
+        "--quiet", action="store_true",
+        help="suppress advisory lint warnings (see lint_spec)",
+    )
+    args = ap.parse_args(argv)
+
+    if args.source == "-":
+        text = sys.stdin.read()
+    elif "-->" in args.source or "==>" in args.source:
+        text = args.source                       # literal chain(s) on the command line
+    else:
+        path = Path(args.source)
+        if not path.is_file():
+            print(
+                f"error: {args.source!r} is not a file and does not look like a "
+                "chain (contains no '-->'/'==>' arrow)",
+                file=sys.stderr,
+            )
+            return 2
+        text = path.read_text(encoding="utf-8")
+
+    if args.convert:
+        from totodev_pub.folder_backed_case_support.mermaid_intake import (
+            convert_mermaid_text,
+        )
+        converted, notes = convert_mermaid_text(text)
+        print(converted)
+        for note in notes:
+            print(f"note: {note}", file=sys.stderr)
+        try:
+            spec = StateChainParser.parse(converted)
+        except FsmChainParseError as e:
+            # Should not happen — conversion promises parseable output.
+            print(f"error: converted output does not parse: {e}", file=sys.stderr)
+            return 1
+        if not args.no_validate:
+            try:
+                spec.validate().expand_wildcards().classify()
+                print("ok: converted output parses and validates", file=sys.stderr)
+            except FsmChainParseError as e:
+                # Expected mid-workflow (e.g. a partial sketch): report, don't fail.
+                print(f"warning: converted output parses but does not validate "
+                      f"yet: {e}", file=sys.stderr)
+                return 0
+        if not args.quiet:
+            for w in lint_spec(spec):
+                print(f"warning: {w}", file=sys.stderr)
+        return 0
+
+    try:
+        spec = StateChainParser.parse(text)
+        if not args.no_validate:
+            # The default compile_fsm() order: whole-graph checks on the explicit
+            # graph, then wildcard injection, then timed-escape classification.
+            spec.validate().expand_wildcards().classify()
+    except FsmChainParseError as e:
+        print(f"error: {e}", file=sys.stderr)
+        if "without a trigger label" in str(e):
+            print("hint: pasting a Mermaid sketch? --convert scaffolds trigger "
+                  "names and comments out what the DSL cannot express",
+                  file=sys.stderr)
+        return 1
+
+    if args.render:
+        try:
+            graph = spec.to_networkx(include_implied_caps=False)
+        except ImportError as e:                 # networkx is an optional dependency
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        from totodev_pub.folder_backed_case_support.case_doc import to_mermaid
+        print(to_mermaid(graph, style=args.style))
+        return 0
+
+    auto_triggers = {trigger for _, trigger in spec.auto_edges}
+    manual_triggers = [t for t in spec.triggers if t not in auto_triggers]
+    wildcard_note = (
+        f", {len(spec.pending_wildcards)} wildcard rule(s)"
+        if spec.pending_wildcards else ""
+    )
+    print(f"OK: {len(spec.states)} states, {len(spec.transitions)} transitions"
+          f"{wildcard_note}")
+    if spec.initial_state is not None:
+        others = sorted(spec.initial_states - {spec.initial_state})
+        also = f" (also initial: {', '.join(others)})" if others else ""
+        print(f"  initial: {spec.initial_state}{also}")
+    if spec.terminal_states:
+        print(f"  terminal: {', '.join(sorted(spec.terminal_states))}")
+    print(f"  triggers: {len(spec.triggers)} "
+          f"({len(auto_triggers)} auto, {len(manual_triggers)} manual)")
+    if spec.timed_escape_states:
+        print(f"  timed escapes: {', '.join(sorted(spec.timed_escape_states))}")
+    if not args.quiet:
+        for w in lint_spec(spec):
+            print(f"warning: {w}", file=sys.stderr)
+    return 0

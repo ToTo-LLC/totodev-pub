@@ -105,7 +105,7 @@ human reviewer's approval, and send it.
 First decision: **the inquiry is the case.** One email thread in, one approved reply out.
 
 Second decision: **the lifecycle.** Here is the whole state machine. Solid arrows are
-**automated** triggers — the machinery fires them when their conditions permit. Dashed arrows are
+**automated** triggers — the machinery fires them when their conditions permit. Thick arrows are
 **manual** triggers — nothing fires them but a human decision arriving from the UI.
 
 ```mermaid
@@ -118,12 +118,12 @@ flowchart TD
     waiting_for_answers -->|compose_reply<br/>when answers_complete| drafted
     waiting_for_answers -->|escalate<br/>after 3 days| needs_attention
     drafted -->|submit_for_review| waiting_for_approval
-    waiting_for_approval -.->|approve| approved
-    waiting_for_approval -.->|reject_draft| triaged
+    waiting_for_approval ==>|approve| approved
+    waiting_for_approval ==>|reject_draft| triaged
     approved -->|send_reply| sent
-    needs_attention -.->|redispatch| waiting_for_answers
-    needs_attention -.->|abandon| abandoned
-    anystate{{any live state}} -.->|cancel| cancelled
+    needs_attention ==>|redispatch| waiting_for_answers
+    needs_attention ==>|abandon| abandoned
+    anystate{{any live state}} ==>|cancel| cancelled
 
     sent:::terminal
     abandoned:::terminal
@@ -137,7 +137,7 @@ flowchart TD
 ```
 
 > **Legend.** Solid arrow = automated (`--`) trigger, fired by the machinery when guards permit.
-> Dashed arrow = manual (`==`) trigger, fired only by an explicit human/UI action. Green = terminal
+> Thick arrow = manual (`==`) trigger, fired only by an explicit human/UI action. Green = terminal
 > states. Amber = states where the case idles awaiting people.
 
 Read the diagram like an operations story:
@@ -162,53 +162,58 @@ into code almost verbatim.
 
 ## 4. Declaring the lifecycle: the state-chain DSL
 
-A case type declares its FSM as a list of **chain strings** — a compact, Mermaid-flavoured DSL
-that reads left to right as alternating states and connectors. Every chain is complete in
-itself: it starts at a state and ends at a state (`stateA--trigger-->stateB`), optionally
-stringing several connector/state pairs together when that reads well. A state may appear in as
-many chains as needed; the parser merges them all into one graph. The diagram above is exactly
-these chains:
+A case type declares its FSM in a compact, Mermaid-flavoured DSL of **chain strings** — usually
+one triple-quoted multiline string, one chain per line (`%%` starts a comment, as in Mermaid; a
+list of chain strings works too). Each chain reads left to right as alternating states and
+connectors. Every chain is complete in itself: it starts at a state and ends at a state
+(`stateA -- trigger --> stateB`), optionally stringing several connector/state pairs together
+when that reads well. A state may appear in as many chains as needed; the parser merges them
+all into one graph. The diagram above is exactly these chains:
 
 ```python
-fsm_state_chains = [
-    # The automated intake pipeline, one edge per chain.
-    "^received--@FAIL<3#ocr_attachments~2m-->digitized",
-    "digitized--detect_sentiment~30s-->assessed",
-    "assessed--analyze_intent~1m-->triaged",
-    "triaged--dispatch-->waiting_for_answers",
+fsm_state_chains = """
+    %% The automated intake pipeline, one edge per line.
+    [*] --> received -- ocr_attachments~2m [@FAIL<3] --> digitized
+    digitized -- detect_sentiment~30s --> assessed
+    assessed -- analyze_intent~1m --> triaged
+    triaged -- dispatch --> waiting_for_answers
 
-    # Once every issue has an expert answer, draft and hand to a human.
-    "waiting_for_answers--answers_complete#compose_reply~1m-->drafted",
-    "drafted--submit_for_review-->waiting_for_approval",
+    %% Once every issue has an expert answer, draft and hand to a human.
+    waiting_for_answers -- compose_reply~1m [answers_complete] --> drafted
+    drafted -- submit_for_review --> waiting_for_approval
 
-    # Human decisions (a chain may string several edges together).
-    "waiting_for_approval==approve-->approved--send_reply~30s-->sent^",
-    "waiting_for_approval==reject_draft-->triaged",
+    %% Human decisions (a chain may string several edges together).
+    waiting_for_approval == approve ==> approved -- send_reply~30s --> sent --> [*]
+    waiting_for_approval == reject_draft ==> triaged
 
-    # Error and aging flows.
-    "received--@FAIL>=3#refer_out-->needs_attention",
-    "waiting_for_answers--@DWELL>3d#escalate-->needs_attention",
-    "needs_attention==redispatch-->waiting_for_answers",
-    "needs_attention==abandon-->abandoned^",
+    %% Error and aging flows.
+    received -- refer_out [@FAIL>=3] --> needs_attention
+    waiting_for_answers -- escalate [@DWELL>3d] --> needs_attention
+    needs_attention == redispatch ==> waiting_for_answers
+    needs_attention == abandon ==> abandoned --> [*]
 
-    # From anywhere, a human may cancel.
-    "*==cancel-->cancelled^",
-]
+    %% From anywhere, a human may cancel.
+    * == cancel ==> cancelled --> [*]
+"""
 ```
 
 The grammar, piece by piece:
 
 | Syntax | Meaning |
 |---|---|
-| `^received` | Leading `^`: an **initial** state — where new cases begin. |
-| `sent^` | Trailing `^`: a **terminal** state — entering it ends the case (and fires the retention/purge machinery, §6). |
-| `A--trigger-->B` | An **automated** edge. The driving machinery may fire it unattended. |
-| `A==trigger-->B` | A **manual** edge. It *never* auto-fires; the case simply waits. Firing it takes an explicit call — from a test, or a UI action relayed by the manager. |
-| `answers_complete#compose_reply` | A **guard**: the edge fires only if `async def guard_answers_complete(self, tctx)` returns truthy. Guards are how an automated edge waits for a *data condition*. |
-| `@DWELL>3d#escalate` | A **factual guard** the framework computes: true once the case has dwelt in the source state more than 3 days. A `>`-dwell edge allows for a guaranteed **timed escape** — the state can never be permanently stuck. |
-| `@FAIL<3#ocr_attachments` | Another factual guard: true while fewer than 3 transition attempts have failed since entering this state. This is the **retry knob** — pair a `@FAIL<3` retry edge with a `@FAIL>=3` divert edge, as `received` does. |
-| `ocr_attachments~2m` | A **soft timeout** on the trigger's work: past ~2 minutes it is flagged slow (and hard-aborted at a multiple of that). Annotate the steps you know are slow; the rest inherit a snappy default. |
-| `*==cancel-->cancelled^` | A **wildcard**: this edge is injected from every non-terminal state. |
+| `[*] --> received` | A label-less hop from the `[*]` boundary pseudo-state marks `received` **initial** — where new cases begin. |
+| `sent --> [*]` | A hop *into* the boundary marks `sent` **terminal** — entering it ends the case (and fires the retention/purge machinery, §6). |
+| `A -- trigger --> B` | An **automated** edge. The driving machinery may fire it unattended. |
+| `A == trigger ==> B` | A **manual** edge (matched thick arrows). It *never* auto-fires; the case simply waits. Firing it takes an explicit call — from a test, or a UI action relayed by the manager. |
+| `compose_reply [answers_complete]` | A **guard list** in brackets after the trigger (comma-separated if several): the edge fires only if `async def guard_answers_complete(self, tctx)` returns truthy. Guards are how an automated edge waits for a *data condition*. |
+| `escalate [@DWELL>3d]` | A **factual guard** the framework computes: true once the case has dwelt in the source state more than 3 days. A `>`-dwell edge allows for a guaranteed **timed escape** — the state can never be permanently stuck. |
+| `ocr_attachments~2m [@FAIL<3]` | Another factual guard: true while fewer than 3 transition attempts have failed since entering this state. This is the **retry knob** — pair a `[@FAIL<3]` retry edge with a `[@FAIL>=3]` divert edge, as `received` does. |
+| `ocr_attachments~2m` | A **soft timeout** on the trigger's work, glued to the trigger name and preceding the guard brackets: past ~2 minutes it is flagged slow (and hard-aborted at a multiple of that). Annotate the steps you know are slow; the rest inherit a snappy default. |
+| `* == cancel ==> cancelled --> [*]` | A **wildcard**: bare `*` as the source injects this edge from every non-terminal state. (Bracketed `[*]` is the boundary; bare `*` is the any-state wildcard.) |
+
+There is also a colon-labeled single-edge form, straight out of Mermaid stateDiagram-v2, handy
+when a line declares just one edge: `A --> B : trigger` (automated), `A ==> B : trigger` or
+`A --> B : == trigger` (manual).
 
 Two defaults are worth internalizing early because they encode the library's philosophy:
 
@@ -216,7 +221,7 @@ Two defaults are worth internalizing early because they encode the library's phi
   unattended, `==` is the fail-safe: the case waits rather than blowing past a human gate.
 - **Retry is opt-in.** An automated edge with no `@FAIL` guard gets an implicit `@FAIL<1` — one
   attempt, then it stops trying and the failure is visible, rather than hammering a broken step
-  forever. Declare `@FAIL<n` when retrying is what you *mean*.
+  forever. Declare `[@FAIL<n]` when retrying is what you *mean*.
 
 The chains are parsed and validated **at class-definition time**: misspelled states, unreachable
 states, dead-end non-terminals, and hook methods that match nothing all fail at import, not at
@@ -257,21 +262,21 @@ class InquiryCase(FolderBackedCase):
     """One customer inquiry, from inbound email to approved reply."""
 
     # 1. The lifecycle (the DSL from §4).
-    fsm_state_chains = [
-        "^received--@FAIL<3#ocr_attachments~2m-->digitized",
-        "digitized--detect_sentiment~30s-->assessed",
-        "assessed--analyze_intent~1m-->triaged",
-        "triaged--dispatch-->waiting_for_answers",
-        "waiting_for_answers--answers_complete#compose_reply~1m-->drafted",
-        "drafted--submit_for_review-->waiting_for_approval",
-        "waiting_for_approval==approve-->approved--send_reply~30s-->sent^",
-        "waiting_for_approval==reject_draft-->triaged",
-        "received--@FAIL>=3#refer_out-->needs_attention",
-        "waiting_for_answers--@DWELL>3d#escalate-->needs_attention",
-        "needs_attention==redispatch-->waiting_for_answers",
-        "needs_attention==abandon-->abandoned^",
-        "*==cancel-->cancelled^",
-    ]
+    fsm_state_chains = """
+        [*] --> received -- ocr_attachments~2m [@FAIL<3] --> digitized
+        digitized -- detect_sentiment~30s --> assessed
+        assessed -- analyze_intent~1m --> triaged
+        triaged -- dispatch --> waiting_for_answers
+        waiting_for_answers -- compose_reply~1m [answers_complete] --> drafted
+        drafted -- submit_for_review --> waiting_for_approval
+        waiting_for_approval == approve ==> approved -- send_reply~30s --> sent --> [*]
+        waiting_for_approval == reject_draft ==> triaged
+        received -- refer_out [@FAIL>=3] --> needs_attention
+        waiting_for_answers -- escalate [@DWELL>3d] --> needs_attention
+        needs_attention == redispatch ==> waiting_for_answers
+        needs_attention == abandon ==> abandoned --> [*]
+        * == cancel ==> cancelled --> [*]
+    """
 
     # 2. The on-disk data objects other tiers may read — and WHEN they may trust them.
     asset_aliases = [

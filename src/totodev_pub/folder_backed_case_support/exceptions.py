@@ -181,8 +181,9 @@ class AutoAdvanceBlocked(Exception):
     call, having no AdvanceResult to return, still raises). It is deterministic and
     idempotent: the same state yields the same block on every call until something changes.
 
-    REMEDY: give the state a timed escape, e.g. `--@DWELL>{N}h#timeout-->somewhere`, or a
-    blanket net like `*--@DWELL>=2d#timeout-->expired^`; or resolve/route it manually.
+    REMEDY: give the state a timed escape, e.g. `-- timeout [@DWELL>{N}h] --> somewhere`,
+    or a blanket net like `* -- timeout [@DWELL>=2d] --> expired`; or resolve/route it
+    manually.
     """
     def __init__(self, case_id: str, state: str, *, candidates: Optional[list] = None):
         super().__init__(
@@ -264,7 +265,7 @@ class MissingFsmError(Exception):
         self.carrier_name = carrier_name
         super().__init__(
             f"{carrier_name!r} defines no FSM: declare `fsm_state_chains` "
-            "(e.g. [\"^new--begin-->done^\"]) or override `compile_fsm()` to build an "
+            "(e.g. '[*] --> new -- begin --> done --> [*]') or override `compile_fsm()` to build an "
             "FsmChainSpec by hand."
         )
 

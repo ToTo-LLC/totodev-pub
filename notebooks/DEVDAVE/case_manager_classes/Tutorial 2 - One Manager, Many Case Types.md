@@ -65,7 +65,7 @@ genuinely different lifecycle: no sentiment analysis, no expert dispatch, no app
 should be identified, recorded (perhaps to tune the filter), and terminated. Immediately.
 
 The tempting shortcut is to bolt spam handling onto `InquiryCase` — add a `spam_check` state up
-front and a `marked_spam^` terminal off to the side. Resist it, for the same reasons you'd
+front and a `marked_spam --> [*]` terminal off to the side. Resist it, for the same reasons you'd
 resist merging two unrelated classes anywhere else:
 
 - The inquiry FSM grows edges that 95% of its instances never touch, and every future reader of
@@ -111,8 +111,8 @@ class InboundCase(FolderBackedCase):
     """
 
     fsm_state_chains = [
-        "^arrived--@FAIL<3#classify_traffic~30s-->received",
-        "received==never-->never_reached^",
+        "[*] --> arrived -- classify_traffic~30s [@FAIL<3] --> received",
+        "received == never ==> never_reached --> [*]",
     ]
 
     asset_aliases = [
@@ -139,7 +139,7 @@ class SpamCase(FolderBackedCase):
     """Spam's whole lifecycle: record it, terminate."""
 
     fsm_state_chains = [
-        "^received--record_spam~10s-->marked_spam^",
+        "[*] --> received -- record_spam~10s --> marked_spam --> [*]",
     ]
 
     asset_aliases = [
@@ -160,14 +160,15 @@ class SpamCase(FolderBackedCase):
         return f"spam_{super().archive_grouping_label()}"
 ```
 
-And the shape of the whole arrangement. Thick arrows are **reclassifications** — not
-transitions; the folder, case id, and event history stay put while the *class* changes:
+And the shape of the whole arrangement. Dotted arrows are **reclassifications** — not
+transitions; the folder, case id, and event history stay put while the *class* changes. (The
+thick arrow is the usual manual-edge notation, as in tutorial #1's diagram.)
 
 ```mermaid
 flowchart TD
     subgraph inbound["InboundCase — generic intake"]
         arrived([arrived]) -->|classify_traffic| recv1[received]
-        recv1 -.->|never — declared,<br/>never fired| never_reached
+        recv1 ==>|never — declared,<br/>never fired| never_reached
     end
 
     subgraph spam["SpamCase"]
@@ -179,8 +180,8 @@ flowchart TD
         pipeline --> sent
     end
 
-    recv1 ==>|"case_reclassify_to(SpamCase)"| recv2
-    recv1 ==>|"case_reclassify_to(InquiryCase)"| recv3
+    recv1 -.->|"case_reclassify_to(SpamCase)"| recv2
+    recv1 -.->|"case_reclassify_to(InquiryCase)"| recv3
 
     never_reached:::terminal
     marked_spam:::terminal
@@ -244,14 +245,14 @@ treat any interface: keep it narrow and name it deliberately. In our trio the co
 state, `received`, and each side holds up its end:
 
 - `InboundCase` **ends** its useful life at `received` (parked, verdict written).
-- `SpamCase` and `InquiryCase` each declare `received` as an **initial** state (`^received`).
-  This is not just stylistic — the DSL validator requires every non-initial state to have an
+- `SpamCase` and `InquiryCase` each declare `received` as an **initial** state
+  (`[*] --> received`). This is not just stylistic — the DSL validator requires every non-initial state to have an
   incoming edge, and nothing *inside* those classes leads into `received`. Marking it initial
   declares "entry happens here from outside," which is precisely the parser's documented
   convention for states reached only via reclassification.
 
 And this is why tutorial #1's `InquiryCase` needed no changes at all: its lifecycle already
-began at `^received`. From `InquiryCase`'s perspective, being incepted fresh in a folder and
+began at `[*] --> received`. From `InquiryCase`'s perspective, being incepted fresh in a folder and
 being reclassified into an existing one are indistinguishable — either way, it wakes up at
 `received` and its automated pipeline takes over on the next sweep. Our validation run drove a
 reclassified inbound through OCR, sentiment, intent, expert answers, approval, and `sent`
@@ -266,7 +267,7 @@ every non-terminal state have an exit — both excellent rules for classes that 
 So it satisfies the letter of the contract with a formal gesture:
 
 ```
-"received==never-->never_reached^"
+"received == never ==> never_reached --> [*]"
 ```
 
 A **manual** edge (`==`) never auto-fires, and no human ever fires this one — so `never_reached`
@@ -416,7 +417,7 @@ every one of them to its own version of done.
 - `FolderBackedCase.case_reclassify_to()` (`totodev_pub/folder_backed_case.py`, SECTION 3) —
   the authoritative contract, including the two-phase commit details.
 - The *States* section of `state_chain_parser.py` — the initial-state reachability rule that
-  makes `^received` the idiom for reclassification entry points.
+  makes `[*] --> received` the idiom for reclassification entry points.
 - `CasePoolDriver` docstring (`folder_backed_case_support/case_pool_driver.py`) — contract #3,
   "rehydration tolerance," is the mechanism behind the in-pool swap.
 - `tests/test_folder_backed_case.py` — the reclassification type-gate under test

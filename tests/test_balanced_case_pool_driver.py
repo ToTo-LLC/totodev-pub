@@ -49,7 +49,7 @@ class AutoCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """Two auto edges to a terminal: progresses on every step, then closes."""
-    fsm_state_chains = ["^s0--step-->s1--step2-->s2^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 -- step2 --> s2 --> [*]"]
 
     async def perform_step(self, tctx):
         pass
@@ -65,7 +65,7 @@ class LongAutoCase(FolderBackedCase):
     """Four auto edges to a terminal: progresses on every step, then closes.
     Long enough to observe several consecutive eager-paced beats before the
     tempo relaxes back to the full period."""
-    fsm_state_chains = ["^s0--step1-->s1--step2-->s2--step3-->s3--step4-->s4^"]
+    fsm_state_chains = ["[*] --> s0 -- step1 --> s1 -- step2 --> s2 -- step3 --> s3 -- step4 --> s4 --> [*]"]
 
     async def perform_step1(self, tctx):
         pass
@@ -86,7 +86,7 @@ class ManualCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """Manual-only (no auto exit): not advanceable -> accelerated demotion."""
-    fsm_state_chains = ["^waiting==push-->done^"]
+    fsm_state_chains = ["[*] --> waiting == push ==> done --> [*]"]
 
 
 class GuardedCase(FolderBackedCase):
@@ -95,7 +95,7 @@ class GuardedCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """Has an auto exit (advanceable) whose guard always declines: blocked, normal ladder."""
-    fsm_state_chains = ["^hold--blockit#go-->done^"]
+    fsm_state_chains = ["[*] --> hold -- go [blockit] --> done --> [*]"]
 
     async def guard_blockit(self, tctx):
         return False
@@ -110,7 +110,7 @@ class FailCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """Auto edge whose work raises, with retry room (@FAIL<5): repeated failures."""
-    fsm_state_chains = ["^start--@FAIL<5#tryit-->done^"]
+    fsm_state_chains = ["[*] --> start -- tryit [@FAIL<5] --> done --> [*]"]
 
     async def perform_tryit(self, tctx):
         raise RuntimeError("boom")
@@ -122,7 +122,7 @@ class AlertProgressCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """One step that logs an alert AND progresses to a terminal (exercises event order)."""
-    fsm_state_chains = ["^s0--step-->s1^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
     async def perform_step(self, tctx):
         self.case_emit_alert_event("heads up")
@@ -134,7 +134,7 @@ class BlockingCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
     """Auto step that blocks on an injected gate, to hold a case in-flight."""
-    fsm_state_chains = ["^s0--step-->s1^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
     async def perform_step(self, tctx):
         await self._gate.wait()
@@ -146,7 +146,7 @@ class BlockingThenManualCase(FolderBackedCase):
     fsm_trigger_chokes = {}
     """Blocking auto step into a state with a manual exit: lets a test queue a pinned
     trigger behind an in-flight step."""
-    fsm_state_chains = ["^s0--step-->s1==push-->done^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 == push ==> done --> [*]"]
 
     async def perform_step(self, tctx):
         await self._gate.wait()
@@ -156,7 +156,7 @@ class ChokedBlockingCase(FolderBackedCase):
 
     asset_aliases = []
     fsm_trigger_chokes = {"step": {"cpu"}}
-    fsm_state_chains = ["^s0--step-->s1^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
     async def perform_step(self, tctx):
         await self._gate.wait()
@@ -166,7 +166,7 @@ class CpuChokedCase(FolderBackedCase):
 
     asset_aliases = []
     fsm_trigger_chokes = {"step": {"cpu"}}
-    fsm_state_chains = ["^s0--step-->s1^"]
+    fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
     async def perform_step(self, tctx):
         pass
@@ -480,7 +480,7 @@ def test_attach_fire_multiple_apply_one_per_beat(tmp_path):
         class ChainManual(FolderBackedCase):
             asset_aliases = []
             fsm_trigger_chokes = {}
-            fsm_state_chains = ["^s0==a-->s1==b-->s2^"]
+            fsm_state_chains = ["[*] --> s0 == a ==> s1 == b ==> s2 --> [*]"]
 
         driver = BalancedCasePoolDriver()
         case = _make(ChainManual, tmp_path, "multi")

@@ -22,7 +22,7 @@ def _isolate_case_registry():
 class SimpleCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new--step-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new -- step --> open == finish ==> done --> [*]"]
 
     async def perform_step(self, tctx):
         pass
@@ -37,7 +37,7 @@ class MultiAutoCase(FolderBackedCase):
         "fast": {"cpu"},
         "slow": {"cpu", "ms-graph-api"},
     }
-    fsm_state_chains = ["^fork--fast-->a^", "^fork--slow-->b^"]
+    fsm_state_chains = ["[*] --> fork -- fast --> a --> [*]", "[*] --> fork -- slow --> b --> [*]"]
 
     async def perform_fast(self, tctx):
         pass
@@ -51,7 +51,7 @@ class ChokedCase(FolderBackedCase):
     fsm_trigger_chokes = {
         "analyze": {"cpu", "ms-graph-api"},
     }
-    fsm_state_chains = ["^new--analyze-->done^"]
+    fsm_state_chains = ["[*] --> new -- analyze --> done --> [*]"]
 
     async def perform_analyze(self, tctx):
         pass

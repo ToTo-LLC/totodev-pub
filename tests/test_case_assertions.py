@@ -249,7 +249,7 @@ def _isolate_case_registry():
 class SweepCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
     hook_calls: list  # set per-instance in tests
 
@@ -521,7 +521,7 @@ def test_vanished_assertion_file_is_journaled_not_raised(tmp_path):
 class WiredCase(FolderBackedCase):
     asset_aliases = []
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
     def case_assert_open_scratch_exists(self, ltx):
         if not (self.case_assets.folder / "scratch.txt").exists():
@@ -574,7 +574,7 @@ def test_assertion_failure_never_disturbs_the_machine(tmp_path):
     class FailingAssertCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
         def case_assert_open_always_red(self, ltx):
             return "red"
@@ -595,7 +595,7 @@ def test_orphan_assertion_method_fails_at_bind(tmp_path):
     class OrphanAssertCase(FolderBackedCase):
         asset_aliases = []
         fsm_trigger_chokes = {}
-        fsm_state_chains = ["^new==begin-->done^"]
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
 
         def case_assert_oepn_typo(self, ltx):     # 'oepn' is not a state
             return None
@@ -633,7 +633,7 @@ class AssetCheckCase(FolderBackedCase):
         ),
     ]
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
     # Deliberately NO case_assert_open_* methods: proves the check runs even
     # when the state has no hand-written assertions at all.
 
@@ -707,7 +707,7 @@ class ManyAssetFailCase(FolderBackedCase):
         ),
     ]
     fsm_trigger_chokes = {}
-    fsm_state_chains = ["^new==begin-->open==finish-->done^"]
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
     async def perform_begin(self, tctx):
         pass

@@ -27,7 +27,7 @@ class _Rec(BaseModel, FileMappedPydanticMixin):
 
 
 def _fsm():
-    return StateChainParser.parse(["^new==go-->open==done-->closed^"]).validate()
+    return StateChainParser.parse(["[*] --> new == go ==> open == done ==> closed --> [*]"]).validate()
 
 
 def test_from_declaration_strict_list_of_assetspec():
