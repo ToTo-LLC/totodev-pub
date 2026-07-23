@@ -131,6 +131,31 @@ NEEDS_FINGERPRINT = {"examined", "indexed", ...}
 NEEDS_SUMMARY = {"summarized", "indexed", ...}
 ```
 
+## Hook signatures — annotate `tctx: EventData`
+
+Import `from transitions.core import EventData` and type every transition hook
+argument. `EventData` is the transitions library trigger-context object (not
+the case event journal); call kwargs land in `tctx.kwargs`.
+
+```python
+from transitions.core import EventData
+
+async def perform_analyze_file(self, tctx: EventData) -> None:
+    """TODO(responsibility): ..."""
+    return self._not_implemented(None)
+
+async def guard_needs_ocr(self, tctx: EventData) -> bool:
+    """TODO(responsibility): ..."""
+    return self._not_implemented(False)
+
+async def on_enter_awaiting_review(self, tctx: EventData) -> None:
+    """TODO(responsibility): ..."""
+    return self._not_implemented(None)
+```
+
+Same annotation on `before_` / `after_` / `on_exit_` when those are generated.
+`case_assert_*` methods take `ltx`, not `tctx` — leave those as they are.
+
 ## `_not_implemented` (method only — not the module header)
 
 Keep scaffolding advice on the helper itself (one line). Do not restate it in

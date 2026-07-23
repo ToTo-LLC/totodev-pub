@@ -197,7 +197,7 @@ chains** — it reads like the diagram it is and takes `%%` comments (see
 | `A ==> B : trigger` / `A --> B : == trigger` | colon-labeled **manual** edge — both spellings are official; generated diagrams emit the `: ==` label-marker form |
 | `A -- trigger [guard] --> A` | **auto self-loop** — same-state auto edge; **requires** ≥1 method guard (framework rejects unguarded `A -- trigger --> A`) |
 | `A == trigger ==> A` | **manual self-loop** — same-state manual edge; no method guard required |
-| `trigger [guard]` | method guard in trailing brackets: binds `guard_<guard>(self, tctx) -> bool`; edge fires only when it returns truthy |
+| `trigger [guard]` | method guard in trailing brackets: binds `guard_<guard>(self, tctx: EventData) -> bool`; edge fires only when it returns truthy |
 | `trigger [guard1, guard2]` | **multiple guards** on one edge — all must pass (`conditions` = `guard_guard1`, `guard_guard2`, …). One bracket group per edge, comma-separated, trigger first. |
 | `trigger [@DWELL(>\|>=\|<\|<=)<dur>]` | factual guard: time in current state vs `1s/2m/3h/4d`. Use for **timed escapes** so a state can't rot forever (pair with a `==` human gate or an automated pipeline step). |
 | `trigger [@FAIL(>\|>=\|<\|<=)n]` | factual guard: failed-transition-attempt count since entering current state. Use for **retry-then-divert**: e.g. `retry [@FAIL<3]` + `give_up [@FAIL>=3]` as **separate edges**. Default (no `@FAIL` given) is an implied `@FAIL<1` — one try, then stop. |
@@ -262,18 +262,20 @@ bind time — so only stub what the chains actually name.
 
 | Pattern | Signature | When it fires | Stub for |
 |---|---|---|---|
-| `perform_<trigger>` | `async def (self, tctx)` | the trigger's main work; auto-wired as `before_<trigger>` if no explicit `before_<trigger>` exists | every trigger named in the chains that does real work |
-| `before_<trigger>` | `async def (self, tctx)` | before the transition, only if you need this *and* a separate `perform_` | only if the developer distinguishes "before" from "perform" |
-| `after_<trigger>` | `async def (self, tctx)` | after the transition commits | only if the developer names post-transition work |
-| `guard_<guard>` | `async def (self, tctx) -> bool` | polled (possibly many times); must be fast, idempotent, side-effect free | every method guard named in a bracket group (`trigger [guard]`) in the chains |
-| `on_enter_<state>` | `async def (self, tctx)` | on entering `<state>` | only states the developer says need entry side effects |
-| `on_exit_<state>` | `async def (self, tctx)` | on leaving `<state>` | only states the developer says need exit side effects |
+| `perform_<trigger>` | `async def (self, tctx: EventData)` | the trigger's main work; auto-wired as `before_<trigger>` if no explicit `before_<trigger>` exists | every trigger named in the chains that does real work |
+| `before_<trigger>` | `async def (self, tctx: EventData)` | before the transition, only if you need this *and* a separate `perform_` | only if the developer distinguishes "before" from "perform" |
+| `after_<trigger>` | `async def (self, tctx: EventData)` | after the transition commits | only if the developer names post-transition work |
+| `guard_<guard>` | `async def (self, tctx: EventData) -> bool` | polled (possibly many times); must be fast, idempotent, side-effect free | every method guard named in a bracket group (`trigger [guard]`) in the chains |
+| `on_enter_<state>` | `async def (self, tctx: EventData)` | on entering `<state>` | only states the developer says need entry side effects |
+| `on_exit_<state>` | `async def (self, tctx: EventData)` | on leaving `<state>` | only states the developer says need exit side effects |
 
-`tctx` is the `transitions` `EventData` object (not the event journal); kwargs
-passed to a direct trigger call land in `tctx.kwargs`. Keep those kwargs
-JSON-serializable — parts of the `CaseManager` framework may persist or relay
-them. Raising in a guard or `before_` hook aborts the transition and counts as a
-failed attempt (feeds `@FAIL`).
+`tctx` is `transitions.core.EventData` (not the event journal). Always annotate
+it in generated stubs: `tctx: EventData`, with
+`from transitions.core import EventData`. Kwargs passed to a direct trigger
+call land in `tctx.kwargs`. Keep those kwargs JSON-serializable — parts of the
+`CaseManager` framework may persist or relay them. Raising in a guard or
+`before_` hook aborts the transition and counts as a failed attempt (feeds
+`@FAIL`).
 
 Hooks must be well-behaved async — they share one event loop with every other
 live case. Long/blocking work belongs behind `case_invoke_threaded()` (in-process
@@ -388,6 +390,8 @@ import sys
 from types import MappingProxyType
 from typing import Any, ClassVar, Mapping
 
+from transitions.core import EventData
+
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
@@ -412,10 +416,10 @@ class MyCase(FolderBackedCase):
         self.log.warning("STUB not implemented: %s", caller)
         return retval
 
-    async def perform_<trigger>(self, tctx):
+    async def perform_<trigger>(self, tctx: EventData) -> None:
         return self._not_implemented(None)
 
-    async def guard_<guard>(self, tctx) -> bool:
+    async def guard_<guard>(self, tctx: EventData) -> bool:
         return self._not_implemented(True)
 
     def case_assert_<state>_<slug>(self, ltx) -> None | str:

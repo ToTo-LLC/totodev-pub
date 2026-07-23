@@ -233,12 +233,15 @@ docstring voice, ClassVar trust map, and anti-patterns, also read
 
 For every name that appears in the confirmed `fsm_state_chains`:
 
-- One `async def perform_<trigger>(self, tctx)` for every trigger that does
-  real work, docstring stating what it must read/write/call — drawn from the
-  interview, not invented.
-- One `async def guard_<guard>(self, tctx) -> bool` for every method guard
-  named in a bracket group (`trigger [guard]`), docstring stating the
-  condition it decides.
+- One `async def perform_<trigger>(self, tctx: EventData)` for every trigger
+  that does real work, docstring stating what it must read/write/call — drawn
+  from the interview, not invented. Import `EventData` from
+  `transitions.core` (the transitions trigger-context object — not the case
+  event journal). Annotate `tctx: EventData` on every hook that takes it
+  (`perform_` / `before_` / `after_` / `guard_` / `on_enter_` / `on_exit_`).
+- One `async def guard_<guard>(self, tctx: EventData) -> bool` for every
+  method guard named in a bracket group (`trigger [guard]`), docstring
+  stating the condition it decides.
 - `on_enter_<state>` / `on_exit_<state>` **only** for states the developer
   specifically described as needing entry/exit side effects — not every state
   needs one.
@@ -370,6 +373,8 @@ for this case (e.g. a deliberately fully-automated pipeline). Then confirm:
       meta, or `_not_implemented` mechanics.
 - [ ] Each asset pydantic model has a purpose docstring plus a TODO to replace
       the placeholder attribute layout.
+- [ ] Transition hooks annotate `tctx: EventData` (`from transitions.core
+      import EventData`); no bare `tctx` parameters.
 - [ ] No stub contains real logic — only a responsibility docstring and a
       single `return self._not_implemented(<default>)` line.
 - [ ] If the case ingests files: initial state is inert (e.g. `new` /

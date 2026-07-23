@@ -25,6 +25,7 @@ from types import MappingProxyType
 from typing import Any, ClassVar, Mapping
 
 from pydantic import BaseModel
+from transitions.core import EventData
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case import FolderBackedCase
@@ -139,50 +140,50 @@ class PermitApplicationCase(FolderBackedCase):
     # perform_<trigger>
     # =======================================================================
 
-    async def perform_add_attachments(self, tctx) -> None:
+    async def perform_add_attachments(self, tctx: EventData) -> None:
         """TODO(responsibility): copy/link filepath(s) from tctx.kwargs into
         the `supporting_docs` asset location. Intake only — no OCR/parse here.
         """
         return self._not_implemented(None)
 
-    async def perform_begin(self, tctx) -> None:
+    async def perform_begin(self, tctx: EventData) -> None:
         """TODO(responsibility): any bookkeeping needed when leaving the
         temporary intake state and entering the real flow at `submitted`.
         """
         return self._not_implemented(None)
 
-    async def perform_validate_documents(self, tctx) -> None:
+    async def perform_validate_documents(self, tctx: EventData) -> None:
         """TODO(responsibility): validate the uploaded documents named in
         `supporting_docs`; write findings the retry/divert edges above key on.
         Must raise on a validation failure to count toward @FAIL.
         """
         return self._not_implemented(None)
 
-    async def perform_flag_incomplete(self, tctx) -> None:
+    async def perform_flag_incomplete(self, tctx: EventData) -> None:
         """TODO(responsibility): after 3 failed validation attempts, record
         why (e.g. `case_emit_alert_event`) so a human knows what's missing.
         """
         return self._not_implemented(None)
 
-    async def perform_check_eligibility(self, tctx) -> None:
+    async def perform_check_eligibility(self, tctx: EventData) -> None:
         """TODO(responsibility): compute eligibility from `application` and
         write the result to the `eligibility` asset.
         """
         return self._not_implemented(None)
 
-    async def perform_route_to_reviewer(self, tctx) -> None:
+    async def perform_route_to_reviewer(self, tctx: EventData) -> None:
         """TODO(responsibility): whatever bookkeeping/notification is needed
         when handing an eligible application to a human reviewer.
         """
         return self._not_implemented(None)
 
-    async def perform_issue_permit(self, tctx) -> None:
+    async def perform_issue_permit(self, tctx: EventData) -> None:
         """TODO(responsibility): call the external permit-issuing system;
         write its confirmation/identifier into an asset before returning.
         """
         return self._not_implemented(None)
 
-    async def perform_escalate(self, tctx) -> None:
+    async def perform_escalate(self, tctx: EventData) -> None:
         """TODO(responsibility): the review sat for 5+ days — alert whoever
         owns the reviewer queue (e.g. `case_emit_alert_event`).
         """
@@ -192,7 +193,7 @@ class PermitApplicationCase(FolderBackedCase):
     # guard_<guard>
     # =======================================================================
 
-    async def guard_eligible(self, tctx) -> bool:
+    async def guard_eligible(self, tctx: EventData) -> bool:
         """TODO(responsibility): return True iff `eligibility.is_eligible`.
         Must not mutate anything; may be polled repeatedly.
 
@@ -206,7 +207,7 @@ class PermitApplicationCase(FolderBackedCase):
     # on_enter_/on_exit_<state> — only for states with real entry/exit work.
     # =======================================================================
 
-    async def on_enter_awaiting_review(self, tctx) -> None:
+    async def on_enter_awaiting_review(self, tctx: EventData) -> None:
         """TODO(responsibility): notify the reviewer queue that a new
         application is ready for a decision.
         """
