@@ -30,7 +30,7 @@ There is a natural tension between a simple model with a few coarse steps
 (e.g. `new → open → closed`) and a complex model with granular substeps.
 **Default to the coarsest honest model** that still matches how the business
 talks about the work. Extra states are cheap to add later and expensive to
-rename once `perform_` / `guard_` / `case_assert_` / `AssetSpec.states` all
+rename once `perform_` / `guard_` / `case_assert_` / `AssetSpec.trust_states` all
 hang off the names.
 
 Only propose a split when you can name a concrete reason from the checklist
@@ -331,14 +331,14 @@ asset_aliases = {
     "ticket": AssetSpec(
         relative_path="...",    # path under assets/, or a glob when many=True
         loader=SomeModel,       # FileMappedPydanticMixin subclass, Path, or Callable[[Path], Any]
-        states={"state_a", ...},# trustworthy FSM states; omit only if flexible_asset_alias_loading=True
+        trust_states={"state_a", ...},# trustworthy FSM states; omit only if flexible_asset_alias_loading=True
         keep=True,              # always keep past termination (not persisted on the record)
         many=False,             # True => relative_path is a glob; case_load_assets() returns a list
     ),
 }
 ```
 
-`flexible_asset_alias_loading = True` on the class relaxes the loader/states
+`flexible_asset_alias_loading = True` on the class relaxes the loader/trust_states
 requirement for informal aliases — leave it `False` (the default) unless the
 developer explicitly wants that.
 
@@ -391,8 +391,7 @@ asset contracts. See ``fsm_state_chains`` on the case class for the lifecycle.
 from __future__ import annotations
 
 import sys
-from types import MappingProxyType
-from typing import Any, ClassVar, Mapping
+from typing import Any
 
 from transitions.core import EventData
 
@@ -405,12 +404,9 @@ from totodev_pub.folder_backed_case_support.case_type_registry import case_type_
 class MyCase(FolderBackedCase):
     """One <the recurring unit of work>, from <initial> toward <terminal(s)>."""
 
-    asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({
-        "result": frozenset({"done"}),
-    })
     fsm_state_chains = [...]
     asset_aliases = {
-        "result": AssetSpec(..., states=asset_trust_states["result"], ...),
+        "result": AssetSpec(..., trust_states={"done"}, ...),
     }
     fsm_trigger_chokes = {...}
 

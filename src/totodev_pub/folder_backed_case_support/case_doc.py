@@ -159,7 +159,7 @@ class AssetDoc:
     alias: str
     relative_path: str
     loader_name: Optional[str]
-    states: Optional[frozenset]
+    trust_states: Optional[frozenset]
     keep: bool
     many: bool
 
@@ -301,7 +301,7 @@ def collect(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = Cas
             alias=alias,
             relative_path=(a_spec := spec.assets.spec(alias)).relative_path,
             loader_name=loader_name(a_spec.loader),
-            states=a_spec.states,
+            trust_states=a_spec.trust_states,
             keep=a_spec.keep,
             many=a_spec.many,
         )
@@ -560,10 +560,10 @@ def _fmt_names(names: list[str]) -> str:
     return ", ".join(names) if names else "—"
 
 
-def _fmt_states(states: Optional[frozenset]) -> str:
-    if states is None:
+def _fmt_trust_states(trust_states: Optional[frozenset]) -> str:
+    if trust_states is None:
         return "(any)"
-    return ", ".join(f"`{s}`" for s in sorted(states))
+    return ", ".join(f"`{s}`" for s in sorted(trust_states))
 
 
 def _fmt_doc(doc: Optional[str]) -> str:
@@ -698,11 +698,11 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
         parts.append("## Assertions\n\n" + "\n\n".join(sections) + f"\n\n*{footnote}*")
 
     if options.include_assets and doc.assets:
-        rows = ["| Alias | Path | Loader | States | Keep | Many |", "|---|---|---|---|---|---|"]
+        rows = ["| Alias | Path | Loader | Trust states | Keep | Many |", "|---|---|---|---|---|---|"]
         for a in doc.assets:
             rows.append(
                 f"| {a.alias} | `{a.relative_path}` | {a.loader_name or '—'} | "
-                f"{_fmt_states(a.states)} | {a.keep} | {a.many} |"
+                f"{_fmt_trust_states(a.trust_states)} | {a.keep} | {a.many} |"
             )
         parts.append("## Asset Aliases\n\n" + "\n".join(rows))
 

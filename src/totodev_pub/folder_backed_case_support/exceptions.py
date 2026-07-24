@@ -274,7 +274,7 @@ class AssetSchemaError(Exception):
     """Raised when a FolderBackedCase subclass's `asset_aliases` declaration is malformed,
     or when a declared alias fails FSM-state validation at first instantiation: a non-dict
     declaration, a non-AssetSpec value, an empty or invalid alias key, ``many=True``
-    without a glob path, unknown state names, missing loader/states
+    without a glob path, unknown state names, missing loader/trust_states
     in strict mode, or valid-in-terminal without keep=True. The message names the
     specific offence and how to fix it."""
 
@@ -292,7 +292,7 @@ class MissingAssetSchemaError(Exception):
             "the class to the data objects this case elevates to the cross-process trust "
             "protocol, e.g. "
             '`asset_aliases = {"ticket": AssetSpec(relative_path="ticket.yaml", '
-            'loader=TicketForm, states={"new", "open"})}`; declare an empty dict '
+            'loader=TicketForm, trust_states={"new", "open"})}`; declare an empty dict '
             "(`asset_aliases = {}`) if this case has none."
         )
 

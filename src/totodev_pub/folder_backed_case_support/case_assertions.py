@@ -24,10 +24,10 @@ and the overridable ``on_assertion_failed`` hook. The machine is unaffected —
 nothing here counts toward @FAIL or raises into dispatch.
 
 A third, automatic check rides the same sweep: every asset alias whose
-declared ``states`` claims validity in the state just entered gets loaded
+declared ``trust_states`` claims validity in the state just entered gets loaded
 (``case_load_asset``/``case_load_assets``) purely to confirm it does not
 raise — no hand-written assertion required. This catches drift between an
-alias's declared ``states`` and the code that actually populates the file. It
+alias's declared ``trust_states`` and the code that actually populates the file. It
 is unconditional (independent of whether the class or the folder define any
 ``case_assert_*`` for that state) but obeys the same ``AssertionMode`` knob as
 everything else in the sweep: ``SKIP`` turns it off along with everything
@@ -245,7 +245,7 @@ class _CaseAssertionRunner:
 
     def _check_asset_loadability(self, state: str) -> tuple[int, int]:
         """Confirm every asset alias trusted in ``state`` (per its declared
-        ``AssetSpec.states``) can actually be loaded. Unconditional — it runs
+        ``AssetSpec.trust_states``) can actually be loaded. Unconditional — it runs
         whether or not any hand-written ``case_assert_*`` targets this state; the
         only gate is the mode check already done by the caller (``sweep``)."""
         book = type(self._case)._resolve_asset_book()

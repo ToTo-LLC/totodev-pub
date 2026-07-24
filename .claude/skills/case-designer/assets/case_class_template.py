@@ -1,7 +1,7 @@
 # WORKED EXAMPLE — fictitious "permits" domain. Imitate this file's SHAPE only
-# (docstring roles, ClassVar trust map, stub style). Do not copy the permit
-# story into a real case. Real module docstrings are written from the interview.
-# Stub convention: references/dsl_and_hooks.md. Output examples:
+# (docstring roles, asset_aliases with trust_states, stub style). Do not copy
+# the permit story into a real case. Real module docstrings are written from
+# the interview. Stub convention: references/dsl_and_hooks.md. Output examples:
 # references/generated_output_examples.md.
 
 """Permit application lifecycle for a municipal licensing desk.
@@ -21,8 +21,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import MappingProxyType
-from typing import Any, ClassVar, Mapping
+from typing import Any
 
 from pydantic import BaseModel
 from transitions.core import EventData
@@ -65,21 +64,6 @@ class PermitApplicationCase(FolderBackedCase):
     # Declarations
     # =======================================================================
 
-    # States in which each asset alias is considered trustworthy / complete.
-    asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({
-        "application": frozenset({
-            "submitted", "validated", "screened", "awaiting_review",
-            "approved", "issued", "denied",
-        }),
-        "eligibility": frozenset({
-            "screened", "awaiting_review", "approved", "issued",
-        }),
-        "supporting_docs": frozenset({
-            "attachments_added", "submitted", "validated", "screened",
-            "awaiting_review",
-        }),
-    })
-
     fsm_state_chains = """
         %% Intake: inert initial state, manual attach (kwargs paths), then the flow.
         [*] --> new == add_attachments ==> attachments_added -- begin --> submitted
@@ -102,19 +86,27 @@ class PermitApplicationCase(FolderBackedCase):
         "application": AssetSpec(
             relative_path="application.yaml",
             loader=ApplicationData,
-            states=asset_trust_states["application"],
+            trust_states=frozenset({
+                "submitted", "validated", "screened", "awaiting_review",
+                "approved", "issued", "denied",
+            }),
             keep=True,
         ),
         "eligibility": AssetSpec(
             relative_path="eligibility.yaml",
             loader=EligibilityAssessment,
-            states=asset_trust_states["eligibility"],
+            trust_states=frozenset({
+                "screened", "awaiting_review", "approved", "issued",
+            }),
             keep=True,
         ),
         "supporting_docs": AssetSpec(
             relative_path="documents/*",
             loader=Path,
-            states=asset_trust_states["supporting_docs"],
+            trust_states=frozenset({
+                "attachments_added", "submitted", "validated", "screened",
+                "awaiting_review",
+            }),
             many=True,
         ),
     }

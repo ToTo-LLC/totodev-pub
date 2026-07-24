@@ -118,7 +118,7 @@ class InboundCase(FolderBackedCase):
     asset_aliases = {
         'traffic_verdict': AssetSpec(
             relative_path="traffic_verdict.yaml", loader=TrafficVerdict,
-            states={"received"}
+            trust_states={"received"}
         ),
     }
 
@@ -147,7 +147,7 @@ class SpamCase(FolderBackedCase):
     asset_aliases = {
         'spam_stats': AssetSpec(
             relative_path="spam_stats.yaml", loader=SpamStats,
-            states={"marked_spam"}, keep=True
+            trust_states={"marked_spam"}, keep=True
         ),
     }
 

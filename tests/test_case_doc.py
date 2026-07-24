@@ -38,7 +38,7 @@ class SampleCase(FolderBackedCase):
     fsm_trigger_chokes = {"approve": {"finance-api"}}
     asset_aliases = {
     'ticket': AssetSpec(relative_path="ticket.yaml", loader=Path,
-            states={"reviewing", "done"}, keep=True),
+            trust_states={"reviewing", "done"}, keep=True),
 }
 
     async def perform_intake(self, tctx):
@@ -168,7 +168,7 @@ def test_collect_assets():
     [ticket] = doc.assets
     assert ticket.alias == "ticket"
     assert ticket.relative_path == "ticket.yaml"
-    assert ticket.states == frozenset({"reviewing", "done"})
+    assert ticket.trust_states == frozenset({"reviewing", "done"})
     assert ticket.keep is True
     assert ticket.many is False
 

@@ -89,33 +89,33 @@ class IndexEntryRef(BaseModel):
     kind: str = ""  # e.g. "chunk", "summary"
 ```
 
-## `asset_trust_states` ClassVar (not a pile of module constants)
+## `trust_states` on each `AssetSpec` (not a parallel ClassVar)
 
-One frozen mapping on the case class, keyed by alias; each `AssetSpec` reads
-from it. Prefer `MappingProxyType` + `frozenset` values.
+Put trustworthy FSM states directly on each `AssetSpec`. Prefer `frozenset`
+(or a plain set literal) — do not invent a second class-level map keyed by
+alias, and do not emit orphan module-level `NEEDS_*` constants.
 
 ```python
-asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({
-    "fingerprint": frozenset({
-        "examined",
-        "textual_content_available",
-        "summarized",
-        "indexed",
-        "changed",
-    }),
-    "textual_content": frozenset({
-        "textual_content_available",
-        "summarized",
-    }),
-    "summary": frozenset({"summarized", "indexed", "changed"}),
-    "index_entries": frozenset({"indexed", "changed"}),
-})
-
 asset_aliases = {
     "fingerprint": AssetSpec(
         relative_path="fingerprint.yaml",
         loader=FileFingerprint,
-        states=asset_trust_states["fingerprint"],
+        trust_states=frozenset({
+            "examined",
+            "textual_content_available",
+            "summarized",
+            "indexed",
+            "changed",
+        }),
+        keep=False,
+    ),
+    "textual_content": AssetSpec(
+        relative_path="textual_content.txt",
+        loader=Path,
+        trust_states=frozenset({
+            "textual_content_available",
+            "summarized",
+        }),
         keep=False,
     ),
     # ...
@@ -125,7 +125,8 @@ asset_aliases = {
 ### Anti-pattern
 
 ```python
-# BAD — orphan module-level NEEDS_* sets that drift from asset_aliases
+# BAD — orphan module-level NEEDS_* sets (or a parallel ClassVar map) that
+# drift from asset_aliases
 NEEDS_FINGERPRINT = {"examined", "indexed", ...}
 NEEDS_SUMMARY = {"summarized", "indexed", ...}
 ```

@@ -25,7 +25,7 @@ def test_asset_spec_is_frozen():
     spec = AssetSpec(relative_path="receipts/rlist.json")
     assert spec.relative_path == "receipts/rlist.json"
     assert spec.loader is None
-    assert spec.states is None
+    assert spec.trust_states is None
     assert spec.keep is False
     assert spec.many is False
     with pytest.raises(Exception):
@@ -35,9 +35,9 @@ def test_asset_spec_is_frozen():
 def test_asset_spec_states_keep_and_many():
     spec = AssetSpec(
         relative_path="ticket.yaml", loader=_Rec,
-        states=frozenset({"new", "open"}), keep=True,
+        trust_states=frozenset({"new", "open"}), keep=True,
     )
-    assert spec.states == frozenset({"new", "open"})
+    assert spec.trust_states == frozenset({"new", "open"})
     assert spec.keep is True
     many = AssetSpec(relative_path="pages/*.png", loader=Path, many=True)
     assert many.many is True

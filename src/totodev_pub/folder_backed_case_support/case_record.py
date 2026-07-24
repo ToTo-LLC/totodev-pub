@@ -13,7 +13,7 @@ from pydantic import BaseModel, field_validator
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case_support.helpers import _to_utc
 
-_RECORD_ALIAS_KEYS = frozenset({"path", "loader", "states", "many"})
+_RECORD_ALIAS_KEYS = frozenset({"path", "loader", "trust_states", "many"})
 
 
 class CaseRecord(BaseModel, FileMappedPydanticMixin):
@@ -44,9 +44,9 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     {"path": <relative path under assets/, may be a glob>, "loader": <bare class
     __name__ for a FileMappedPydanticMixin subclass, "Path" for the identity Path
     loader, null when none declared, or "Callable" for a plain callable that a
-    reader cannot resolve by name>, "states": <optional sorted list of FSM state
-    names in which the asset is trustworthy>, "many": <optional bool; True when
-    the alias loads as a list via case_load_assets>}.
+    reader cannot resolve by name>, "trust_states": <optional sorted list of FSM
+    state names in which the asset is trustworthy>, "many": <optional bool; True
+    when the alias loads as a list via case_load_assets>}.
 
     `fsm_state_chains` mirrors the concrete class's `fsm_state_chains` DSL declaration on
     disk, in canonical one-chain-per-line form (`StateChainParser.normalize_chain_lines`:
@@ -65,7 +65,7 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
     created: datetime.datetime         # immutable
     terminal: Optional[datetime.datetime] = None  # stamped once on terminal entry
     terminal_state: Optional[str] = None  # the terminal FSM state name, stamped with `terminal`
-    asset_aliases: dict[str, dict[str, Any]]  # alias -> {path, loader, states?, many?}
+    asset_aliases: dict[str, dict[str, Any]]  # alias -> {path, loader, trust_states?, many?}
     fsm_state_chains: list[str]        # the class's state-chain DSL, one chain per line
 
     @field_validator("asset_aliases")
@@ -95,14 +95,14 @@ class CaseRecord(BaseModel, FileMappedPydanticMixin):
                     raise ValueError(
                         f"asset_aliases[{alias!r}]['loader'] must be a string or null."
                     )
-            if "states" in entry:
-                states = entry["states"]
-                if states is not None:
-                    if not isinstance(states, list) or not all(
-                        isinstance(s, str) for s in states
+            if "trust_states" in entry:
+                trust_states = entry["trust_states"]
+                if trust_states is not None:
+                    if not isinstance(trust_states, list) or not all(
+                        isinstance(s, str) for s in trust_states
                     ):
                         raise ValueError(
-                            f"asset_aliases[{alias!r}]['states'] must be a list of "
+                            f"asset_aliases[{alias!r}]['trust_states'] must be a list of "
                             "strings or null."
                         )
             if "many" in entry and not isinstance(entry["many"], bool):

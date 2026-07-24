@@ -31,14 +31,14 @@ class TicketCase(FolderBackedCase):
     asset_aliases = {
     'ticket': AssetSpec(relative_path="ticket.yaml",
             loader=TicketForm,
-            states={"new", "open", "closed"},
+            trust_states={"new", "open", "closed"},
             keep=True),
     'conversation': AssetSpec(relative_path="customer--conversation.json",
             loader=ChatLog,
-            states={"open"}),
+            trust_states={"open"}),
     'attachments': AssetSpec(relative_path="attachments/*",
             loader=Path,
-            states={"new", "open"},
+            trust_states={"new", "open"},
             many=True),
 }
     fsm_trigger_chokes = {}
@@ -56,7 +56,7 @@ class FlexibleCase(FolderBackedCase):
     asset_aliases = {
     'unguarded': AssetSpec(relative_path="unguarded.json"),
     'guarded': AssetSpec(relative_path="guarded.json", loader=TicketForm,
-            states={"new"}),
+            trust_states={"new"}),
 }
     fsm_trigger_chokes = {}
 
@@ -69,7 +69,7 @@ class ReclassSource(FolderBackedCase):
     asset_aliases = {
     'old': AssetSpec(relative_path="old.yaml",
             loader=TicketForm,
-            states={"new", "shared"},
+            trust_states={"new", "shared"},
             keep=True),
 }
     fsm_trigger_chokes = {}
@@ -82,7 +82,7 @@ class ReclassTarget(FolderBackedCase):
     fsm_state_chains = ["[*] --> new == go ==> shared --> [*]"]
     asset_aliases = {
     'new': AssetSpec(relative_path="new.yaml", loader=ChatLog,
-            states={"shared"}, keep=True),
+            trust_states={"shared"}, keep=True),
 }
     fsm_trigger_chokes = {}
 
@@ -110,7 +110,7 @@ def test_build_time_validation_at_class_definition():
         class BadStateCase(FolderBackedCase):
             asset_aliases = {
     'a': AssetSpec(relative_path="a.json", loader=TicketForm,
-                    states={"opne"}),
+                    trust_states={"opne"}),
 }
             fsm_trigger_chokes = {}
             fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
@@ -263,7 +263,7 @@ def test_reclassify_restamps_states_and_keep(tmp_path):
         asyncio.run(case.go())
         assert "assets/old.yaml" in case._keep_manifest.list_rules()
         fresh = case.case_reclassify_to(ReclassTarget)
-        assert fresh._record.asset_aliases["new"]["states"] == ["shared"]
+        assert fresh._record.asset_aliases["new"]["trust_states"] == ["shared"]
         assert "assets/new.yaml" in fresh._keep_manifest.list_rules()
 
     finally:

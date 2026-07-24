@@ -41,7 +41,7 @@ instead of linking out.
 5. **Generate the skeleton class file**, following the shape in
    `assets/case_class_template.py` and the output examples in
    `references/generated_output_examples.md` (module/class docstrings,
-   asset TODOs, `asset_trust_states` ClassVar).
+   asset TODOs).
 6. **Validate it binds** — actually import the generated module and fix
    whatever the framework rejects. Do not skip this.
 7. **Review optional design patterns** — consult
@@ -223,10 +223,9 @@ docstring voice, ClassVar trust map, and anti-patterns, also read
   states purpose (including *why* the data exists, e.g. enough identity to
   delete an index row later). Include an explicit **TODO** to replace the
   placeholder attribute layout.
-- **Trustworthy states** — declare a class-level
-  `asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({...})`
-  keyed by asset alias; each `AssetSpec` uses
-  `states=asset_trust_states["<alias>"]`. Do **not** emit a pile of module-level
+- **Trustworthy states** — put each alias's trustworthy FSM states directly on
+  its `AssetSpec` via `trust_states={...}` (or `frozenset({...})`). Do **not**
+  emit a parallel `asset_trust_states` ClassVar or a pile of module-level
   `NEEDS_*` constants.
 
 ### Hooks to emit
@@ -363,10 +362,10 @@ for this case (e.g. a deliberately fully-automated pipeline). Then confirm:
       `@DWELL`/`@FAIL` alone is not enough for auto self-loops.
 - [ ] Every state has at least one `case_assert_<state>_*`, or an explicit
       note on why that state has nothing to assert.
-- [ ] `asset_aliases` states/loader/keep/many are all set (or
+- [ ] `asset_aliases` trust_states/loader/keep/many are all set (or
       `flexible_asset_alias_loading = True` was deliberately chosen instead),
-      with states taken from a class-level `asset_trust_states` ClassVar map
-      (not orphan `NEEDS_*` module constants).
+      with `trust_states={...}` inlined on each `AssetSpec` (not a parallel
+      ClassVar map or orphan `NEEDS_*` module constants).
 - [ ] The class carries `@case_type_registry.register`.
 - [ ] Module docstring narrates business purpose and includes the IMPORTANT
       first-draft warning; it does **not** mention this skill, generation

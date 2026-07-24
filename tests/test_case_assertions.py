@@ -626,9 +626,9 @@ from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 
 class AssetCheckCase(FolderBackedCase):
     asset_aliases = {
-    'widget': AssetSpec(relative_path="widget.txt", loader=Path, states={"open"}),
+    'widget': AssetSpec(relative_path="widget.txt", loader=Path, trust_states={"open"}),
     'items': AssetSpec(relative_path="items/*", loader=Path,
-            states={"open"}, many=True),
+            trust_states={"open"}, many=True),
 }
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
@@ -700,7 +700,7 @@ class ReportForm(BaseModel, FileMappedPydanticMixin):
 class ManyAssetFailCase(FolderBackedCase):
     asset_aliases = {
     'reports': AssetSpec(relative_path="reports/*.yaml", loader=ReportForm,
-            states={"open"}, many=True),
+            trust_states={"open"}, many=True),
 }
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]

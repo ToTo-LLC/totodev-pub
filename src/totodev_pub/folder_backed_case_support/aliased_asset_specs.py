@@ -33,17 +33,17 @@ if TYPE_CHECKING:
 _UNSET = object()
 
 
-def _normalize_states(raw, *, context: str) -> frozenset[str] | None:
+def _normalize_trust_states(raw, *, context: str) -> frozenset[str] | None:
     if raw is None:
         return None
     if isinstance(raw, (set, frozenset, list, tuple)):
         if len(raw) == 0:
             raise AssetSchemaError(
-                f"{context}: states must be non-empty when declared; got []."
+                f"{context}: trust_states must be non-empty when declared; got []."
             )
         return frozenset(str(s) for s in raw)
     raise AssetSchemaError(
-        f"{context}: states must be a set, list, or tuple of state names; "
+        f"{context}: trust_states must be a set, list, or tuple of state names; "
         f"got {type(raw).__name__}."
     )
 
@@ -65,7 +65,7 @@ class AliasedAssetSpecs:
         alias name → ``AssetSpec``, or ``{}`` when the case has no protocol-elevated
         data objects. `flexible` is accepted for symmetry with
         `validate_against_fsm` and is not otherwise used here — omitted
-        loader/states are always legal per-entry; strict-mode enforcement of
+        loader/trust_states are always legal per-entry; strict-mode enforcement of
         their presence happens at FSM-binding time."""
         if isinstance(raw, (list, tuple)):
             raise AssetSchemaError(
@@ -73,7 +73,7 @@ class AliasedAssetSpecs:
                 f"got {type(raw).__name__}. Use {{}} when the case declares none. "
                 'Example: asset_aliases = {"ticket": AssetSpec('
                 'relative_path="ticket.yaml", loader=TicketForm, '
-                'states={"new", "open"})}.'
+                'trust_states={"new", "open"})}.'
             )
         if not isinstance(raw, dict):
             raise AssetSchemaError(
@@ -92,7 +92,7 @@ class AliasedAssetSpecs:
                 raise AssetSchemaError(
                     f"asset_aliases[{alias!r}] must be an AssetSpec instance; got "
                     f"{type(entry).__name__}. Construct with "
-                    "AssetSpec(relative_path=..., loader=..., states=..., ...)."
+                    "AssetSpec(relative_path=..., loader=..., trust_states=..., ...)."
                 )
             validate_alias(alias, context=f"AssetSpec({entry.relative_path!r})")
             rel = _norm_rel(entry.relative_path)
@@ -101,11 +101,13 @@ class AliasedAssetSpecs:
                     f"alias {alias!r}: many=True requires a glob relative_path; "
                     f"got {rel!r}."
                 )
-            states = _normalize_states(entry.states, context=f"alias {alias!r}")
+            trust_states = _normalize_trust_states(
+                entry.trust_states, context=f"alias {alias!r}"
+            )
             specs[alias] = AssetSpec(
                 relative_path=rel,
                 loader=entry.loader,
-                states=states,
+                trust_states=trust_states,
                 keep=bool(entry.keep),
                 many=bool(entry.many),
             )
@@ -131,14 +133,14 @@ class AliasedAssetSpecs:
                 resolved = reg.resolve(name)
                 if resolved is not None:
                     loader = resolved
-            states_raw = entry.get("states")
-            states = (
-                frozenset(states_raw) if states_raw is not None else None
+            trust_states_raw = entry.get("trust_states")
+            trust_states = (
+                frozenset(trust_states_raw) if trust_states_raw is not None else None
             )
             specs[alias] = AssetSpec(
                 relative_path=path,
                 loader=loader,
-                states=states,
+                trust_states=trust_states,
                 many=bool(entry.get("many", False)),
             )
         return cls(specs)
@@ -150,8 +152,8 @@ class AliasedAssetSpecs:
                 "path": spec.relative_path,
                 "loader": loader_name(spec.loader),
             }
-            if spec.states is not None:
-                entry["states"] = sorted(spec.states)
+            if spec.trust_states is not None:
+                entry["trust_states"] = sorted(spec.trust_states)
             if spec.many:
                 entry["many"] = True
             result[alias] = entry
@@ -172,16 +174,16 @@ class AliasedAssetSpecs:
                 f"No asset alias {alias!r} is registered. Known aliases: {known}."
             ) from None
 
-    def states(self, alias: str) -> frozenset[str] | None:
-        return self.spec(alias).states
+    def trust_states(self, alias: str) -> frozenset[str] | None:
+        return self.spec(alias).trust_states
 
     def is_trusted(self, alias: str, cur_state: str | None) -> bool:
-        alias_states = self.states(alias)
-        if alias_states is None:
+        alias_trust_states = self.trust_states(alias)
+        if alias_trust_states is None:
             return True
         if cur_state is None:
             return False
-        return cur_state in alias_states
+        return cur_state in alias_trust_states
 
     def trusted_aliases(self, cur_state: str | None) -> list[str]:
         return [a for a in self._specs if self.is_trusted(a, cur_state)]
@@ -192,7 +194,7 @@ class AliasedAssetSpecs:
             raise AssetNotTrustedInStateError(
                 alias,
                 current_state=cur_state,
-                valid_states=spec.states,
+                valid_states=spec.trust_states,
             )
 
     def get_path_and_loader(
@@ -216,25 +218,25 @@ class AliasedAssetSpecs:
                         "Give it a FileMappedPydanticMixin subclass, Path, or a "
                         "Callable[[Path], Any], or enable flexible_asset_alias_loading."
                     )
-                if spec.states is None:
+                if spec.trust_states is None:
                     raise AssetSchemaError(
-                        f"alias {alias!r} ({spec.relative_path!r}) has no states. "
+                        f"alias {alias!r} ({spec.relative_path!r}) has no trust_states. "
                         "Declare the FSM states in which this asset is trustworthy, "
                         "or enable flexible_asset_alias_loading."
                     )
-            if spec.states is not None:
-                if not spec.states:
+            if spec.trust_states is not None:
+                if not spec.trust_states:
                     raise AssetSchemaError(
-                        f"alias {alias!r}: states must be non-empty when declared."
+                        f"alias {alias!r}: trust_states must be non-empty when declared."
                     )
-                unknown = spec.states - fsm_states
+                unknown = spec.trust_states - fsm_states
                 if unknown:
                     raise AssetSchemaError(
                         f"alias {alias!r}: state(s) {sorted(unknown)!r} are not in "
                         f"this class's FSM ({sorted(fsm_states)!r})."
                     )
-                if spec.states & terminal_states and not spec.keep:
-                    terminal = sorted(spec.states & terminal_states)
+                if spec.trust_states & terminal_states and not spec.keep:
+                    terminal = sorted(spec.trust_states & terminal_states)
                     raise AssetSchemaError(
                         f"alias {alias!r} is valid in terminal state(s) "
                         f"{terminal!r} but keep is not True — it would be purged at "

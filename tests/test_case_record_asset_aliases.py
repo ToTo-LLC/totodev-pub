@@ -36,7 +36,7 @@ def test_asset_aliases_states_round_trip(tmp_path):
         "ticket": {
             "path": "ticket.yaml",
             "loader": "TicketForm",
-            "states": ["closed", "new", "open"],
+            "trust_states": ["closed", "new", "open"],
         },
     }
     rec = CaseRecord(**_kwargs(asset_aliases=entry))
@@ -51,7 +51,7 @@ def test_asset_aliases_many_and_path_loader_round_trip(tmp_path):
         "attachments": {
             "path": "attachments/*",
             "loader": "Path",
-            "states": ["open"],
+            "trust_states": ["open"],
             "many": True,
         },
     }
@@ -87,8 +87,19 @@ def test_asset_aliases_rejects_bad_loader_type():
         CaseRecord(**_kwargs(asset_aliases={"x": {"path": "x.json", "loader": 1}}))
 
 
-def test_asset_aliases_rejects_bad_states_type():
-    with pytest.raises(ValidationError, match="states"):
+def test_asset_aliases_rejects_bad_trust_states_type():
+    with pytest.raises(ValidationError, match="trust_states"):
         CaseRecord(
-            **_kwargs(asset_aliases={"x": {"path": "x.json", "states": "open"}}),
+            **_kwargs(asset_aliases={"x": {"path": "x.json", "trust_states": "open"}}),
+        )
+
+
+def test_asset_aliases_rejects_legacy_states_key():
+    with pytest.raises(ValidationError, match="unknown key"):
+        CaseRecord(
+            **_kwargs(
+                asset_aliases={
+                    "x": {"path": "x.json", "states": ["open"]},
+                },
+            )
         )

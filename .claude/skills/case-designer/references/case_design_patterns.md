@@ -107,7 +107,7 @@ valuable (quality tracking, training data, dispute trail).
 **Shape:** a `FileMappedPydanticMixin` model (e.g. `rating: int`,
 `approved: bool`, `comments: str = ""`) behind
 `asset_aliases = {"user_review": AssetSpec(relative_path="user_review.yaml",
-loader=UserReview, states={...}, keep=True)}`. `keep=True` because feedback is
+loader=UserReview, trust_states={...}, keep=True)}`. `keep=True` because feedback is
 almost always worth surviving termination. Often paired with a manual gate
 (pattern 1c / 7) so the case waits for the review to be submitted.
 

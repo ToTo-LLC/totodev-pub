@@ -39,9 +39,9 @@ class AssetSpec:
 
     The lookup alias is **not** on this object — it is the key in the class-level
     ``asset_aliases: dict[str, AssetSpec]`` map. Construct as
-    ``AssetSpec(relative_path=..., loader=..., states=..., keep=..., many=...)``.
+    ``AssetSpec(relative_path=..., loader=..., trust_states=..., keep=..., many=...)``.
 
-    `states` names the FSM states in which this asset is trustworthy
+    `trust_states` names the FSM states in which this asset is trustworthy
     (semantics #3); None means unconstrained (guard is a no-op). `keep` is
     declaration-only sugar for retention seeding at create — it is not
     persisted on the case record. `many=True` means the path is a glob and
@@ -50,7 +50,7 @@ class AssetSpec:
 
     relative_path: str
     loader: type | Callable[[Path], Any] | None = None
-    states: frozenset[str] | None = None
+    trust_states: frozenset[str] | None = None
     keep: bool = False
     many: bool = False
 

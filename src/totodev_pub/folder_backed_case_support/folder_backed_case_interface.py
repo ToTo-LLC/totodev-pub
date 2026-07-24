@@ -126,14 +126,14 @@ class FolderBackedCaseInterface(ABC):
             asset_aliases = {
                 "ticket": AssetSpec(
                     relative_path="ticket_info.yaml",
-                    loader=TicketInfo, states={"new", "open", "closed"},
+                    loader=TicketInfo, trust_states={"new", "open", "closed"},
                     keep=True),
                 "conversation": AssetSpec(
                     relative_path="resolution-log/customer--convo.md",
-                    loader=ChatLog, states={"open"}),
+                    loader=ChatLog, trust_states={"open"}),
                 "attachments": AssetSpec(
                     relative_path="attachments/*",
-                    loader=Path, states={"open"}, many=True),
+                    loader=Path, trust_states={"open"}, many=True),
             }
             fsm_trigger_chokes = {"open_ticket": {"cpu"}}
             ##### END CLASS CONFIG #####
@@ -283,10 +283,10 @@ class FolderBackedCaseInterface(ABC):
     untrusted sources.
 
     Every sweep also runs an automatic, built-in check with no assertion method
-    required: every ``asset_aliases`` entry whose declared ``states`` claims
+    required: every ``asset_aliases`` entry whose declared ``trust_states`` claims
     validity in the state just entered gets loaded (``case_load_asset`` /
     ``case_load_assets``) purely to confirm the load does not raise. This
-    catches an alias whose ``states`` says "trustworthy here" while the code
+    catches an alias whose ``trust_states`` says "trustworthy here" while the code
     that should have populated it hasn't run (or a loader that no longer
     matches what's on disk) — the moment a real case reaches that state, not
     just at bind time. It runs whether or not the state has any hand-written
@@ -343,8 +343,8 @@ class FolderBackedCaseInterface(ABC):
     """
 
     flexible_asset_alias_loading: bool = False
-    """When False (default), every declared alias must specify loader and states.
-    When True, informal declarations are allowed; omitted states/loader make the
+    """When False (default), every declared alias must specify loader and trust_states.
+    When True, informal declarations are allowed; omitted trust_states/loader make the
     guard a no-op for that alias.
     """
 
@@ -724,7 +724,7 @@ class FolderBackedCaseInterface(ABC):
         asset in ``asset_aliases`` in order to use this method.
 
         Before touching disk, checks that the current FSM state is one where
-        ``alias`` is trustworthy (per the spec's ``states``), raising
+        ``alias`` is trustworthy (per the spec's ``trust_states``), raising
         ``AssetNotTrustedInStateError`` if not.
 
         For ``many=True`` aliases use ``case_load_assets``. For assets not
@@ -742,7 +742,7 @@ class FolderBackedCaseInterface(ABC):
         alias is not ``many=True``. Typical declaration::
 
             AssetSpec(relative_path="attachments/*",
-                      loader=Path, states={"open"}, many=True)
+                      loader=Path, trust_states={"open"}, many=True)
             # keyed under asset_aliases["attachments"]
         """
         ...

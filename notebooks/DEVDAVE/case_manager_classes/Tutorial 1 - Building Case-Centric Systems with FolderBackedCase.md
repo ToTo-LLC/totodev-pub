@@ -282,15 +282,15 @@ class InquiryCase(FolderBackedCase):
     asset_aliases = {
         'analysis': AssetSpec(
             relative_path="analysis.yaml", loader=InquiryAnalysis,
-            states=POST_TRIAGE, keep=True
+            trust_states=POST_TRIAGE, keep=True
         ),
         'expert_answers': AssetSpec(
             relative_path="expert_answers.yaml", loader=ExpertAnswers,
-            states={"drafted", "waiting_for_approval", "approved"}
+            trust_states={"drafted", "waiting_for_approval", "approved"}
         ),
         'reply_draft': AssetSpec(
             relative_path="reply_draft.md", loader=lambda p: p.read_text(),
-            states={"waiting_for_approval", "approved", "sent"}, keep=True
+            trust_states={"waiting_for_approval", "approved", "sent"}, keep=True
         ),
     }
 
