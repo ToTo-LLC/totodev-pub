@@ -42,6 +42,11 @@ from totodev_pub.folder_backed_case_support.case_assertions import (
     discover_class_assertions,
 )
 from totodev_pub.folder_backed_case_support.asset_schema import loader_name
+from totodev_pub.folder_backed_case_support.state_chain_parser import (
+    _copy_guards,
+    _is_fact_guard,
+    _is_method_guard,
+)
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -117,8 +122,7 @@ class EdgeDoc:
     source: str
     dest: str
     auto: bool
-    guard_names: list[str] = field(default_factory=list)
-    fact_guards: list[dict] = field(default_factory=list)
+    guards: list = field(default_factory=list)  # heterogeneous, declaration order
     wildcard_expanded: bool = False
     wildcard_pending: bool = False
 
@@ -261,15 +265,15 @@ def collect(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = Cas
         for u, v, data in graph.edges(data=True):
             if data.get("trigger") != trigger:
                 continue
-            guard_names = [_bare_guard_name(c) for c in data.get("conditions", [])]
-            for g in guard_names:
-                guard_users.setdefault(g, set()).add(trigger)
+            guards = _copy_guards(data.get("guards"))
+            for item in guards:
+                if _is_method_guard(item):
+                    guard_users.setdefault(_bare_guard_name(item), set()).add(trigger)
             edges.append(EdgeDoc(
                 source=u,
                 dest=v,
                 auto=bool(data.get("auto", False)),
-                guard_names=guard_names,
-                fact_guards=list(data.get("fact_guards", [])),
+                guards=guards,
                 wildcard_expanded=bool(data.get("wildcard_expanded", False)),
                 wildcard_pending=bool(data.get("wildcard_pending", False)),
             ))
@@ -403,13 +407,14 @@ def _edge_label(data: dict) -> str:
     trigger = data.get("trigger", "")
     if data.get("soft_timeout_is_explicit") and data.get("soft_timeout_secs"):
         trigger = f"{trigger}~{_fmt_duration(data['soft_timeout_secs'])}"
-    guard_names = [_bare_guard_name(c) for c in data.get("conditions", [])]
-    facts = [
-        _fmt_fact_guard(fg)
-        for fg in data.get("fact_guards", [])
-        if not fg.get("implicit")
-    ]
-    annotations = guard_names + facts
+    annotations = []
+    for item in data.get("guards") or []:
+        if _is_fact_guard(item):
+            if item.get("implicit"):
+                continue
+            annotations.append(_fmt_fact_guard(item))
+        else:
+            annotations.append(_bare_guard_name(item))
     return f"{trigger} [{', '.join(annotations)}]" if annotations else trigger
 
 
@@ -580,8 +585,20 @@ def _fmt_guard_ref(name: str) -> str:
     return f"`{name}` → {_fmt_method(f'{_GUARD_PREFIX}{name}')}"
 
 
-def _fmt_guard_refs(names: list[str]) -> str:
-    return ", ".join(_fmt_guard_ref(n) for n in names) if names else "—"
+def _fmt_sparse_bool(v: bool) -> str:
+    return "True" if v else ""
+
+
+def _fmt_guard_item(item) -> str:
+    if _is_fact_guard(item):
+        return f"`{_fmt_fact_guard(item)}`"
+    return _fmt_method(item)
+
+
+def _fmt_guards_cell(guards: list) -> str:
+    if not guards:
+        return ""
+    return ", ".join(_fmt_guard_item(g) for g in guards)
 
 
 def _fmt_state_hook_cell(kind: str, state: str, doc: Optional[str]) -> str:
@@ -613,8 +630,9 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
                 "|---|---|---|---|---|---|---|"]
         for s in doc.states:
             rows.append(
-                f"| {s.name} | {s.initial} | {s.default_initial} | {s.terminal} | "
-                f"{s.timed_escape} | {_fmt_state_hook_cell('on_enter', s.name, s.on_enter_doc)} | "
+                f"| {s.name} | {_fmt_sparse_bool(s.initial)} | {_fmt_sparse_bool(s.default_initial)} | "
+                f"{_fmt_sparse_bool(s.terminal)} | {_fmt_sparse_bool(s.timed_escape)} | "
+                f"{_fmt_state_hook_cell('on_enter', s.name, s.on_enter_doc)} | "
                 f"{_fmt_state_hook_cell('on_exit', s.name, s.on_exit_doc)} |"
             )
         states_block = "## States\n\n" + "\n".join(rows)
@@ -650,21 +668,25 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
                 lines.append(f"**Before:** {_fmt_method(f'before_{t.name}')} — {t.before_doc}")
             if t.after_doc:
                 lines.append(f"**After:** {_fmt_method(f'after_{t.name}')} — {t.after_doc}")
-            edge_rows = ["| Source | Dest | Auto | Guards | Fact Guards | Wildcard |",
+            if t.soft_timeout_secs is not None:
+                timeout = (
+                    f"{t.soft_timeout_secs:g}s "
+                    f"({'explicit' if t.soft_timeout_is_explicit else 'default'})"
+                )
+                lines.append(f"Soft timeout: {timeout}")
+            chokes_cell = ", ".join(sorted(t.chokes)) if t.chokes else ""
+            edge_rows = ["| Source | Dest | Auto | Guards | Wildcard | Chokes |",
                          "|---|---|---|---|---|---|"]
             for e in t.edges:
-                fact_str = ", ".join(_fmt_fact_guard(fg) for fg in e.fact_guards) or "—"
-                wildcard = "pending" if e.wildcard_pending else ("expanded" if e.wildcard_expanded else "—")
+                wildcard = (
+                    "pending" if e.wildcard_pending
+                    else ("expanded" if e.wildcard_expanded else "")
+                )
                 edge_rows.append(
-                    f"| {e.source} | {e.dest} | {e.auto} | {_fmt_guard_refs(e.guard_names)} | "
-                    f"{fact_str} | {wildcard} |"
+                    f"| {e.source} | {e.dest} | {_fmt_sparse_bool(e.auto)} | "
+                    f"{_fmt_guards_cell(e.guards)} | {wildcard} | {chokes_cell} |"
                 )
             lines.append("\n".join(edge_rows))
-            timeout = (
-                f"{t.soft_timeout_secs:g}s ({'explicit' if t.soft_timeout_is_explicit else 'default'})"
-                if t.soft_timeout_secs is not None else "—"
-            )
-            lines.append(f"Chokes: {_fmt_names(sorted(t.chokes))} · Soft timeout: {timeout}")
             sections.append("\n\n".join(lines))
         parts.append("## Triggers\n\n" + "\n\n".join(sections))
 

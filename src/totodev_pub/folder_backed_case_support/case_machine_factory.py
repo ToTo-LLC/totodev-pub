@@ -30,6 +30,8 @@ from totodev_pub.folder_backed_case_support.exceptions import (
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     FsmChainSpec,
     _PERFORM_METHOD_PREFIX,
+    _is_fact_guard,
+    _is_method_guard,
 )
 
 if TYPE_CHECKING:
@@ -150,18 +152,24 @@ class _CaseMachineFactory:
         """Returns machine-ready transitions.
 
         - Strips `_`-prefixed parser metadata keys.
-        - Compiles `_fact_guards` tokens into condition callables.
+        - Compiles `_guards` in declaration order into transitions-library
+          `conditions` (method-guard name strings and factual-guard callables).
         - Wires `perform_<trigger>` into `before` when no explicit `before` exists.
         """
         prepared: list[dict] = []
         for td in transitions:
             trigger = td["trigger"]
             clean = {k: v for k, v in td.items() if not k.startswith("_")}
-            fact_guards = td.get("_fact_guards")
-            if fact_guards:
-                conds = list(clean.get("conditions", []))
-                for fg in fact_guards:
-                    conds.append(self._make_fact_guard(fg["name"], fg["op"], fg["operand"]))
+            guards = td.get("_guards") or []
+            if guards:
+                conds = []
+                for item in guards:
+                    if _is_method_guard(item):
+                        conds.append(item)  # transitions resolves str names on the model
+                    elif _is_fact_guard(item):
+                        conds.append(
+                            self._make_fact_guard(item["name"], item["op"], item["operand"])
+                        )
                 clean["conditions"] = conds
             if "before" not in clean:
                 method = f"{_PERFORM_METHOD_PREFIX}{trigger}"

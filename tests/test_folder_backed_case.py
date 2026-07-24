@@ -1689,7 +1689,7 @@ def test_failed_auto_self_loop_is_not_progressed(tmp_path):
 
 
 def test_self_loop_guard_decline_lets_sibling_auto_edge_and_drive_finish(tmp_path):
-    from tests.case_test_utils import drive_to_completion
+    from case_test_utils import drive_to_completion
 
     async def scenario():
         case = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-3", case_id="sl-3")

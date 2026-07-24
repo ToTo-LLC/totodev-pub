@@ -198,7 +198,7 @@ chains** — it reads like the diagram it is and takes `%%` comments (see
 | `A -- trigger [guard] --> A` | **auto self-loop** — same-state auto edge; **requires** ≥1 method guard (framework rejects unguarded `A -- trigger --> A`) |
 | `A == trigger ==> A` | **manual self-loop** — same-state manual edge; no method guard required |
 | `trigger [guard]` | method guard in trailing brackets: binds `guard_<guard>(self, tctx: EventData) -> bool`; edge fires only when it returns truthy |
-| `trigger [guard1, guard2]` | **multiple guards** on one edge — all must pass (`conditions` = `guard_guard1`, `guard_guard2`, …). One bracket group per edge, comma-separated, trigger first. |
+| `trigger [guard1, guard2]` | **multiple guards** on one edge — one bracket group, comma-separated; method names and `@FACT` may intersperse. **Evaluation is left-to-right in declaration order** (conjunction: all must pass). |
 | `trigger [@DWELL(>\|>=\|<\|<=)<dur>]` | factual guard: time in current state vs `1s/2m/3h/4d`. Use for **timed escapes** so a state can't rot forever (pair with a `==` human gate or an automated pipeline step). |
 | `trigger [@FAIL(>\|>=\|<\|<=)n]` | factual guard: failed-transition-attempt count since entering current state. Use for **retry-then-divert**: e.g. `retry [@FAIL<3]` + `give_up [@FAIL>=3]` as **separate edges**. Default (no `@FAIL` given) is an implied `@FAIL<1` — one try, then stop. |
 | `trigger~<dur>` | soft timeout on the trigger's `perform_` work (flags slow; hard-aborts at a multiple) — glued to the trigger name, before any bracket group |
@@ -206,9 +206,10 @@ chains** — it reads like the diagram it is and takes `%%` comments (see
 
 An edge label is always the trigger name first, then an optional glued `~<dur>`
 soft timeout, then at most **one** bracketed guard list. Method guards and
-factual guards mix freely in the same brackets, comma-separated
-(`finish [funded, @FAIL<3]`, `retry~3m [@FAIL<3, @DWELL>30m]`). At most one
-guard per fact name (`@FAIL` / `@DWELL`) on a given edge.
+factual guards mix freely in the same brackets and are evaluated left-to-right
+in declaration order — e.g. `finish [funded, @FAIL<3]` evaluates `guard_funded`
+then `@FAIL<3`; also `retry~3m [@FAIL<3, @DWELL>30m]`. At most one guard per
+fact name (`@FAIL` / `@DWELL`) on a given edge.
 
 **Bracketed `[*]` vs bare `*`:** `[*]` is the start/end **boundary**
 pseudo-state (as in Mermaid stateDiagram-v2); bare `*` is the **any-state

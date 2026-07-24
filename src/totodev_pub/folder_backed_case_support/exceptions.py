@@ -420,7 +420,7 @@ class FsmBindingError(Exception):
 
     # transition-dict slot -> human label, for readable messages.
     _SLOT_LABEL = {
-        "conditions": "method guard",
+        "guards": "method guard",
         "unless": "method guard ('unless')",
         "before": "before-callback",
         "after": "after-callback",

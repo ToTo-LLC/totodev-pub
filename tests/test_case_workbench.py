@@ -66,6 +66,19 @@ class WbGuardedCase(FolderBackedCase):
         pass
 
 
+@case_type_registry.register
+class WbMixedGuardCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["[*] --> start -- go [ready, @DWELL>=1h] --> done --> [*]"]
+
+    async def guard_ready(self, tctx):
+        return True
+
+    async def perform_go(self, tctx):
+        pass
+
+
 def _wb(tmp_path: Path, **kwargs) -> CaseWorkbench:
     fx = tmp_path / "fixtures"
     sc = tmp_path / "scratch"
@@ -248,7 +261,7 @@ def test_clone_parallel_keeps_both(tmp_path):
 def test_clone_keep_identity_collision(tmp_path):
     wb = _wb(tmp_path)
     c = wb.create(WbTicketCase)
-    # keep_identity wants dest folder named like source id  still present ? collision
+    # keep_identity wants dest folder named like source id ? still present ? collision
     with pytest.raises(WorkbenchError, match="already exists"):
         wb.clone(keep_identity=True)
     assert c.case is wb.case
@@ -464,6 +477,20 @@ def test_probe_async_guard_outside_loop(tmp_path):
     assert auto
     assert auto[0].guards
     assert any(v is True for _, v in auto[0].guards)
+
+
+def test_probe_mixed_guards_declaration_order(tmp_path):
+    """Method + fact guards appear in declaration order with summary DWELL units."""
+    wb = _wb(tmp_path)
+    wb.create(WbMixedGuardCase)
+    report = wb.probe()
+    auto = [e for e in report.edges if e.kind == "auto"]
+    assert auto
+    guards = auto[0].guards
+    assert guards[0] == ("guard_ready", True)
+    assert guards[1] == ("@DWELL>=1h", "fact")
+    assert "facts=[" not in report.narrative
+    assert "guard_ready=True, @DWELL>=1h=fact" in report.narrative
 
 
 def test_help_catalog_and_prefix(tmp_path):

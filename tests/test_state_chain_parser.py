@@ -137,8 +137,7 @@ def test_orphan_detection_requires_valid_mode():
 def test_method_guard_token_maps_to_guard_prefix():
     spec = StateChainParser.parse(["[*] --> new == finish [funded, approved] ==> done --> [*]"])
 
-    conds = spec.transitions[-1]["conditions"]
-    assert conds == ["guard_funded", "guard_approved"]
+    assert spec.transitions[-1]["_guards"] == ["guard_funded", "guard_approved"]
 
 
 def test_missing_guard_method_is_rejected_with_prefixed_name():
@@ -224,13 +223,16 @@ def test_orphan_detection_off_mode_allows_unknown_guard_method():
 
 
 def test_factual_guards_do_not_imply_guard_methods():
-    """`@DWELL`/`@FAIL` are compiled by the base class; they live in `_fact_guards`, not
-    `conditions`, so they impose no `guard_<name>` carrier method and contribute nothing
+    """`@DWELL`/`@FAIL` are compiled by the base class; they live as dict items in
+    `_guards`, so they impose no `guard_<name>` carrier method and contribute nothing
     to the declared-guard set used by orphan detection."""
     spec = StateChainParser.parse(["[*] --> new -- timeout [@DWELL>30m] --> done --> [*]"])
 
     assert spec._declared_guard_tokens() == set()
+    guards = spec.transitions[-1]["_guards"]
+    assert all(isinstance(g, dict) for g in guards)
     assert "conditions" not in spec.transitions[-1]
+    assert "_fact_guards" not in spec.transitions[-1]
 
     class Carrier:
         async def perform_timeout(self, tctx):  # timeout is auto (`--`)
@@ -349,8 +351,7 @@ def test_to_networkx_edge_attributes_capture_guards_auto_and_facts():
     assert data["trigger"] == "finish"
     assert data["auto"] is True
     assert data["manual"] is False
-    assert data["conditions"] == ["guard_funded"]
-    assert data["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+    assert data["guards"] == ["guard_funded", {"name": "FAIL", "op": "<", "operand": 3}]
     assert data["wildcard_expanded"] is False
     # a `<`-style @FAIL guard tightens rather than relaxes, so this is not a timed escape.
     assert data["pure_timed_escape"] is False
@@ -367,7 +368,7 @@ def test_to_networkx_flags_pure_timed_escape_edges_and_states():
 
     _, _, data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "timeout")
     assert data["pure_timed_escape"] is True
-    assert data["fact_guards"] == [{"name": "DWELL", "op": ">=", "operand": 1800.0}]
+    assert data["guards"] == [{"name": "DWELL", "op": ">=", "operand": 1800.0}]
     assert g.nodes["waiting"]["timed_escape"] is True
 
 
@@ -436,7 +437,7 @@ def test_to_networkx_wildcard_expansion_adds_concrete_edges_alongside_sentinel()
     assert g.has_edge("*", "cancelled")
 
 
-def test_to_networkx_fact_guards_include_dwell_and_explicit_fail():
+def test_to_networkx_guards_include_dwell_and_explicit_fail():
     """The built-in @DWELL/@FAIL factual guards (compiled by the base class itself, not a
     carrier method) show up on the edge exactly as declared."""
     pytest.importorskip("networkx")
@@ -447,10 +448,10 @@ def test_to_networkx_fact_guards_include_dwell_and_explicit_fail():
     g = spec.to_networkx()
 
     _, _, retry_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "retry")
-    assert retry_data["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+    assert retry_data["guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
 
     _, _, timeout_data = next(e for e in g.edges(data=True) if e[2]["trigger"] == "timeout")
-    assert timeout_data["fact_guards"] == [{"name": "DWELL", "op": ">=", "operand": 7200.0}]
+    assert timeout_data["guards"] == [{"name": "DWELL", "op": ">=", "operand": 7200.0}]
     assert timeout_data["pure_timed_escape"] is True
 
 
@@ -463,12 +464,12 @@ def test_to_networkx_shows_implicit_fail_cap_after_apply_implicit_fail_cap():
 
     g_before = spec.to_networkx()
     _, _, before = next(iter(g_before.edges(data=True)))
-    assert before["fact_guards"] == []
+    assert before["guards"] == []
 
     spec.apply_implicit_fail_cap()
     g_after = spec.to_networkx()
     _, _, after = next(iter(g_after.edges(data=True)))
-    assert after["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
+    assert after["guards"] == [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
 
 
 # ---------------------------------------------------------------------------
@@ -486,11 +487,11 @@ def test_to_networkx_excludes_implicit_fail_cap_when_disabled():
 
     g_default = spec.to_networkx()
     _, _, with_caps = next(iter(g_default.edges(data=True)))
-    assert with_caps["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
+    assert with_caps["guards"] == [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
 
     g_stripped = spec.to_networkx(include_implied_caps=False)
     _, _, without_caps = next(iter(g_stripped.edges(data=True)))
-    assert without_caps["fact_guards"] == []
+    assert without_caps["guards"] == []
 
 
 def test_to_networkx_keeps_explicit_fail_guard_regardless_of_flag():
@@ -505,7 +506,7 @@ def test_to_networkx_keeps_explicit_fail_guard_regardless_of_flag():
     for include in (True, False):
         g = spec.to_networkx(include_implied_caps=include)
         _, _, data = next(iter(g.edges(data=True)))
-        assert data["fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+        assert data["guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
 
 
 def test_to_networkx_fills_default_soft_timeout_when_enabled():
@@ -628,7 +629,7 @@ def test_to_networkx_pseudo_state_dedupes_hub_edges_by_guard_not_just_trigger():
     })
     spec.transitions.append({
         "trigger": "escape", "source": "b", "dest": "done", "_wildcard": True,
-        "conditions": ["guard_gated"],
+        "_guards": ["guard_gated"],
     })
     spec.auto_edges.add(("a", "escape"))
     spec.auto_edges.add(("b", "escape"))
@@ -637,7 +638,7 @@ def test_to_networkx_pseudo_state_dedupes_hub_edges_by_guard_not_just_trigger():
 
     hub_to_done = [d for _, v, d in g.out_edges("*", data=True) if v == "done" and d.get("wildcard_expanded")]
     assert len(hub_to_done) == 2
-    assert {tuple(d["conditions"]) for d in hub_to_done} == {(), ("guard_gated",)}
+    assert {tuple(d["guards"]) for d in hub_to_done} == {(), ("guard_gated",)}
 
 
 def test_to_networkx_graph_level_metadata():
@@ -792,7 +793,7 @@ def test_method_guarded_auto_self_loop_is_accepted():
     spec = StateChainParser.parse(["[*] --> a -- tick [ok] --> a -- go --> done --> [*]"]).validate()
     tick = next(t for t in spec.transitions if t["trigger"] == "tick")
     assert tick["source"] == "a" and tick["dest"] == "a"
-    assert tick["conditions"] == ["guard_ok"]
+    assert tick["_guards"] == ["guard_ok"]
     assert ("a", "tick") in spec.auto_edges
 
 
@@ -800,7 +801,7 @@ def test_unguarded_manual_self_loop_is_accepted():
     spec = StateChainParser.parse(["[*] --> a == tick ==> a -- go --> done --> [*]"]).validate()
     tick = next(t for t in spec.transitions if t["trigger"] == "tick")
     assert tick["source"] == "a" and tick["dest"] == "a"
-    assert not tick.get("conditions")
+    assert not tick.get("_guards")
     assert ("a", "tick") not in spec.auto_edges
 
 
@@ -985,7 +986,7 @@ def test_colon_form_accepts_quoted_label():
     ])
     t = auto.transitions[0]
     assert t["trigger"] == "retry"
-    assert t["_fact_guards"] == [{"name": "DWELL", "op": ">", "operand": 14 * 86400.0}]
+    assert t["_guards"] == [{"name": "DWELL", "op": ">", "operand": 14 * 86400.0}]
     assert ("a", "retry") in auto.auto_edges
 
     manual = StateChainParser.parse([
@@ -1000,8 +1001,7 @@ def test_colon_form_carries_guards_and_timeout():
         "[*] --> a", "a --> b : retry~3m [funded, @FAIL<3]", "b --> [*]",
     ])
     t = spec.transitions[0]
-    assert t["conditions"] == ["guard_funded"]
-    assert t["_fact_guards"] == [{"name": "FAIL", "op": "<", "operand": 3}]
+    assert t["_guards"] == ["guard_funded", {"name": "FAIL", "op": "<", "operand": 3}]
     assert spec.trigger_timeouts == {"retry": 180.0}
 
 
@@ -1039,16 +1039,19 @@ def test_colon_form_missing_trigger_is_rejected():
 # ---------------------------------------------------------------------------
 
 
-def test_guard_order_is_preserved_across_kinds():
+def test_guard_declaration_order_is_preserved_across_kinds():
     spec = StateChainParser.parse(
         ["[*] --> a -- go [one, @FAIL<2, two, @DWELL>5m] --> b --> [*]"]
     )
     t = spec.transitions[0]
-    assert t["conditions"] == ["guard_one", "guard_two"]
-    assert t["_fact_guards"] == [
+    assert t["_guards"] == [
+        "guard_one",
         {"name": "FAIL", "op": "<", "operand": 2},
+        "guard_two",
         {"name": "DWELL", "op": ">", "operand": 300.0},
     ]
+    assert "conditions" not in t
+    assert "_fact_guards" not in t
 
 
 def test_duplicate_fact_guard_is_rejected():

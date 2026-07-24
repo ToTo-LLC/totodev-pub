@@ -135,6 +135,8 @@ from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME,
     WORKBENCH_DIR_NAME,
 )
+from totodev_pub.folder_backed_case_support.case_doc import _fmt_fact_guard
+from totodev_pub.folder_backed_case_support.state_chain_parser import _is_method_guard
 
 _ASSET_LIKE_SUFFIXES = frozenset({
     ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff",
@@ -1330,7 +1332,6 @@ class CaseWorkbench:
 
         def _eval_guards(trigger: str, dest: str, kind: str) -> ProbeEdge:
             guards: list[tuple[str, Any]] = []
-            facts: list[str] = []
             # find matching transition dict(s)
             for td in fsm.transitions:
                 src = td.get("source")
@@ -1341,41 +1342,41 @@ class CaseWorkbench:
                     continue
                 if td.get("dest") != dest:
                     continue
-                for gname in td.get("conditions") or []:
-                    meth = getattr(case, gname, None)
-                    if meth is None:
-                        guards.append((gname, "error"))
-                        continue
-                    try:
-                        if inspect.iscoroutinefunction(meth):
-                            try:
-                                asyncio.get_running_loop()
-                            except RuntimeError:
-                                verdict = asyncio.run(meth(None))
-                                guards.append((gname, bool(verdict)))
+                for item in td.get("_guards") or []:
+                    if _is_method_guard(item):
+                        gname = item
+                        meth = getattr(case, gname, None)
+                        if meth is None:
+                            guards.append((gname, "error"))
+                            continue
+                        try:
+                            if inspect.iscoroutinefunction(meth):
+                                try:
+                                    asyncio.get_running_loop()
+                                except RuntimeError:
+                                    verdict = asyncio.run(meth(None))
+                                    guards.append((gname, bool(verdict)))
+                                else:
+                                    # Sync probe inside a running loop cannot await safely
+                                    guards.append((gname, "error"))
                             else:
-                                # Sync probe inside a running loop cannot await safely
-                                guards.append((gname, "error"))
-                        else:
-                            try:
-                                result = meth()
-                            except TypeError:
-                                result = meth(None)
-                            if inspect.iscoroutine(result):
-                                result.close()
-                                guards.append((gname, "error"))
-                            else:
-                                guards.append((gname, bool(result)))
-                    except Exception as exc:
-                        guards.append((gname, f"error:{exc}"))
-                for fg in td.get("_fact_guards") or []:
-                    facts.append(
-                        f"@{fg.get('name')}{fg.get('op')}{fg.get('operand')}"
-                    )
+                                try:
+                                    result = meth()
+                                except TypeError:
+                                    result = meth(None)
+                                if inspect.iscoroutine(result):
+                                    result.close()
+                                    guards.append((gname, "error"))
+                                else:
+                                    guards.append((gname, bool(result)))
+                        except Exception as exc:
+                            guards.append((gname, f"error:{exc}"))
+                    else:
+                        guards.append((_fmt_fact_guard(item), "fact"))
             chokes = sorted(fsm.trigger_chokes.get(trigger, frozenset()))
             return ProbeEdge(
                 trigger=trigger, dest=dest, kind=kind,
-                guards=guards, fact_guards=facts, chokes=chokes,
+                guards=guards, chokes=chokes,
             )
 
         for trigger, dest in auto:
@@ -1405,10 +1406,8 @@ class CaseWorkbench:
         lines = [f"state={state}"]
         for e in edges:
             gtxt = ", ".join(f"{n}={v}" for n, v in e.guards) or "—"
-            ftxt = ", ".join(e.fact_guards) if e.fact_guards else ""
             ctxt = f" chokes={e.chokes}" if e.chokes else ""
-            extra = f" facts=[{ftxt}]" if ftxt else ""
-            lines.append(f"  [{e.kind}] {e.trigger} → {e.dest}  guards=[{gtxt}]{extra}{ctxt}")
+            lines.append(f"  [{e.kind}] {e.trigger} → {e.dest}  guards=[{gtxt}]{ctxt}")
         return ProbeReport(narrative="\n".join(lines), edges=edges)
 
     def problems(self, case: FolderBackedCase | None = None) -> ProblemsReport:

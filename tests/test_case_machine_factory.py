@@ -371,3 +371,60 @@ def test_keepalive_survives_transient_beat_errors(tmp_path, monkeypatch):
             case.case_detach()
 
     asyncio.run(scenario())
+
+
+class _OrderedGuardCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = [
+        "[*] --> new -- go [ready, @FAIL<2, funded] --> done --> [*]",
+    ]
+    order: list
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.order = []
+
+    async def perform_go(self, tctx):
+        return None
+
+    async def guard_ready(self, tctx) -> bool:
+        self.order.append("method:guard_ready")
+        return True
+
+    async def guard_funded(self, tctx) -> bool:
+        self.order.append("method:guard_funded")
+        return True
+
+
+def test_prepare_transitions_preserves_guard_declaration_order(tmp_path, monkeypatch):
+    """Factory must emit conditions callables in _guards order (method, fact, method)."""
+    case = _OrderedGuardCase.create_case_in_folder(tmp_path / "og", case_id="og")
+    try:
+        factory = _CaseMachineFactory(case, case._fsm, case._journal)
+        calls: list[str] = []
+
+        def fake_fact_guard(name, op, operand):
+            def _g(_tctx=None):
+                calls.append(f"fact:{name}")
+                return True
+            return _g
+
+        monkeypatch.setattr(factory, "_make_fact_guard", fake_fact_guard)
+        prepared = factory._prepare_transitions(case._fsm.transitions)
+        edge = next(td for td in prepared if td["trigger"] == "go")
+        conds = edge["conditions"]
+        assert len(conds) == 3
+        # Slot 0/2 are method name strings (transitions resolves them); slot 1 is our callable.
+        assert conds[0] == "guard_ready"
+        assert callable(conds[1])
+        assert conds[2] == "guard_funded"
+        conds[1](None)
+        assert calls == ["fact:FAIL"]
+        # Full order at fire time = declaration order once the machine resolves names;
+        # binding order of the compiled list is what we lock here:
+        assert [conds[0], "fact:FAIL", conds[2]] == [
+            "guard_ready", "fact:FAIL", "guard_funded",
+        ]
+    finally:
+        case.case_detach()

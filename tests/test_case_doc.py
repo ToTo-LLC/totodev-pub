@@ -32,6 +32,7 @@ class SampleCase(FolderBackedCase):
         [*] --> new -- intake --> reviewing
         reviewing == approve [funded] ==> done --> [*]
         reviewing == fasttrack [funded] ==> done
+        reviewing -- recheck [funded] --> reviewing
         reviewing -- expire [@DWELL>=1h] --> expired --> [*]
         * == cancel ==> cancelled --> [*]
     """
@@ -53,6 +54,9 @@ class SampleCase(FolderBackedCase):
 
     async def perform_approve(self, tctx):
         """Stamp the ticket as approved and notify the customer."""
+
+    async def perform_recheck(self, tctx):
+        """Re-evaluate funding before another auto advance attempt."""
 
     async def perform_expire(self, tctx):
         """Archive the stale ticket once the review window lapses."""
@@ -141,14 +145,22 @@ def test_collect_triggers_docs_and_chokes():
     assert approve.before_doc == "Snapshot the reviewer's decision before the transition commits."
     assert approve.perform_doc == "Stamp the ticket as approved and notify the customer."
     assert approve.chokes == frozenset({"finance-api"})
-    assert approve.edges[0].guard_names == ["funded"]
+    # Manual edges never receive the compiler's implicit @FAIL cap.
+    assert approve.edges[0].guards == ["guard_funded"]
 
     fasttrack = by_name["fasttrack"]
     assert fasttrack.perform_doc is None          # never defined -> None, not an error
-    assert fasttrack.edges[0].guard_names == ["funded"]
+    assert fasttrack.edges[0].guards == ["guard_funded"]
+
+    recheck = by_name["recheck"]
+    # Auto + method guard: declaration order keeps the method, then implied @FAIL.
+    assert recheck.edges[0].guards == [
+        "guard_funded",
+        {"name": "FAIL", "op": "<", "operand": 1, "implicit": True},
+    ]
 
     expire = by_name["expire"]
-    assert expire.edges[0].fact_guards == [{"name": "DWELL", "op": ">=", "operand": 3600.0}]
+    assert expire.edges[0].guards == [{"name": "DWELL", "op": ">=", "operand": 3600.0}]
 
     cancel = by_name["cancel"]
     assert any(e.source == "*" for e in cancel.edges) or any(
@@ -160,7 +172,7 @@ def test_collect_guards_cross_referenced_across_triggers():
     doc = collect(SampleCase)
     [funded] = [g for g in doc.guards if g.name == "funded"]
     assert funded.doc == "True once the linked invoice shows a cleared payment."
-    assert funded.used_by_triggers == ["approve", "fasttrack"]
+    assert funded.used_by_triggers == ["approve", "fasttrack", "recheck"]
 
 
 def test_collect_assets():
@@ -331,6 +343,23 @@ def test_render_markdown_contains_all_default_sections():
     assert "per-case file assertions" in text        # the §6 footnote
 
 
+def test_render_states_table_sparse_bools():
+    text = generate_case_docs(SampleCase)
+    # new is initial+default_initial: those cells True; terminal/timed_escape blank
+    assert "| new | True | True |  |  | — | — |" in text
+
+
+def test_render_trigger_guards_merged_declaration_order():
+    text = generate_case_docs(SampleCase)
+    assert "Fact Guards" not in text
+    assert "| Source | Dest | Auto | Guards | Wildcard | Chokes |" in text
+    # recheck (auto + method): method then implicit fail (include_implied_caps default True)
+    assert "`guard_funded()`, `@FAIL<1`" in text
+    assert "Chokes: " not in text  # moved into table
+    assert "finance-api" in text
+    assert "Soft timeout:" in text
+
+
 def test_render_markdown_default_diagram_uses_flowchart_thick_manual_edges():
     """Docs default to flowchart so manual edges render thick (==>) without a
     leading '==' in the label (stateDiagram-v2 cannot draw thick transitions)."""
@@ -437,11 +466,13 @@ def test_state_diagram_round_trips_through_the_parser():
 
     def canon(s):
         def edge(t):
-            facts = tuple(sorted(
-                (fg["name"], fg["op"], fg["operand"]) for fg in t.get("_fact_guards", [])
-            ))
-            return (t["trigger"], t["source"], t["dest"],
-                    tuple(t.get("conditions", [])), facts)
+            guards = []
+            for g in t.get("_guards", []):
+                if isinstance(g, dict):
+                    guards.append(("f", g["name"], g["op"], g["operand"]))
+                else:
+                    guards.append(("m", g))
+            return (t["trigger"], t["source"], t["dest"], tuple(guards))
         return {
             "states": sorted(s.states),
             "transitions": sorted(edge(t) for t in s.transitions),

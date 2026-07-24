@@ -82,10 +82,14 @@ Labels  `trigger[~<dur>] [guard, ...]`
   behavior.)
 * A bracketed, comma-separated GUARD LIST may follow the trigger: `finish [funded]`,
   `retry~3m [@FAIL<3, @DWELL>30m]`. All guards must pass for the edge to fire
-  (conjunction). Two kinds of item may appear:
+  (conjunction). Method and factual guards may INTERSPERSE and are stored — and
+  later evaluated — LEFT-TO-RIGHT in declaration order in the transition's private
+  `_guards` list (e.g. `go [one, @FAIL<2, two]` =>
+  `_guards=["guard_one", {"name":"FAIL",...}, "guard_two"]`). Two kinds of item
+  may appear:
     * A bare identifier names a METHOD GUARD: each token is mapped to a
-      `guard_<token>` carrier method and stored in the transition's `conditions`
-      (e.g. `finish [funded]` => conditions=["guard_funded"]; the carrier defines
+      `guard_<token>` carrier method and stored as a string in `_guards`
+      (e.g. `finish [funded]` => `_guards=["guard_funded"]`; the carrier defines
       `async def guard_funded`). The `guard_` prefix keeps guard methods in their own
       namespace, away from ordinary helpers and lifecycle hooks. Guards are what make
       multiple auto-advance edges from one state meaningful — advance() tries each
@@ -112,7 +116,8 @@ Labels  `trigger[~<dur>] [guard, ...]`
           and tolerates unlimited failures (logically `@FAIL>=0`).
       A factual guard is a pure FACT, NOT a promise to fire — something must still
       attempt the trigger. At most one guard PER FACT NAME per label; facts compose
-      with each other and with method guards (e.g. `retry~3m [funded, @FAIL<3]`).
+      with each other and with method guards in declaration order
+      (e.g. `retry~3m [funded, @FAIL<3]`).
 
 Wildcard ("from any source") chains  `* -- label --> DEST`
 ----------
@@ -270,10 +275,10 @@ _MERMAID_BOILERPLATE_RE = re.compile(
 )
 
 # Transition-dict keys whose (string) values name a callable resolved against the carrier
-# object — the explicitly-referenced callbacks a carrier MUST provide. `_fact_guards` is
-# deliberately ABSENT: factual guards (@DWELL/@FAIL) are compiled by the base class itself,
-# not looked up on the carrier, so they impose no carrier-method requirement.
-_CARRIER_CALLBACK_KEYS = ("conditions", "unless", "before", "after", "prepare")
+# object — hand-built callbacks a carrier MUST provide. DSL method guards live in `_guards`
+# (heterogeneous ordered list) and are yielded separately by `_referenced_callbacks`; factual
+# @DWELL/@FAIL dicts in that list are compiled by the base class, not looked up on the carrier.
+_CARRIER_CALLBACK_KEYS = ("unless", "before", "after", "prepare")
 
 # The canonical method-name PREFIXES for the two conventions the parser/base bind by name.
 # Both are kept as named constants (not bare literals) so the parser, the binding check, and
@@ -303,6 +308,38 @@ _HOOK_METHOD_PREFIXES: dict[str, str] = {
     "before_": "trigger",
     "after_": "trigger",
 }
+
+
+def _is_fact_guard(item) -> bool:
+    return isinstance(item, dict)
+
+
+def _is_method_guard(item) -> bool:
+    return isinstance(item, str)
+
+
+def _method_guards(guards) -> list[str]:
+    return [g for g in (guards or []) if _is_method_guard(g)]
+
+
+def _fact_guards_of(guards) -> list[dict]:
+    return [g for g in (guards or []) if _is_fact_guard(g)]
+
+
+def _guards_identity(guards) -> tuple:
+    """Stable identity for an ordered heterogeneous guard list (methods + facts)."""
+    out = []
+    for g in guards or []:
+        if _is_fact_guard(g):
+            out.append(("f", g["name"], g["op"], g["operand"]))
+        else:
+            out.append(("m", g))
+    return tuple(out)
+
+
+def _copy_guards(guards) -> list:
+    """Deep-copy fact dicts; leave method-guard strings as-is."""
+    return [dict(g) if _is_fact_guard(g) else g for g in (guards or [])]
 
 
 def _is_async_callable(fn) -> bool:
@@ -344,10 +381,13 @@ class FsmChainSpec:
 
     Attributes:
         states         every state name, in first-seen order.
-        transitions    `transitions`-library dicts: {"trigger","source","dest"[,"conditions"]}.
-                       A dict MAY also carry the private key "_fact_guards" (a list of
-                       {"name","op","operand"} factual guards, e.g. @DWELL/@FAIL) — stripped
-                       and compiled into `conditions` callables before reaching the machine.
+        transitions    `transitions`-library dicts: {"trigger","source","dest"}.
+                       A dict MAY also carry the private key "_guards": an ordered list of
+                       method-guard strings (`guard_<token>`) and/or factual-guard dicts
+                       ({"name","op","operand"}, e.g. @DWELL/@FAIL). Methods and facts may
+                       intersperse; evaluation is left-to-right in declaration order. The
+                       factory compiles `_guards` into `conditions` callables before the
+                       machine sees the graph.
         terminal_states  states marked terminal (a `state --> [*]` boundary hop).
         initial_states states marked initial (a `[*] --> state` boundary hop); also
                        reachability anchors.
@@ -447,7 +487,7 @@ class FsmChainSpec:
                 dest is exempt — it is reached only once the wildcards are injected, which
                 happens AFTER validate() so the typo checks see only the explicit graph;
           - every AUTO (`--`) self-loop (`source == dest`) carries at least one method
-                guard in `conditions` (factual `@DWELL`/`@FAIL` alone is not enough) so an
+                guard in `_guards` (factual `@DWELL`/`@FAIL` alone is not enough) so an
                 unguarded auto self-loop cannot spin forever on every case_advance().
         """
         if not self.states:
@@ -471,13 +511,12 @@ class FsmChainSpec:
             in_dests.add(t["dest"])
             dest = t["dest"]
             trigger = t["trigger"]
-            conditions = t.get("conditions") or []
             for s in srcs:
                 if s != dest:
                     continue
                 if (s, trigger) not in self.auto_edges:
                     continue
-                if conditions:
+                if _method_guards(t.get("_guards")):
                     continue
                 raise FsmChainParseError(
                     f"auto self-loop '{s} -- {trigger} --> {dest}' has no method guard. "
@@ -521,7 +560,7 @@ class FsmChainSpec:
         For each pending wildcard, an edge `s -> dest` is created for every state `s`
         that is NOT terminal (terminals cannot be left) and NOT the dest itself (no
         self-loop), UNLESS `s` already has an EXPLICIT edge for that trigger — an explicit
-        edge always overrules the wildcard. Conditions, the time guard, and the
+        edge always overrules the wildcard. The ordered `_guards` list and the
         auto-advance flag from the wildcard connector are carried onto each injected edge.
         """
         if not self.pending_wildcards:
@@ -542,10 +581,8 @@ class FsmChainSpec:
                 if (trigger, s) in claimed:
                     continue
                 td: dict = {"trigger": trigger, "source": s, "dest": dest, "_wildcard": True}
-                if w["conditions"]:
-                    td["conditions"] = list(w["conditions"])
-                if w["fact_guards"]:
-                    td["_fact_guards"] = [dict(fg) for fg in w["fact_guards"]]
+                if w.get("_guards"):
+                    td["_guards"] = _copy_guards(w["_guards"])
                 self.transitions.append(td)
                 claimed.add((trigger, s))
                 if trigger not in self.triggers:
@@ -564,7 +601,7 @@ class FsmChainSpec:
 
         A state qualifies if it has an auto edge whose guards are satisfiable BY WAITING
         ALONE — i.e. the edge carries at least one self-relaxing time fact (`@DWELL` with
-        `>`/`>=`), every fact guard on it is such a fact, and it has NO method conditions
+        `>`/`>=`), every fact item in `_guards` is such a fact, and it has NO method guards
         (an opaque method guard might never relax, so a mixed edge gives no guarantee)."""
         self.timed_escape_states = set()
         for t in self.transitions:
@@ -576,13 +613,15 @@ class FsmChainSpec:
 
     @staticmethod
     def _is_pure_timed_escape(t: dict) -> bool:
-        """True iff transition `t` is fireable by waiting alone: no method conditions, and
-        at least one fact guard with EVERY fact being a self-relaxing time fact (`@DWELL`
-        `>`/`>=`). An unguarded auto edge would have fired already, so it is not a 'timed'
-        escape; a `@FAIL`/`<`-style guard only tightens with time, so it disqualifies."""
-        if t.get("conditions"):
+        """True iff transition `t` is fireable by waiting alone: no method guards in
+        `_guards`, and at least one fact item with EVERY fact being a self-relaxing time
+        fact (`@DWELL` `>`/`>=`). An unguarded auto edge would have fired already, so it is
+        not a 'timed' escape; a `@FAIL`/`<`-style guard only tightens with time, so it
+        disqualifies."""
+        guards = t.get("_guards") or []
+        if _method_guards(guards):
             return False
-        fgs = t.get("_fact_guards") or []
+        fgs = _fact_guards_of(guards)
         if not fgs:
             return False
         for fg in fgs:
@@ -616,12 +655,12 @@ class FsmChainSpec:
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
             if not any((s, t["trigger"]) in self.auto_edges for s in srcs):
                 continue
-            fgs = t.get("_fact_guards") or []
-            if any(fg["name"] in _COUNT_FACTS for fg in fgs):
+            guards = list(t.get("_guards") or [])
+            if any(_is_fact_guard(g) and g["name"] in _COUNT_FACTS for g in guards):
                 continue                       # explicit @FAIL policy wins
             if self._is_pure_timed_escape(t):
                 continue                       # timed escape => unlimited fail tolerance
-            t["_fact_guards"] = list(fgs) + [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
+            t["_guards"] = guards + [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
         return self
 
     # ---- rendering (visualization / analysis) ----
@@ -659,8 +698,9 @@ class FsmChainSpec:
           * trigger              -- the trigger name
           * auto / manual         -- whether (source, trigger) is in `auto_edges` (`--`) or not
                                      (`==`); mutually exclusive
-          * conditions            -- method-guard names (`guard_<token>`), as declared
-          * fact_guards           -- list of {"name","op","operand"} factual guards. `name` is
+          * guards                -- ordered heterogeneous list of method-guard names
+                                     (`guard_<token>` strings) and factual-guard dicts
+                                     ({"name","op","operand"}), in declaration order. `name` is
                                      `"DWELL"` (time, `operand` in seconds) or `"FAIL"` (count,
                                      `operand` a bare int). An entry `apply_implicit_fail_cap()`
                                      injected (rather than the author declaring it) carries an
@@ -730,7 +770,7 @@ class FsmChainSpec:
             used for the pending rule: `source -> "*"` (carrying the edge's full trigger/
             guard/timeout/choke data, plus `wildcard_dest` naming the true destination so
             nothing is lost) and one deduplicated `"*" -> dest` edge per distinct
-            (trigger, dest, conditions, fact_guards) combination. Visually this turns an
+            (trigger, dest, guards_identity) combination. Visually this turns an
             N-source fan-out into a small hub-and-spoke cluster hanging off `"*"` — the
             "little islands" that keep wildcard escapes from tangling the main flow.
 
@@ -738,15 +778,15 @@ class FsmChainSpec:
         (nothing the author typed in the DSL) appear in the rendering:
           * True (default) -- the full effective picture: an unguarded auto edge's implicit
             `@FAIL<1` retry cap (from `apply_implicit_fail_cap()`) is included in
-            `fact_guards`, and an un-annotated trigger's `soft_timeout_secs` is filled in with
+            `guards`, and an un-annotated trigger's `soft_timeout_secs` is filled in with
             the `DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS` fallback.
           * False -- only what the DSL chains actually declared: implicit `@FAIL<1` entries
-            (`fact_guards` items with `"implicit": True`) are dropped, and an un-annotated
+            (fact items in `guards` with `"implicit": True`) are dropped, and an un-annotated
             trigger's `soft_timeout_secs` is `None` rather than the default. Useful for a
             diagram meant to show the author's own guard/timeout policy, undiluted by
             framework defaults.
         Either way, `soft_timeout_is_explicit` tells you which case you are in for a given
-        edge, and non-implicit `fact_guards` entries (explicit `@FAIL`/`@DWELL`, or any guard
+        edge, and non-implicit fact items in `guards` (explicit `@FAIL`/`@DWELL`, or any guard
         not from `apply_implicit_fail_cap()`) are never affected by this flag.
 
         Graph-level attributes (`graph.graph[...]`) carry everything that isn't naturally a
@@ -765,11 +805,16 @@ class FsmChainSpec:
         except ImportError:
             raise_missing_dependency(feature="FsmChainSpec.to_networkx()", packages=["networkx"])
 
-        def resolve_fact_guards(raw_fact_guards) -> list[dict]:
-            fgs = [dict(fg) for fg in raw_fact_guards]
-            if include_implied_caps:
-                return fgs
-            return [fg for fg in fgs if not fg.get("implicit")]
+        def resolve_guards(raw_guards) -> list:
+            out = []
+            for g in raw_guards or []:
+                if _is_fact_guard(g):
+                    if not include_implied_caps and g.get("implicit"):
+                        continue
+                    out.append(dict(g))
+                else:
+                    out.append(g)
+            return out
 
         def resolve_soft_timeout(trigger: str) -> tuple[Optional[float], bool]:
             if trigger in self.trigger_timeouts:
@@ -808,14 +853,13 @@ class FsmChainSpec:
         if needs_wildcard_node:
             g.add_node(_WILDCARD_SOURCE, wildcard_source=True)
 
-        hub_dest_seen: set[tuple] = set()  # (trigger, dest, conditions, fact_key) already hubbed
+        hub_dest_seen: set[tuple] = set()  # (trigger, dest, guards_identity) already hubbed
 
         for declaration_index, t in enumerate(self.transitions):
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
             trigger = t["trigger"]
             dest = t["dest"]
-            conditions = list(t.get("conditions") or [])
-            fact_guards = resolve_fact_guards(t.get("_fact_guards") or [])
+            guards = resolve_guards(t.get("_guards"))
             chokes = frozenset(self.trigger_chokes.get(trigger, frozenset()))
             soft_timeout_secs, soft_timeout_is_explicit = resolve_soft_timeout(trigger)
             pure_timed_escape = self._is_pure_timed_escape(t)
@@ -828,8 +872,7 @@ class FsmChainSpec:
                     trigger=trigger,
                     auto=auto,
                     manual=not auto,
-                    conditions=conditions,
-                    fact_guards=fact_guards,
+                    guards=guards,
                     chokes=chokes,
                     soft_timeout_secs=soft_timeout_secs,
                     soft_timeout_is_explicit=soft_timeout_is_explicit,
@@ -842,8 +885,7 @@ class FsmChainSpec:
                     continue
 
                 g.add_edge(s, _WILDCARD_SOURCE, wildcard_dest=dest, **edge_attrs)
-                fact_key = tuple((fg["name"], fg["op"], fg["operand"]) for fg in fact_guards)
-                hub_key = (trigger, dest, tuple(conditions), fact_key)
+                hub_key = (trigger, dest, _guards_identity(guards))
                 if hub_key not in hub_dest_seen:
                     hub_dest_seen.add(hub_key)
                     # Aggregated rendering edge: not one fireable transition.
@@ -860,8 +902,7 @@ class FsmChainSpec:
                 trigger=trigger,
                 auto=w["auto"],
                 manual=not w["auto"],
-                conditions=list(w["conditions"]),
-                fact_guards=resolve_fact_guards(w["fact_guards"]),
+                guards=resolve_guards(w.get("_guards")),
                 chokes=frozenset(self.trigger_chokes.get(trigger, frozenset())),
                 soft_timeout_secs=soft_timeout_secs,
                 soft_timeout_is_explicit=soft_timeout_is_explicit,
@@ -879,14 +920,18 @@ class FsmChainSpec:
 
     def _referenced_callbacks(self):
         """Yield (slot, item, trigger) for every explicitly-referenced transition callback in
-        the compiled spec — method guards (`conditions`/`unless`) plus any hand-built
-        `before`/`after`/`prepare` from a compile_fsm() override. `item` is a NAME (str, to be
-        resolved on the carrier) or an already-resolved callable. For a DSL method guard the
-        NAME is already the conventionized `guard_<token>` the parser stored (see
-        _GUARD_METHOD_PREFIX), so existence/async checks resolve it directly. Factual guards
-        are excluded on purpose (see _CARRIER_CALLBACK_KEYS)."""
+        the compiled spec — method-guard strings from `_guards` (slot `"guards"`) plus any
+        hand-built `unless`/`before`/`after`/`prepare` from a compile_fsm() override. `item`
+        is a NAME (str, to be resolved on the carrier) or an already-resolved callable. For a
+        DSL method guard the NAME is already the conventionized `guard_<token>` the parser
+        stored (see _GUARD_METHOD_PREFIX), so existence/async checks resolve it directly.
+        Factual-guard dicts in `_guards` are excluded on purpose (compiled by the base class).
+        """
         for t in self.transitions:
             trigger = t.get("trigger")
+            for g in t.get("_guards") or []:
+                if _is_method_guard(g):
+                    yield "guards", g, trigger
             for slot in _CARRIER_CALLBACK_KEYS:
                 val = t.get(slot)
                 if val is None:
@@ -1049,22 +1094,24 @@ class FsmChainSpec:
 
     def _declared_guard_tokens(self) -> set[str]:
         """The bare guard tokens this FSM references — the part AFTER the `guard_` prefix of
-        every `guard_<token>` name found in any transition's `conditions`/`unless`. These are
-        exactly the `guard_<token>` carrier methods the parser emits for a `trigger [<token>]`
-        DSL guard, plus any `guard_`-prefixed name a hand-built compile_fsm() override put
-        there. Used by orphan detection to tell a real guard method from a `guard_`-prefixed
-        typo. Callables and non-`guard_` strings are ignored (the former are already resolved;
-        the latter are not part of the guard convention)."""
+        every `guard_<token>` string found in any transition's `_guards` (or hand-built
+        `unless`). These are exactly the `guard_<token>` carrier methods the parser emits for
+        a `trigger [<token>]` DSL guard, plus any `guard_`-prefixed name a hand-built
+        compile_fsm() override put there. Used by orphan detection to tell a real guard method
+        from a `guard_`-prefixed typo. Fact dicts, callables, and non-`guard_` strings are
+        ignored."""
         tokens: set[str] = set()
         for t in self.transitions:
-            for slot in ("conditions", "unless"):
-                val = t.get(slot)
-                if val is None:
-                    continue
-                items = val if isinstance(val, (list, tuple)) else [val]
-                for item in items:
-                    if isinstance(item, str) and item.startswith(_GUARD_METHOD_PREFIX):
-                        tokens.add(item[len(_GUARD_METHOD_PREFIX):])
+            for item in _method_guards(t.get("_guards")):
+                if item.startswith(_GUARD_METHOD_PREFIX):
+                    tokens.add(item[len(_GUARD_METHOD_PREFIX):])
+            val = t.get("unless")
+            if val is None:
+                continue
+            items = val if isinstance(val, (list, tuple)) else [val]
+            for item in items:
+                if isinstance(item, str) and item.startswith(_GUARD_METHOD_PREFIX):
+                    tokens.add(item[len(_GUARD_METHOD_PREFIX):])
         return tokens
 
     def _orphan_expected_names_by_kind(self) -> dict[str, set[str]]:
@@ -1207,7 +1254,7 @@ class StateChainParser:
         if not lines:
             return spec
 
-        # (trigger, source, conditions, fact_guards) -> dest, to catch genuinely
+        # (trigger, source, guards_identity) -> dest, to catch genuinely
         # nondeterministic duplicates (identical guard, different dest) while allowing
         # guarded branching.
         seen_edges: dict[tuple, str] = {}
@@ -1298,12 +1345,12 @@ class StateChainParser:
                 terminal=(terminal_last and pos == len(names) - 1),
             )
         for i, c in enumerate(connectors):
-            conditions, fact_guards, trigger, soft_secs = cls._parse_label(
+            guards, trigger, soft_secs = cls._parse_label(
                 c["label"], chain, idx,
             )
             cls._add_transition(
                 spec, trigger, names[i], names[i + 1],
-                conditions=conditions, fact_guards=fact_guards, auto=not c["manual"],
+                guards=guards, auto=not c["manual"],
                 soft_secs=soft_secs, raw=chain, idx=idx, seen_edges=seen_edges,
             )
 
@@ -1383,15 +1430,15 @@ class StateChainParser:
                 "'state --> [*]' (its own line, or inline at a chain's ends)",
                 chain=chain, index=idx,
             )
-        conditions, fact_guards, trigger, soft_secs = cls._parse_label(label, chain, idx)
+        guards, trigger, soft_secs = cls._parse_label(label, chain, idx)
 
         if src_tok == _WILDCARD_SOURCE:
             dest = cls._parse_state_token(dest_tok, chain, idx)
             cls._add_state(spec, dest, initial=False, terminal=False)
             cls._record_trigger_timeout(spec, trigger, soft_secs, chain, idx)
             spec.pending_wildcards.append({
-                "trigger": trigger, "dest": dest, "conditions": conditions,
-                "fact_guards": fact_guards, "auto": not manual,
+                "trigger": trigger, "dest": dest, "_guards": guards,
+                "auto": not manual,
             })
             spec.wildcard_dests.add(dest)
             return
@@ -1402,7 +1449,7 @@ class StateChainParser:
         cls._add_state(spec, dest, initial=False, terminal=False)
         cls._add_transition(
             spec, trigger, src, dest,
-            conditions=conditions, fact_guards=fact_guards, auto=not manual,
+            guards=guards, auto=not manual,
             soft_secs=soft_secs, raw=chain, idx=idx, seen_edges=seen_edges,
         )
 
@@ -1429,13 +1476,13 @@ class StateChainParser:
         dest = cls._parse_state_token(tokens[1], chain, idx)
         cls._add_state(spec, dest, initial=False, terminal=terminal_last)
         c = connectors[0]
-        conditions, fact_guards, trigger, soft_secs = cls._parse_label(
+        guards, trigger, soft_secs = cls._parse_label(
             c["label"], chain, idx,
         )
         cls._record_trigger_timeout(spec, trigger, soft_secs, chain, idx)
         spec.pending_wildcards.append({
-            "trigger": trigger, "dest": dest, "conditions": conditions,
-            "fact_guards": fact_guards, "auto": not c["manual"],
+            "trigger": trigger, "dest": dest, "_guards": guards,
+            "auto": not c["manual"],
         })
         spec.wildcard_dests.add(dest)
 
@@ -1480,14 +1527,15 @@ class StateChainParser:
     @classmethod
     def _parse_label(
         cls, label: str, raw: str, idx: int
-    ) -> tuple[list[str], list[dict], str, Optional[float]]:
-        """Split an edge label into (conditions, fact_guards, trigger, soft_secs).
+    ) -> tuple[list, str, Optional[float]]:
+        """Split an edge label into (guards, trigger, soft_secs).
         Grammar: `trigger[~<dur>] [guard, ...]` — the trigger (optionally carrying a
         `~<dur>` SOFT-timeout suffix, split off here; see _parse_trigger_timeout)
-        followed by an optional bracketed, comma-separated guard list. Each bare guard
-        token `tok` is mapped to the carrier-method name `guard_<tok>` (see
-        _GUARD_METHOD_PREFIX) before it enters `conditions`, so `finish [funded]`
-        yields conditions=["guard_funded"] — the carrier must define
+        followed by an optional bracketed, comma-separated guard list. Guards are
+        evaluated LEFT-TO-RIGHT in declaration order; method and `@FACT` items may
+        intersperse in one list. Each bare guard token `tok` is mapped to the
+        carrier-method name `guard_<tok>` (see _GUARD_METHOD_PREFIX), so
+        `finish [funded]` yields guards=["guard_funded"] — the carrier must define
         `async def guard_funded`. `@`-prefixed items are factual guards (see
         _parse_fact_guard); at most one per FACT NAME. `soft_secs` is the annotated
         soft-timeout in seconds, or None when un-annotated."""
@@ -1511,8 +1559,7 @@ class StateChainParser:
         if "~" in trigger:                       # split the `~<dur>` soft-timeout off the trigger
             trigger, soft_secs = cls._parse_trigger_timeout(trigger, raw, idx)
 
-        conditions: list[str] = []
-        fact_guards: list[dict] = []
+        guards: list = []
         seen_facts: set[str] = set()
         guards_text = m.group("guards")
         if guards_text is not None:
@@ -1537,9 +1584,9 @@ class StateChainParser:
                             chain=raw, index=idx,
                         )
                     seen_facts.add(fg["name"])
-                    fact_guards.append(fg)
+                    guards.append(fg)
                 elif _NAME_RE.fullmatch(tok) and not tok[0].isdigit():
-                    conditions.append(f"{_GUARD_METHOD_PREFIX}{tok}")
+                    guards.append(f"{_GUARD_METHOD_PREFIX}{tok}")
                 else:
                     raise FsmChainParseError(
                         f"invalid guard {tok!r} in {text!r}; a guard is a bare "
@@ -1547,7 +1594,7 @@ class StateChainParser:
                         "guard like '@FAIL<3' / '@DWELL>=30m'",
                         chain=raw, index=idx,
                     )
-        return conditions, fact_guards, trigger, soft_secs
+        return guards, trigger, soft_secs
 
     @staticmethod
     def _parse_trigger_timeout(token: str, raw: str, idx: int) -> tuple[str, float]:
@@ -1663,8 +1710,7 @@ class StateChainParser:
         source: str,
         dest: str,
         *,
-        conditions: list[str],
-        fact_guards: list[dict],
+        guards: list,
         auto: bool,
         soft_secs: Optional[float],
         raw: str,
@@ -1674,11 +1720,10 @@ class StateChainParser:
         # A trigger's soft-timeout is recorded regardless of edge-dedup below: it is keyed by
         # trigger (a property of its work), and the recorder rejects conflicting annotations.
         cls._record_trigger_timeout(spec, trigger, soft_secs, raw, idx)
-        # Edge identity includes the guards (method conditions + factual guards): identical
+        # Edge identity includes the ordered guards (methods + facts): identical
         # trigger+source+guards but different dest is genuinely ambiguous; differing
         # guards is legitimate branching.
-        fact_key = tuple((fg["name"], fg["op"], fg["operand"]) for fg in fact_guards)
-        key = (trigger, source, tuple(conditions), fact_key)
+        key = (trigger, source, _guards_identity(guards))
         if key in seen_edges:
             if seen_edges[key] != dest:
                 raise FsmChainParseError(
@@ -1690,10 +1735,8 @@ class StateChainParser:
         else:
             seen_edges[key] = dest
             td: dict = {"trigger": trigger, "source": source, "dest": dest}
-            if conditions:
-                td["conditions"] = list(conditions)
-            if fact_guards:
-                td["_fact_guards"] = [dict(fg) for fg in fact_guards]
+            if guards:
+                td["_guards"] = _copy_guards(guards)
             spec.transitions.append(td)
             if trigger not in spec.triggers:
                 spec.triggers.append(trigger)
@@ -1759,7 +1802,7 @@ def lint_spec(spec: FsmChainSpec) -> list[str]:
             if state not in _sources(t):
                 continue
             if (state, t["trigger"]) in spec.auto_edges:
-                guarded = bool(t.get("conditions")) or bool(t.get("_fact_guards"))
+                guarded = bool(t.get("_guards"))
                 auto_entries.append((t["trigger"], guarded))
                 auto_ts.append(t)
             else:
@@ -1778,7 +1821,7 @@ def lint_spec(spec: FsmChainSpec) -> list[str]:
         if (auto_ts and not manual_exit
                 and state not in spec.terminal_states
                 and state not in spec.timed_escape_states
-                and all(t.get("conditions") for t in auto_ts)):
+                and all(_method_guards(t.get("_guards")) for t in auto_ts)):
             found.append(
                 f"state '{state}': every exit is an auto edge gated by a method "
                 "guard — no manual exit, no timed escape. If the guards never "

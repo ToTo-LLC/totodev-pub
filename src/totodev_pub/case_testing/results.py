@@ -77,8 +77,7 @@ class ProbeEdge:
     trigger: str
     dest: str
     kind: str  # "auto" | "manual"
-    guards: list[tuple[str, Any]] = field(default_factory=list)  # (name, True|False|"error")
-    fact_guards: list[str] = field(default_factory=list)
+    guards: list[tuple[str, Any]] = field(default_factory=list)  # (label, verdict)
     chokes: list[str] = field(default_factory=list)
 
 
