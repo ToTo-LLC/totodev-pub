@@ -1,6 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
+import time
 from pathlib import Path
 
 import pytest
@@ -130,4 +131,162 @@ def test_segment_events_returns_empty_when_no_markers(event_dir: Path) -> None:
     segments = list(log.segment_events("STATE"))
 
     assert segments == []
+
+
+# ---- cache_msecs ----
+#
+# These write a raw event file directly to disk (bypassing create_event(),
+# which invalidates the cache) to simulate a change landing on the folder
+# while a cache_msecs > 0 caller's cached scan is still considered fresh.
+
+
+def _write_raw_event(event_dir: Path, filename: str) -> None:
+    (event_dir / filename).touch()
+
+
+class _FakeMonotonic:
+    """Controllable stand-in for time.monotonic(), advanced explicitly."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def fake_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeMonotonic:
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(time, "monotonic", clock)
+    return clock
+
+
+def test_events_without_cache_msecs_always_rescans(event_dir: Path, fake_clock: _FakeMonotonic) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("STATUS", "ONE")
+
+    assert len(list(log.events())) == 1
+
+    _write_raw_event(event_dir, "e002_STATUS@TWO.yaml")
+
+    # Default cache_msecs=0: the new file is visible immediately, no lag.
+    assert len(list(log.events())) == 2
+    assert len(list(log.events(cache_msecs=0))) == 2
+
+
+def test_events_cache_msecs_serves_stale_scan_then_refreshes(
+    event_dir: Path, fake_clock: _FakeMonotonic
+) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("STATUS", "ONE")
+
+    first = list(log.events(cache_msecs=1000))
+    assert len(first) == 1
+
+    _write_raw_event(event_dir, "e002_STATUS@TWO.yaml")
+
+    # Still within the 1000ms window: the cached (stale) scan is served.
+    fake_clock.advance(0.05)
+    stale = list(log.events(cache_msecs=1000))
+    assert len(stale) == 1
+
+    # Past the window: a fresh scan picks up the new file.
+    fake_clock.advance(2.0)
+    fresh = list(log.events(cache_msecs=1000))
+    assert len(fresh) == 2
+
+
+def test_cache_scan_is_shared_across_different_glob_filters(
+    event_dir: Path, fake_clock: _FakeMonotonic
+) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("OCR-STATUS", "QUEUED")
+
+    # Populate the cache via one label_glob...
+    assert len(list(log.events(label_glob="OCR-*", cache_msecs=1000))) == 1
+
+    _write_raw_event(event_dir, "e002_VALIDATION-STATUS@PENDING.yaml")
+
+    # ...a different label_glob within the window still sees the stale
+    # (pre-write) snapshot: one shared cache, not one per glob combination.
+    fake_clock.advance(0.05)
+    assert list(log.events(label_glob="VALIDATION-*", cache_msecs=1000)) == []
+
+
+def test_create_event_invalidates_cache(event_dir: Path, fake_clock: _FakeMonotonic) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("STATUS", "ONE")
+
+    assert len(list(log.events(cache_msecs=60_000))) == 1
+
+    # No time advance at all: a naive cache would still call this "fresh".
+    log.create_event("STATUS", "TWO")
+
+    assert len(list(log.events(cache_msecs=60_000))) == 2
+
+
+def test_purge_invalidates_cache(event_dir: Path, fake_clock: _FakeMonotonic) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("STATUS", "ONE")
+    list(log.events(cache_msecs=60_000))  # populate the cache
+
+    log.purge()
+    log.create_event("STATUS", "FRESH")
+
+    remaining = list(log.events(cache_msecs=60_000))
+    assert [proxy.label_value for proxy in remaining] == ["STATUS@FRESH"]
+
+
+def test_has_event_respects_cache_msecs(event_dir: Path, fake_clock: _FakeMonotonic) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("OCR-STATUS", "QUEUED")
+
+    assert log.has_event("OCR-STATUS", cache_msecs=1000) == "QUEUED"
+
+    _write_raw_event(event_dir, "e002_OCR-STATUS@DONE.yaml")
+
+    fake_clock.advance(0.05)
+    assert log.has_event("OCR-STATUS", cache_msecs=1000) == "QUEUED"  # stale, cached
+
+    fake_clock.advance(2.0)
+    assert log.has_event("OCR-STATUS", cache_msecs=1000) == "DONE"  # refreshed
+
+
+def test_latest_values_respects_cache_msecs(event_dir: Path, fake_clock: _FakeMonotonic) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("OCR-STATUS", "QUEUED")
+
+    assert log.latest_values(cache_msecs=1000)["OCR-STATUS"] == "QUEUED"
+
+    _write_raw_event(event_dir, "e002_OCR-STATUS@DONE.yaml")
+
+    fake_clock.advance(0.05)
+    assert log.latest_values(cache_msecs=1000)["OCR-STATUS"] == "QUEUED"  # stale, cached
+
+    fake_clock.advance(2.0)
+    assert log.latest_values(cache_msecs=1000)["OCR-STATUS"] == "DONE"  # refreshed
+
+
+def test_segment_events_respects_cache_msecs(event_dir: Path, fake_clock: _FakeMonotonic) -> None:
+    log = PrimitiveEventLog(event_dir)
+    log.create_event("STATE", "ENTER")
+    log.create_event("ACTION", "RUNNING")
+
+    first = list(log.segment_events("STATE", cache_msecs=1000))
+    assert len(first) == 1
+    assert [event.label_value for event in first[0]] == ["STATE@ENTER", "ACTION@RUNNING"]
+
+    _write_raw_event(event_dir, "e003_STATE@ENTER.yaml")
+    _write_raw_event(event_dir, "e004_ACTION@COOLDOWN.yaml")
+
+    fake_clock.advance(0.05)
+    stale = list(log.segment_events("STATE", cache_msecs=1000))
+    assert len(stale) == 1  # cached scan predates the new segment
+
+    fake_clock.advance(2.0)
+    fresh = list(log.segment_events("STATE", cache_msecs=1000))
+    assert len(fresh) == 2
 

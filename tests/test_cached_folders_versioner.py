@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("git")  # 'git' extra (GitPython); skip when unavailable
+
 from git import Repo
 
 from totodev_pub.cached_file_folders import CachedFileFolders

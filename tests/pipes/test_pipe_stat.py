@@ -5,6 +5,9 @@ import pytest
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from unittest.mock import Mock, patch
+
+pytest.importorskip("luigi")  # 'pipes' extra; skip when luigi is unavailable
+
 from totodev_pub.pipes.pipe_stat import PipeStat
 from totodev_pub.pipes.pipe_state import PipeState
 from totodev_pub.pipes.toto_example_pipe import SampleWordStatsPipe, TextContent

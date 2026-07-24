@@ -16,6 +16,7 @@ dependencies = [
   "sqlitedict",
   "tomli-w",
   "xxhash",
+  "transitions>=0.9.3",
 ]
 
 [project.optional-dependencies]

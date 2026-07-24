@@ -21,6 +21,8 @@ import tempfile
 import os
 import json
 
+pytest.importorskip("requests")  # 'connectors' extra; skip when unavailable
+
 from totodev_pub.cached_file_folders_support.file_proxy_outlook_email import (
     OutlookEmailFileProxyFactory,
     OutlookEmailProxy,

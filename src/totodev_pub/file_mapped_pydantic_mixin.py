@@ -1105,6 +1105,26 @@ class FileMappedPydanticMixin:
             if hasattr(self, field_name):
                 setattr(self, field_name, value)
 
+    def detached_copy(self: Self) -> Self:
+        """Return a deep copy DETACHED from any file mapping.
+
+        model_copy(deep=True) faithfully clones the field data but also drags along
+        the private file-mapping attributes, leaving the copy bound to the same file
+        (it could be reloaded or save()-d back, dodging any higher-level guard). This
+        clears that binding, so the result is a free-standing snapshot: save() on it
+        raises "Cannot save model without a file path". Use it to hand out a
+        read-only view of a model without leaking a live, writable file handle.
+        """
+        clone = self.model_copy(deep=True)
+        clone._file_path = None
+        clone._absolute_file_path = None
+        clone._lock_acquired = False
+        clone._file = None
+        clone._file_stat = None
+        clone._last_loaded_at = None
+        clone._in_context_manager = False
+        return clone
+
     def __enter__(self) -> Self:
         """Context manager entry."""
         if not self._lock_acquired:
@@ -1157,19 +1177,27 @@ class FileMappedPydanticMixin:
         """
         return bool(self._absolute_file_path and os.path.exists(self._absolute_file_path))
 
-    def file_was_modified(self, force_check: bool = False) -> bool:
+    def file_was_modified(self) -> bool:
         """
-        Check if the file on disk differs from our last loaded/saved version.
+        Check if the on-disk file differs from the snapshot taken at last successful load/save.
         
-        Args:
-            force_check: If True, bypass any cached stat results
-            
+        This is the shared on-disk change predicate (same name/signature as
+        LazyLoadedFileData.file_was_modified). It answers whether the file diverged
+        from the last load/save baseline — not whether the in-memory model is dirty
+        (use :meth:`is_modified` for that).
+        
         Returns:
-            bool: True if file size or mtime differs from last load/save
+            bool: True if a load/save baseline exists and the file's size/mtime differs
+                  (or the file is missing/unreadable). False if there is no baseline
+                  yet, or the file still matches the baseline.
         """
+        # No baseline yet — not "changed", just not loaded/saved
+        if self._file_stat is None:
+            return False
+
         if not self._absolute_file_path or not self.file_exists():
             return True
-            
+
         try:
             current_stat = os.stat(self._absolute_file_path)
             return (current_stat.st_size, current_stat.st_mtime) != self._file_stat

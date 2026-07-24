@@ -20,6 +20,8 @@ from pathlib import Path
 import tempfile
 import os
 
+pytest.importorskip("aiohttp")  # 'connectors' extra; skip when unavailable
+
 from totodev_pub.cached_file_folders_support.file_proxy_sharepoint import (
     SharepointFileProxyFactory,
     SharepointFileProxy

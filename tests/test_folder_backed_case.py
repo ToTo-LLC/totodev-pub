@@ -1,0 +1,1740 @@
+"""Minimal smoke tests for FolderBackedCase. Kept intentionally thin while the
+class is still evolving — expand once the API stabilises."""
+
+import asyncio
+import os
+import time
+import pytest
+from pathlib import Path
+
+from totodev_pub.folder_backed_case import (
+    FolderBackedCase,
+    CaseRecord,
+    CaseAlreadyOpenError,
+    CaseTypeMismatchError,
+    MissingFsmError,
+    AssetSpec,
+    CaseIDGenerator,
+    TimeSlugCaseIDGenerator,
+    UUIDCaseIDGenerator,
+    DEFAULT_CASE_ID_GENERATOR,
+)
+import totodev_pub.folder_backed_case as _fbc
+import totodev_pub.folder_backed_case_support.case_machine_factory as _cmf
+import totodev_pub.folder_backed_case_support.folder_backed_case_interface as _fbci
+from totodev_pub.folder_backed_case_support.case_type_registry import (
+    CaseTypeRegistry,
+    case_type_registry,
+)
+from totodev_pub.folder_backed_case_support.exceptions import (
+    FsmBindingError,
+    OwnershipLostError,
+    CaseTransitionInFlightError,
+    UnregisteredCaseTypeError,
+    MissingAssetSchemaError,
+    MissingTriggerChokesError,
+    FsmChainParseError,
+)
+from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
+from totodev_pub.folder_backed_case_support.heartbeat_lease import HeartbeatLease
+
+
+# ---------------------------------------------------------------------------
+# Registry isolation: the module-level singleton is process-wide mutable state.
+# Snapshot and restore it around every test so registrations don't leak across
+# tests (order-independence).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_case_registry():
+    saved = dict(case_type_registry._registry)
+    try:
+        yield
+    finally:
+        case_type_registry._registry.clear()
+        case_type_registry._registry.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# Minimal concrete subclass used across all tests
+# ---------------------------------------------------------------------------
+
+
+class SimpleCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
+
+
+class TypedRecord(CaseRecord):
+    """A CaseRecord subclass with an extra field, to verify typed peek resolution."""
+
+    flavor: str = "vanilla"
+
+
+class TypedCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+    _record_cls = TypedRecord
+
+
+class ReclassTarget(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Shares the 'new' state with SimpleCase, so reclassify from a fresh case is legal."""
+    fsm_state_chains = ["[*] --> new == go ==> finished --> [*]"]
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+def test_raises_when_detached_is_contract_metadata_on_interface():
+    assert hasattr(_fbci, "_raises_when_detached")
+    assert _fbci._raises_when_detached.__module__ == _fbci.__name__
+    assert _fbci.FolderBackedCaseInterface.case_advance.__raises_when_detached__
+    assert FolderBackedCase.case_advance.__raises_when_detached__
+    assert FolderBackedCase.case_heartbeat.__raises_when_detached__
+
+
+def test_create_and_basic_properties(tmp_path):
+    folder = tmp_path / "case-001"
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-001")
+    try:
+        assert case.case_id == "c-001"
+        assert case.case_state == "new"
+        assert case.case_terminal_states == frozenset({"done"})
+        assert case.case_is_live
+        assert not case.case_is_terminal
+    finally:
+        case.case_detach()
+
+
+def test_second_open_raises(tmp_path):
+    folder = tmp_path / "case-003"
+    first = SimpleCase.create_case_in_folder(folder)
+    try:
+        with pytest.raises(CaseAlreadyOpenError):
+            SimpleCase(folder)
+    finally:
+        first.case_detach()
+
+
+def test_fsm_transitions(tmp_path):
+    folder = tmp_path / "case-004"
+    case = SimpleCase.create_case_in_folder(folder)
+    try:
+        asyncio.run(case.begin())
+        assert case.case_state == "open"
+        asyncio.run(case.finish())
+        assert case.case_state == "done"
+        assert case.case_is_terminal
+
+    finally:
+        case.case_detach()
+
+
+def test_terminal_state_stamped_on_record(tmp_path):
+    """Termination seals `terminal_state` (the final FSM state name) onto the record
+    alongside the `terminal` timestamp: None while live, frozen once at terminal entry,
+    and readable from the on-disk record without parsing the event log."""
+    folder = tmp_path / "case-004ts"
+    case = SimpleCase.create_case_in_folder(folder)
+    try:
+        assert case.case_record().terminal_state is None
+        asyncio.run(case.begin())
+        assert case.case_record().terminal_state is None  # still live
+        asyncio.run(case.finish())
+        assert case.case_record().terminal_state == "done"
+    finally:
+        case.case_detach()
+    record = FolderBackedCase.peek_case_record(folder)
+    assert record.terminal_state == "done"
+    assert record.terminal is not None
+    reader = FolderBackedCase.get_case_reader(folder)
+    assert reader.case_terminal_state == "done"
+
+
+def test_enter_state_event_carries_trigger_payload(tmp_path):
+    """A committed transition's CASE_STATE_ENTERED records WHICH trigger produced it
+    (and from where); the inception entry, which no trigger produced, carries none."""
+    folder = tmp_path / "case-004b"
+    case = SimpleCase.create_case_in_folder(folder)
+    try:
+        asyncio.run(case.begin())
+        entries = list(
+            case._journal.primitive.events(
+                label_glob="CASE_STATE_ENTERED", recent_first=True
+            )
+        )
+    finally:
+        case.case_detach()
+    assert [e.value for e in entries] == ["open", "new"]
+    newest_payload = entries[0].contents()
+    assert newest_payload is not None
+    data = newest_payload.as_dict()
+    assert data["trigger"] == "begin"
+    assert data["from"] == "new"
+    assert entries[1].contents() is None  # inception entry: no trigger, marker only
+
+
+def test_peek_record_and_events(tmp_path):
+    folder = tmp_path / "case-005"
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-005")
+    try:
+        asyncio.run(case.begin())
+
+    finally:
+        case.case_detach()
+    record = FolderBackedCase.peek_case_record(folder)
+    assert record.case_id == "c-005"
+    assert record.case_object_type == "SimpleCase"
+
+    events = FolderBackedCase.peek_case_event_journal(folder)
+    assert events.current_state == "open"
+    assert not events.is_terminal
+
+
+def test_rehydrate_requires_registration(tmp_path):
+    folder = tmp_path / "case-006"
+    _case = SimpleCase.create_case_in_folder(folder)
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    with pytest.raises(UnregisteredCaseTypeError):
+        case_type_registry.rehydrate(folder)
+
+
+def test_rehydrate_with_registration(tmp_path):
+    case_type_registry.register_case_types(SimpleCase)
+    folder = tmp_path / "case-007"
+    _case = SimpleCase.create_case_in_folder(folder)
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    case = case_type_registry.rehydrate(folder)
+    try:
+        assert isinstance(case, SimpleCase)
+        assert case.case_state == "new"
+
+    finally:
+        case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# CaseTypeRegistry: direct coverage of the extracted catalog/peek surface
+# ---------------------------------------------------------------------------
+
+
+def test_register_decorator_returns_class_and_registers():
+    reg = CaseTypeRegistry()
+
+    @reg.register
+    class Decorated(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+
+    # Decorator returns the class unchanged...
+    assert issubclass(Decorated, FolderBackedCase)
+    # ...and the class is now resolvable by its bare name.
+    assert reg.resolve_case_type("Decorated") is Decorated
+
+
+def test_register_case_types_multiple():
+    reg = CaseTypeRegistry()
+    reg.register_case_types(SimpleCase, TypedCase)
+    assert reg.resolve_case_type("SimpleCase") is SimpleCase
+    assert reg.resolve_case_type("TypedCase") is TypedCase
+
+
+def test_resolve_case_type_none_unknown_and_override():
+    reg = CaseTypeRegistry()
+    # None in -> None out (no lookup attempted).
+    assert reg.resolve_case_type(None) is None
+    # Unknown name -> None (graceful miss).
+    assert reg.resolve_case_type("DoesNotExist") is None
+    # Explicit registry override bypasses the instance catalog entirely.
+    override = {"SimpleCase": SimpleCase}
+    assert reg.resolve_case_type("SimpleCase", registry=override) is SimpleCase
+    # The override did not mutate the instance catalog.
+    assert reg.resolve_case_type("SimpleCase") is None
+
+
+def test_peek_case_record_typed_vs_fallback(tmp_path):
+    folder = tmp_path / "case-typed"
+    _case = TypedCase.create_case_in_folder(folder, case_id="t-typed")
+    try:
+        pass
+
+    finally:
+        _case.case_detach()
+    # Caller supplies the case class -> its _record_cls -> the CORRECT typed record.
+    typed = FolderBackedCase.peek_case_record(folder, case_cls=TypedCase)
+    assert isinstance(typed, TypedRecord)
+    assert typed.case_object_type == "TypedCase"
+    assert typed.flavor == "vanilla"
+
+    # Nothing supplied -> graceful base CaseRecord (no exception, no registry consulted).
+    base = FolderBackedCase.peek_case_record(folder)
+    assert type(base) is CaseRecord
+    assert base.case_id == "t-typed"
+
+
+def test_peek_case_record_explicit_record_cls(tmp_path):
+    folder = tmp_path / "case-explicit"
+    _case = SimpleCase.create_case_in_folder(folder, case_id="s-explicit")
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    # record_cls given -> used directly (and wins over case_cls).
+    rec = FolderBackedCase.peek_case_record(
+        folder, record_cls=TypedRecord, case_cls=SimpleCase
+    )
+    assert isinstance(rec, TypedRecord)
+    assert rec.case_id == "s-explicit"
+
+
+def test_peek_case_record_is_static_and_registry_free(tmp_path):
+    folder = tmp_path / "case-static"
+    _case = SimpleCase.create_case_in_folder(folder, case_id="s-static")
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    # A static on FolderBackedCase: callable with no instance or registry in play.
+    rec = FolderBackedCase.peek_case_record(folder)
+    assert type(rec) is CaseRecord
+    assert rec.case_object_type == "SimpleCase"
+
+
+def test_peek_class_returns_name_registry_free(tmp_path):
+    folder = tmp_path / "case-name"
+    _case = SimpleCase.create_case_in_folder(folder, case_id="n-1")
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    # Default: the bare type NAME, sniffed from disk; no registration required.
+    assert case_type_registry.peek_class(folder) == "SimpleCase"
+
+
+def test_peek_class_resolves_registered_class_object(tmp_path):
+    folder = tmp_path / "case-obj"
+    _case = SimpleCase.create_case_in_folder(folder)
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    cls = case_type_registry.peek_class(
+        folder, return_class_object=True, registry={"SimpleCase": SimpleCase}
+    )
+    assert cls is SimpleCase
+
+
+def test_peek_class_unregistered_raises_for_class_object(tmp_path):
+    folder = tmp_path / "case-unreg-obj"
+    _case = SimpleCase.create_case_in_folder(folder)
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    # Strict: a class object cannot be produced for an unregistered name.
+    with pytest.raises(UnregisteredCaseTypeError) as excinfo:
+        case_type_registry.peek_class(folder, return_class_object=True, registry={})
+    assert excinfo.value.type_name == "SimpleCase"
+    # But the NAME form degrades to a plain string with no registration.
+    assert case_type_registry.peek_class(folder, registry={}) == "SimpleCase"
+
+
+def test_peek_class_uninitialized_folder_raises(tmp_path):
+    folder = tmp_path / "case-empty-peek"
+    folder.mkdir()
+    with pytest.raises(FileNotFoundError):
+        case_type_registry.peek_class(folder)
+
+
+def test_peek_class_then_peek_case_record_roundtrip(tmp_path):
+    # The deduce-then-read path: resolve the class via the registry, then read the record.
+    folder = tmp_path / "case-roundtrip"
+    _case = TypedCase.create_case_in_folder(folder, case_id="rt-1")
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    cls = case_type_registry.peek_class(
+        folder, return_class_object=True, registry={"TypedCase": TypedCase}
+    )
+    rec = FolderBackedCase.peek_case_record(folder, case_cls=cls)
+    assert isinstance(rec, TypedRecord)
+    assert rec.flavor == "vanilla"
+
+
+def test_peek_case_record_does_not_acquire_lease(tmp_path):
+    folder = tmp_path / "case-nolease"
+    _case = SimpleCase.create_case_in_folder(folder, case_id="s-nolease")
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    assert not (folder / ".case.lease").exists()
+    FolderBackedCase.peek_case_record(folder)
+    # Peek is lock-free: it must never leave a lease behind.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_peek_case_assets_without_live_case(tmp_path):
+    folder = tmp_path / "case-assets-peek"
+    _case = SimpleCase.create_case_in_folder(folder, case_id="s-assets")
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    assets = FolderBackedCase.peek_case_assets(folder)
+    assert assets.folder == folder / "assets"
+    assert not (folder / ".case.lease").exists()
+
+
+def test_rehydrate_unregistered_carries_type_name(tmp_path):
+    folder = tmp_path / "case-unreg"
+    _case = SimpleCase.create_case_in_folder(folder)
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    # Isolated registry that does not know SimpleCase -> strict failure with the name.
+    with pytest.raises(UnregisteredCaseTypeError) as excinfo:
+        case_type_registry.rehydrate(folder, registry={})
+    assert excinfo.value.type_name == "SimpleCase"
+
+
+def test_fresh_registry_isolated_from_singleton():
+    reg = CaseTypeRegistry()
+    reg.register_case_types(TypedCase)
+    # Registering on a fresh instance must not leak into the module singleton.
+    assert reg.resolve_case_type("TypedCase") is TypedCase
+    assert case_type_registry.resolve_case_type("TypedCase") is None
+
+
+def test_constructing_wrong_class_raises_and_leaves_no_lease(tmp_path):
+    folder = tmp_path / "case-wrongclass"
+    _case = SimpleCase.create_case_in_folder(folder, case_id="w-1")
+    try:
+        pass
+    finally:
+        _case.case_detach()
+    # TypedCase also has a 'new' state, so without the gate this would silently succeed.
+    with pytest.raises(CaseTypeMismatchError) as excinfo:
+        TypedCase(folder)
+    assert excinfo.value.on_disk == "SimpleCase"
+    assert excinfo.value.loading_class == "TypedCase"
+    # Rejected before lease acquisition: nothing left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_init_on_uninitialized_folder_points_to_create(tmp_path):
+    folder = tmp_path / "case-empty"
+    folder.mkdir()
+    # Binding (__init__) is the load path, not inception: a folder with no record must
+    # fail loudly and name the method the caller actually wanted.
+    with pytest.raises(FileNotFoundError) as excinfo:
+        SimpleCase(folder)
+    msg = str(excinfo.value)
+    assert "create_case_in_folder()" in msg
+    assert "rehydrate" in msg
+    assert not (folder / ".case.lease").exists()
+
+
+def test_reclassify_to_succeeds_through_type_gate(tmp_path):
+    folder = tmp_path / "case-reclass"
+    case = SimpleCase.create_case_in_folder(folder, case_id="r-1")
+    fresh = case.case_reclassify_to(ReclassTarget)
+    try:
+        assert isinstance(fresh, ReclassTarget)
+        assert fresh.case_state == "new"
+        # New name is stamped in memory and persisted to disk.
+        assert fresh._record.case_object_type == "ReclassTarget"
+        assert (
+            FolderBackedCase.peek_case_record(folder).case_object_type
+            == "ReclassTarget"
+        )
+    finally:
+        fresh.case_detach()
+
+
+def test_missing_fsm_trigger_chokes_raises_at_class_definition():
+    with pytest.raises(MissingTriggerChokesError) as excinfo:
+
+        class NoChokesCase(FolderBackedCase):
+            asset_aliases = {}
+            fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
+
+            async def perform_begin(self, tctx):
+                pass
+
+    msg = str(excinfo.value)
+    assert "NoChokesCase" in msg
+    assert "fsm_trigger_chokes" in msg
+    assert "capacity-constrained" in msg
+
+
+def test_fsm_trigger_chokes_folded_into_spec():
+    class ChokedCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_state_chains = ["[*] --> new -- analyze --> done --> [*]"]
+        fsm_trigger_chokes = {
+            "analyze": {"cpu", "ms-graph-api"},
+        }
+
+        async def perform_analyze(self, tctx):
+            pass
+
+    assert ChokedCase._fsm.trigger_chokes == {
+        "analyze": frozenset({"cpu", "ms-graph-api"}),
+    }
+
+
+def test_unknown_trigger_in_fsm_trigger_chokes_raises():
+    with pytest.raises(FsmChainParseError) as excinfo:
+
+        class BadChokeCase(FolderBackedCase):
+            asset_aliases = {}
+            fsm_state_chains = ["[*] --> new -- analyze --> done --> [*]"]
+            fsm_trigger_chokes = {"typo_trigger": {"cpu"}}
+
+            async def perform_analyze(self, tctx):
+                pass
+
+    assert "typo_trigger" in str(excinfo.value)
+
+
+def test_missing_fsm_raises_actionable_error():
+    """A subclass that forgets fsm_state_chains (and doesn't override compile_fsm) must
+    fail loudly at class-definition time, naming the corrective action."""
+    with pytest.raises(MissingFsmError) as excinfo:
+
+        class NoFsmCase(FolderBackedCase):
+            asset_aliases = {}
+            fsm_trigger_chokes = {}
+            pass
+
+    msg = str(excinfo.value)
+    assert "NoFsmCase" in msg
+    assert "fsm_state_chains" in msg
+    assert "compile_fsm" in msg
+
+
+def test_create_requires_existing_parent(tmp_path):
+    folder = tmp_path / "missing-parent" / "case-009"
+    with pytest.raises(FileNotFoundError) as excinfo:
+        SimpleCase.create_case_in_folder(folder, case_id="c-009")
+    assert "Create/confirm the parent folder first" in str(excinfo.value)
+    assert not folder.exists()
+
+
+def test_create_reuses_existing_folder_with_unrelated_files(tmp_path):
+    folder = tmp_path / "case-010"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("unrelated")
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-010")
+    try:
+        assert case.case_id == "c-010"
+    finally:
+        case.case_detach()
+
+
+def test_create_rejects_existing_case_artifacts(tmp_path):
+    folder = tmp_path / "case-011"
+    folder.mkdir()
+    (folder / "events").mkdir()
+    with pytest.raises(FileExistsError) as excinfo:
+        SimpleCase.create_case_in_folder(folder, case_id="c-011")
+    assert "existing case artifacts" in str(excinfo.value)
+    assert "events" in str(excinfo.value)
+
+
+def test_assets_folder_and_asset_path(tmp_path):
+    folder = tmp_path / "case-012"
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-012")
+    try:
+        assert case.case_assets.folder == folder / "assets"
+        assert (
+            case.case_assets.asset_path("a/b.txt") == folder / "assets" / "a" / "b.txt"
+        )
+    finally:
+        case.case_detach()
+
+
+def test_assets_relative_path_from_absolute_and_relative(tmp_path):
+    folder = tmp_path / "case-013"
+    case = SimpleCase.create_case_in_folder(folder, case_id="c-013")
+    try:
+        abs_inside = folder / "assets" / "sub" / "x.txt"
+        assert case.case_assets.relative_path(abs_inside) == "sub/x.txt"
+        assert case.case_assets.relative_path("sub/./x.txt") == "sub/x.txt"
+        with pytest.raises(ValueError):
+            case.case_assets.relative_path(tmp_path / "outside.txt")
+    finally:
+        case.case_detach()
+
+
+def test_guard_method_convention_constructs(tmp_path):
+    """A `<token>#trigger` guard binds to `guard_<token>`; a correctly named async guard
+    lets the case construct cleanly."""
+
+    class GuardedCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == finish [funded] ==> done --> [*]"]
+
+        async def guard_funded(self, tctx):
+            return True
+
+    folder = tmp_path / "case-g1"
+    case = GuardedCase.create_case_in_folder(folder, case_id="g-1")
+    try:
+        assert case.case_state == "new"
+    finally:
+        case.case_detach()
+
+
+def test_orphan_guard_method_fails_construction(tmp_path):
+    """A `guard_`-prefixed method whose token maps to no chain guard is treated as a typo
+    and fails the build (orphan_detection defaults to error)."""
+
+    class TypoGuardCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == finish [funded] ==> done --> [*]"]
+
+        async def guard_funded(self, tctx):
+            return True
+
+        async def guard_fundedd(self, tctx):  # typo: funded
+            return True
+
+    folder = tmp_path / "case-g2"
+    with pytest.raises(FsmBindingError) as excinfo:
+        TypoGuardCase.create_case_in_folder(folder, case_id="g-2")
+    msg = str(excinfo.value)
+    assert "guard_fundedd" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_bare_trigger_named_method_fails_construction(tmp_path):
+    """A method named like an FSM trigger (instead of perform_<trigger>) is rejected at
+    first construction — transitions would otherwise skip-bind the real trigger."""
+
+    class CollidingTriggerCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == finish ==> done --> [*]"]
+
+        async def finish(self, tctx):  # bare trigger name — should be perform_finish
+            return None
+
+    folder = tmp_path / "case-trig-collision"
+    with pytest.raises(FsmBindingError) as excinfo:
+        CollidingTriggerCase.create_case_in_folder(folder, case_id="tc-1")
+    msg = str(excinfo.value)
+    assert "finish" in excinfo.value.trigger_collisions
+    assert "perform_finish" in msg
+    assert "collides" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_hook_missing_tctx_param_fails_construction(tmp_path):
+    """Every hook is dispatched with one `tctx` argument (send_event=True); a hook declared
+    without it is rejected at first construction rather than exploding at first transition."""
+
+    class NoTctxCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new -- begin --> open --> [*]"]
+
+        async def perform_begin(self):  # missing tctx
+            return None
+
+    folder = tmp_path / "case-arity"
+    with pytest.raises(FsmBindingError) as excinfo:
+        NoTctxCase.create_case_in_folder(folder, case_id="a-1")
+    msg = str(excinfo.value)
+    assert "perform_begin" in msg
+    assert "tctx" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_perform_hook_convention_wires_and_runs(tmp_path):
+    """An auto edge (`--`) requires `perform_<trigger>`; the method binds to the
+    transition's `before` and runs when the trigger fires."""
+
+    class PerformCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new -- begin --> open == finish ==> done --> [*]"]
+        performed = False
+
+        async def perform_begin(self, tctx):
+            self.performed = True
+
+    folder = tmp_path / "case-p1"
+    case = PerformCase.create_case_in_folder(folder, case_id="p-1")
+    try:
+        assert case.performed is False
+        asyncio.run(case.begin())
+        assert case.case_state == "open"
+        assert case.performed is True
+
+    finally:
+        case.case_detach()
+
+
+def test_legacy_underscore_perform_hook_is_rejected(tmp_path):
+    """The trigger action hook dropped its leading underscore. An auto edge whose action
+    method is still named `_perform_<trigger>` no longer satisfies the required
+    `perform_<trigger>`, so the build fails — a deliberate pre-release breaking change."""
+
+    class LegacyCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
+
+        async def _perform_begin(self, tctx):  # old name, no longer recognized
+            return None
+
+    folder = tmp_path / "case-legacy"
+    with pytest.raises(FsmBindingError) as excinfo:
+        LegacyCase.create_case_in_folder(folder, case_id="legacy-1")
+    msg = str(excinfo.value)
+    assert "perform_begin" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_sealed_member_override_fails_construction(tmp_path):
+    """A subclass that redefines a sealed base member (a reserved part of the core call
+    surface, e.g. `case_state`) is rejected at first construction with FsmBindingError —
+    the defensive guard that protects the base namespace from accidental shadowing."""
+
+    class ClobberCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+
+        def case_state(self):  # clobbers the sealed base member
+            return "nope"
+
+    folder = tmp_path / "case-sealed"
+    with pytest.raises(FsmBindingError) as excinfo:
+        ClobberCase.create_case_in_folder(folder, case_id="sealed-1")
+    msg = str(excinfo.value)
+    assert "case_state" in msg
+    assert "sealed" in msg
+    assert ("case_state", "ClobberCase") in excinfo.value.sealed
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
+def test_time_slug_generator_auto_bumps_on_same_millisecond(monkeypatch):
+    fixed_seconds = 1_700_000_000.123
+    monkeypatch.setattr(
+        "totodev_pub.folder_backed_case_support.case_id_generation.time.time",
+        lambda: fixed_seconds,
+    )
+    gen = TimeSlugCaseIDGenerator()
+    first = gen.generate()
+    second = gen.generate()
+    assert second != first
+    assert int(second, 36) == int(first, 36) + 1
+
+
+def test_uuid_generator_mints_unique_hex_ids():
+    gen = UUIDCaseIDGenerator()
+    first = gen.generate()
+    second = gen.generate()
+    assert first != second
+    for case_id in (first, second):
+        assert len(case_id) == 32
+        int(case_id, 16)  # pure lowercase hex, no dashes
+
+
+def test_create_case_mints_id_via_uuid_generator(tmp_path):
+    class UUIDCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+        case_id_generator = UUIDCaseIDGenerator()
+
+    case = UUIDCase.create_case_in_folder(tmp_path / "uuid-minted")
+    try:
+        assert len(case.case_id) == 32
+        int(case.case_id, 16)
+    finally:
+        case.case_detach()
+
+
+def test_create_case_mints_id_via_default_generator(tmp_path):
+    case = SimpleCase.create_case_in_folder(tmp_path / "minted")
+    try:
+        assert case.case_id  # non-empty slug
+        assert int(case.case_id, 36) > 0
+    finally:
+        case.case_detach()
+
+
+def test_explicit_case_id_bypasses_generator(tmp_path):
+    class NeverCalled(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            raise AssertionError("generator must not run when case_id is a literal string")
+
+    class NeverCalledCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+        case_id_generator = NeverCalled()
+
+    case = NeverCalledCase.create_case_in_folder(
+        tmp_path / "explicit", case_id="explicit-id-1",
+    )
+    try:
+        assert case.case_id == "explicit-id-1"
+    finally:
+        case.case_detach()
+
+
+def test_class_attribute_case_id_generator(tmp_path):
+    class StubGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            return "from-class-attr"
+
+    class ClassGenCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+        case_id_generator = StubGen()
+
+    case = ClassGenCase.create_case_in_folder(tmp_path / "class-gen")
+    try:
+        assert case.case_id == "from-class-attr"
+    finally:
+        case.case_detach()
+
+
+def test_per_call_generator_overrides_class_attribute(tmp_path):
+    """Passing a CaseIDGenerator instance as case_id overrides the class default."""
+
+    class ClassGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            return "from-class"
+
+    class CallGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            return "from-call"
+
+    class OverrideCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+        case_id_generator = ClassGen()
+
+    case = OverrideCase.create_case_in_folder(
+        tmp_path / "call-override", case_id=CallGen(),
+    )
+    try:
+        assert case.case_id == "from-call"
+    finally:
+        case.case_detach()
+
+
+def test_generator_receives_case_cls(tmp_path):
+    captured = {}
+
+    class CapturingGen(CaseIDGenerator):
+        def generate(self, case_cls=None) -> str:
+            captured["case_cls"] = case_cls
+            return "captured-id"
+
+    case = SimpleCase.create_case_in_folder(
+        tmp_path / "captured", case_id=CapturingGen(),
+    )
+    try:
+        assert case.case_id == "captured-id"
+        assert captured["case_cls"] is SimpleCase
+    finally:
+        case.case_detach()
+
+
+def test_default_generator_is_shared_across_case_classes(monkeypatch):
+    """Sibling classes sharing DEFAULT_CASE_ID_GENERATOR stay monotonic together."""
+    fixed_seconds = 1_700_000_000.123
+    monkeypatch.setattr(
+        "totodev_pub.folder_backed_case_support.case_id_generation.time.time",
+        lambda: fixed_seconds,
+    )
+    # Reset the shared singleton clock so this test is order-independent.
+    DEFAULT_CASE_ID_GENERATOR._last_ms = -1
+
+    class OtherCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
+
+    first = SimpleCase.case_id_generator.generate(case_cls=SimpleCase)
+    second = OtherCase.case_id_generator.generate(case_cls=OtherCase)
+    assert SimpleCase.case_id_generator is OtherCase.case_id_generator
+    assert SimpleCase.case_id_generator is DEFAULT_CASE_ID_GENERATOR
+    assert second != first
+    assert int(second, 36) == int(first, 36) + 1
+
+
+# ---------------------------------------------------------------------------
+# In-flight lease keepalive (the _LeaseKeepalive pulse), end-to-end via the case API.
+# Real-time tests that shrink the fixed TTL to ~0.3s so the work outlives the un-pulsed window.
+# ---------------------------------------------------------------------------
+
+
+def _use_short_ttl(monkeypatch, ttl=0.3):
+    """Shrink the (now-fixed) lease TTL for real-time keepalive tests. The TTL is no longer a
+    per-case seam, so patch BOTH module bindings the running code reads: the lease window
+    (folder_backed_case) and the pulse cadence (the factory). Pulse beats ~every ttl / 3."""
+    monkeypatch.setattr(_fbc, "DEFAULT_LEASE_TTL_SECS", ttl)
+    monkeypatch.setattr(_cmf, "DEFAULT_LEASE_TTL_SECS", ttl)
+
+
+class _SlowKeepaliveCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Slow work behind both an AUTO (`go`) and a MANUAL (`step`) edge. The tests pair this with
+    _use_short_ttl so the keepalive pulse is what keeps the lease from lapsing during the step."""
+
+    fsm_state_chains = ["[*] --> new -- go --> open == step ==> done --> [*]"]
+    sleep_secs: float = 0.0
+
+    async def perform_go(self, tctx):
+        if self.sleep_secs:
+            await asyncio.sleep(self.sleep_secs)
+
+    async def perform_step(self, tctx):
+        if self.sleep_secs:
+            await asyncio.sleep(self.sleep_secs)
+
+
+def test_case_advance_keeps_lease_alive_during_slow_auto_step(tmp_path, monkeypatch):
+    _use_short_ttl(monkeypatch)
+
+    async def scenario():
+        case = _SlowKeepaliveCase.create_case_in_folder(
+            tmp_path / "adv", case_id="adv-1"
+        )
+        try:
+            case.sleep_secs = 0.8  # outlives the 0.3s TTL
+            lease_path = case.case_folder / LEASE_NAME
+            task = asyncio.create_task(case.case_advance())
+            await asyncio.sleep(0.5)  # past one un-pulsed TTL window
+            assert HeartbeatLease.is_expired(lease_path) is False
+            result = await task
+            assert result.progressed
+            assert case.case_state == "open"
+            assert HeartbeatLease.is_expired(lease_path) is False
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_advance_raises_ownership_lost_not_folded(tmp_path, monkeypatch):
+    _use_short_ttl(monkeypatch)
+
+    async def scenario():
+        case = _SlowKeepaliveCase.create_case_in_folder(
+            tmp_path / "lost", case_id="lost-1"
+        )
+        try:
+            case.sleep_secs = 1.0
+            lease_path = case.case_folder / LEASE_NAME
+            task = asyncio.create_task(case.case_advance())
+            await asyncio.sleep(0.15)  # let the first pulse re-stamp our token
+            foreign = time.time() + 999  # another owner overwrites the lease
+            os.utime(lease_path, (foreign, foreign))
+            # Surfaced as a raise, NOT folded into AdvanceResult.exceptions.
+            with pytest.raises(OwnershipLostError):
+                await task
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_manual_trigger_keeps_lease_alive_during_slow_work(tmp_path, monkeypatch):
+    _use_short_ttl(monkeypatch)
+
+    async def scenario():
+        case = _SlowKeepaliveCase.create_case_in_folder(
+            tmp_path / "man", case_id="man-1"
+        )
+        try:
+            # Advance onto `open` first (fast), then fire the slow MANUAL edge directly.
+            case.sleep_secs = 0.0
+            await case.case_advance()
+            assert case.case_state == "open"
+            case.sleep_secs = 0.8
+            lease_path = case.case_folder / LEASE_NAME
+            task = asyncio.create_task(case.step())
+            await asyncio.sleep(0.5)
+            assert HeartbeatLease.is_expired(lease_path) is False
+            await task
+            assert case.case_state == "done"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Overloaded case_advance(trigger=..., trigger_kwargs=...): pinning a single
+# edge (auto OR manual) and firing it through the non-throwing reporter.
+# ---------------------------------------------------------------------------
+
+
+class _PinAutoCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Two AUTO ('--') edges leave `fork`, declared alpha-then-beta. Lets a test prove that
+    pinning fires the chosen edge (even the later one) rather than the sweep's first pick."""
+
+    fsm_state_chains = [
+        "[*] --> fork -- alpha --> done_a --> [*]",
+        "fork -- beta --> done_b --> [*]",
+    ]
+
+    async def perform_alpha(self, tctx):
+        pass
+
+    async def perform_beta(self, tctx):
+        pass
+
+
+class _OverloadCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """An AUTO edge (`go`), a MANUAL edge (`submit`), and a guarded AUTO edge
+    (`gated#approve`) — the full surface the overloaded case_advance() must drive. Hooks
+    record the kwargs they receive (to prove `trigger_kwargs` flows into `tctx.kwargs`), and
+    `fail_submit` lets a test force a manual-edge failure to check it is FOLDED, not raised."""
+
+    fsm_state_chains = ["[*] --> new -- go --> ready == submit ==> review -- approve [gated] --> done --> [*]"]
+    open_gate: bool = False
+    fail_submit: bool = False
+    go_kwargs: dict | None = None
+    submit_kwargs: dict | None = None
+
+    async def perform_go(self, tctx):
+        self.go_kwargs = dict(tctx.kwargs)
+
+    async def perform_submit(self, tctx):
+        self.submit_kwargs = dict(tctx.kwargs)
+        if self.fail_submit:
+            raise RuntimeError("submit boom")
+
+    async def perform_approve(self, tctx):
+        pass
+
+    async def guard_gated(self, tctx):
+        return self.open_gate
+
+
+def test_pinned_auto_trigger_fires_only_that_edge(tmp_path):
+    """trigger='beta' fires the LATER-declared auto edge; the unrestricted sweep would have
+    taken 'alpha' (first). A fresh case left to sweep confirms the default still picks alpha."""
+
+    async def scenario():
+        case = _PinAutoCase.create_case_in_folder(tmp_path / "pin", case_id="pin-1")
+        try:
+            result = await case.case_advance(trigger="beta")
+            assert result.progressed
+            assert result.trigger == "beta"
+            assert case.case_state == "done_b"
+
+        finally:
+            case.case_detach()
+        case = _PinAutoCase.create_case_in_folder(tmp_path / "sweep", case_id="pin-2")
+        try:
+            result = await case.case_advance()  # no pin -> first declared candidate
+            assert result.progressed
+            assert case.case_state == "done_a"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_pinned_auto_trigger_accepts_optional_kwargs(tmp_path):
+    """The softened contract: an AUTO edge MAY be pinned WITH trigger_kwargs, and those
+    kwargs reach the hook via tctx.kwargs (the no-argument sweep still gets an empty bag)."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "autokw", case_id="ak-1")
+        try:
+            result = await case.case_advance(trigger="go", trigger_kwargs={"x": 1})
+            assert result.progressed
+            assert case.case_state == "ready"
+            assert case.go_kwargs == {"x": 1}
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_pinned_manual_trigger_fires_and_passes_kwargs(tmp_path):
+    """A MANUAL ('==') edge can be driven through the reporter with trigger_kwargs, which
+    flow into the hook's tctx.kwargs — and the outcome is a normal progressed AdvanceResult."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "man", case_id="m-1")
+        try:
+            await case.case_advance()  # go: new -> ready
+            assert case.case_state == "ready"
+            result = await case.case_advance(
+                trigger="submit", trigger_kwargs={"note": "hi"}
+            )
+            assert result.progressed
+            assert result.trigger == "submit"
+            assert case.case_state == "review"
+            assert case.submit_kwargs == {"note": "hi"}
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_pinned_manual_without_kwargs_raises(tmp_path):
+    """Firing a MANUAL edge through case_advance() WITHOUT trigger_kwargs is misuse: it
+    raises ValueError with a message that names the trigger and how to fix it."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "manbad", case_id="m-2")
+        try:
+            await case.case_advance()  # go: new -> ready
+            with pytest.raises(ValueError) as excinfo:
+                await case.case_advance(trigger="submit")
+            msg = str(excinfo.value)
+            assert "submit" in msg
+            assert "trigger_kwargs" in msg
+            assert case.case_state == "ready"  # nothing fired
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_pinned_manual_failure_is_folded_not_raised(tmp_path):
+    """A pinned MANUAL edge whose work raises has its exception FOLDED into the
+    AdvanceResult (the reporter contract), not propagated; the case stays in its source state."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "manfail", case_id="m-3")
+        try:
+            await case.case_advance()  # go: new -> ready
+            case.fail_submit = True
+            result = await case.case_advance(trigger="submit", trigger_kwargs={})
+            assert not result.progressed
+            assert result.failed
+            assert result.trigger == "submit"
+            assert any(isinstance(e, RuntimeError) for e in result.exceptions)
+            assert case.case_state == "ready"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_unknown_trigger_raises_valueerror(tmp_path):
+    """A trigger name that is not on the FSM at all is a programming error -> ValueError,
+    with a message that lists the known triggers to aid debugging."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "unk", case_id="u-1")
+        try:
+            with pytest.raises(ValueError) as excinfo:
+                await case.case_advance(trigger="nonesuch")
+            msg = str(excinfo.value)
+            assert "nonesuch" in msg
+            assert "go" in msg and "submit" in msg  # known triggers are listed
+            assert case.case_state == "new"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_pinned_trigger_not_available_from_state_is_non_advance(tmp_path):
+    """A REAL trigger that simply has no edge out of the current state is a plain
+    non-advance — nothing fires, nothing raises, and it is NOT reported as blocked."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "na", case_id="na-1")
+        try:
+            # 'submit' leaves `ready`, not `new`; from `new` it is unavailable.
+            result = await case.case_advance(trigger="submit", trigger_kwargs={})
+            assert not result.progressed
+            assert not result.blocked
+            assert result.exceptions == ()
+            assert case.case_state == "new"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_pinned_auto_guard_decline_does_not_synthesize_blocked(tmp_path):
+    """The #2 fix: when a pinned AUTO edge's guard declines, the call is a plain non-advance
+    and does NOT synthesize AutoAdvanceBlocked — even though the unrestricted sweep on the
+    same (timed-escape-less) state WOULD, because pinning one edge cannot prove the state is
+    walled off. Opening the gate then lets the very same pinned trigger progress."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "gate", case_id="g-1")
+        try:
+            await case.case_advance()  # go: new -> ready
+            await case.submit()  # manual direct: ready -> review
+            assert case.case_state == "review"
+
+            # Pinned + guard declined: non-advance, NOT blocked.
+            pinned = await case.case_advance(trigger="approve")
+            assert not pinned.progressed
+            assert not pinned.blocked
+            assert case.case_state == "review"
+
+            # Unrestricted sweep on the same state IS provably blocked (only an auto edge,
+            # guard-declined, and no timed escape).
+            swept = await case.case_advance()
+            assert not swept.progressed
+            assert swept.blocked
+
+            # Open the gate and the same pinned trigger now fires.
+            case.open_gate = True
+            opened = await case.case_advance(trigger="approve")
+            assert opened.progressed
+            assert case.case_state == "done"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# case_was_blocked: process-lifetime sticky observation of the last unrestricted
+# AutoAdvanceBlocked proof. See docs/superpowers/specs/2026-07-16-case-was-blocked-design.md
+# ---------------------------------------------------------------------------
+
+
+class _TimedEscapeCase(FolderBackedCase):
+    """waiting has a declining guarded auto exit PLUS a @DWELL timed escape, so an
+    unrestricted no-op is never AutoAdvanceBlocked."""
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = [
+        "[*] --> new -- go --> waiting -- proceed [gated] --> done --> [*]",
+        "waiting -- timeout [@DWELL>30d] --> done --> [*]",
+    ]
+    open_gate: bool = False
+
+    async def perform_go(self, tctx):
+        pass
+
+    async def perform_proceed(self, tctx):
+        pass
+
+    async def perform_timeout(self, tctx):
+        pass
+
+    async def guard_gated(self, tctx):
+        return self.open_gate
+
+
+def test_case_was_blocked_false_on_create(tmp_path):
+    case = _OverloadCase.create_case_in_folder(tmp_path / "wb0", case_id="wb-0")
+    try:
+        assert case.case_was_blocked is False
+    finally:
+        case.case_detach()
+
+
+def test_case_was_blocked_set_by_unrestricted_blocked_sweep(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb1", case_id="wb-1")
+        try:
+            await case.case_advance()  # new -> ready
+            await case.submit()  # ready -> review
+            assert case.case_was_blocked is False
+
+            swept = await case.case_advance()
+            assert swept.blocked
+            assert case.case_was_blocked is True
+
+            # Idempotent: another blocked sweep keeps it True.
+            swept2 = await case.case_advance()
+            assert swept2.blocked
+            assert case.case_was_blocked is True
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_progress(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb2", case_id="wb-2")
+        try:
+            await case.case_advance()
+            await case.submit()
+            await case.case_advance()
+            assert case.case_was_blocked is True
+
+            case.open_gate = True
+            result = await case.case_advance()
+            assert result.progressed
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_failed_attempt(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb3", case_id="wb-3")
+        try:
+            await case.case_advance()
+            await case.submit()
+            await case.case_advance()
+            assert case.case_was_blocked is True
+
+            case.open_gate = True
+
+            async def boom(tctx):
+                raise RuntimeError("approve boom")
+
+            case.perform_approve = boom  # type: ignore[method-assign]
+            result = await case.case_advance()
+            assert result.failed
+            assert not result.progressed
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_restricted_advance(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb4", case_id="wb-4")
+        try:
+            await case.case_advance()
+            await case.submit()
+            await case.case_advance()
+            assert case.case_was_blocked is True
+
+            # Pinned decline: clears the sticky flag even though nothing fired.
+            pinned = await case.case_advance(trigger="approve")
+            assert not pinned.progressed
+            assert not pinned.blocked
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_cleared_by_direct_trigger(tmp_path):
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "wb5", case_id="wb-5")
+        try:
+            await case.case_advance()  # new -> ready
+            # Force sticky True without a blocked sweep (ready is advanceable via manual).
+            case._was_blocked = True
+            assert case.case_was_blocked is True
+
+            await case.submit()  # direct manual trigger
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_was_blocked_unchanged_on_timed_escape_noop(tmp_path):
+    async def scenario():
+        case = _TimedEscapeCase.create_case_in_folder(tmp_path / "wb6", case_id="wb-6")
+        try:
+            await case.case_advance()  # new -> waiting
+            assert case.case_state == "waiting"
+
+            # Stale True must survive a plain unrestricted no-op (dwell not ripe, gate closed).
+            case._was_blocked = True
+            result = await case.case_advance()
+            assert not result.progressed
+            assert not result.blocked
+            assert not result.failed
+            assert case.case_was_blocked is True
+
+            # Starting False stays False.
+            case._was_blocked = False
+            result2 = await case.case_advance()
+            assert not result2.blocked
+            assert case.case_was_blocked is False
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_trigger_kwargs_without_trigger_raises(tmp_path):
+    """Passing trigger_kwargs with no trigger has no edge to flow into -> ValueError."""
+
+    async def scenario():
+        case = _OverloadCase.create_case_in_folder(tmp_path / "kwonly", case_id="k-1")
+        try:
+            with pytest.raises(ValueError) as excinfo:
+                await case.case_advance(trigger_kwargs={})
+            assert "trigger_kwargs" in str(excinfo.value)
+            assert case.case_state == "new"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_pinned_unknown_trigger_on_terminal_case_is_noop(tmp_path):
+    """Terminal-case precedence: the terminal short-circuit runs BEFORE trigger validation, so
+    even an unknown trigger on a terminal case is a silent no-op rather than a ValueError."""
+
+    async def scenario():
+        case = _PinAutoCase.create_case_in_folder(tmp_path / "terminal", case_id="c-1")
+        try:
+            await case.case_advance(trigger="alpha")
+            assert case.case_is_terminal
+            result = await case.case_advance(trigger="bogus")  # would raise if live
+            assert not result.progressed
+            assert result.exceptions == ()
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Non-reentrancy guard: at most one FSM trigger invocation in flight per live
+# object at a time. See CaseTransitionInFlightError / _on_prepare_fsm_event.
+# ---------------------------------------------------------------------------
+
+
+class _ReentrancyCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """AUTO edge `go` blocks on an injected gate (asyncio.Event, set by the test after
+    creation) so a test can hold ONE transition in flight and attempt a second,
+    concurrent trigger call while the first is still awaiting."""
+    fsm_state_chains = ["[*] --> new -- go --> open == finish ==> done --> [*]"]
+
+    async def perform_go(self, tctx):
+        await self._gate.wait()
+
+
+def test_direct_trigger_call_raises_when_reentrant(tmp_path):
+    """A direct `await case.<trigger>()` while another trigger is already in flight on
+    the SAME object raises CaseTransitionInFlightError immediately (fail-fast, not
+    queued) — and does not pollute the event log or count toward @FAIL."""
+
+    async def scenario():
+        case = _ReentrancyCase.create_case_in_folder(
+            tmp_path / "reent-1", case_id="r-1"
+        )
+        try:
+            case._gate = asyncio.Event()
+            task = asyncio.create_task(case.go())
+            await asyncio.sleep(
+                0.01
+            )  # let it reach perform_go and start awaiting the gate
+            assert case._transition_in_flight is True
+
+            start = time.monotonic()
+            with pytest.raises(CaseTransitionInFlightError) as excinfo:
+                await case.go()
+            elapsed = time.monotonic() - start
+            assert elapsed < 0.1  # rejected before ever touching the gate/guard
+            assert excinfo.value.case_id == "r-1"
+            assert excinfo.value.active_trigger == "go"
+            # Rejected BEFORE any guard/condition ran for this call: nothing logged.
+            assert case._journal.count_fails_this_dwell() == 0
+
+            case._gate.set()
+            result = await task  # the FIRST call completes normally
+            assert result is True
+            assert case.case_state == "open"
+            assert (
+                case._transition_in_flight is False
+            )  # guard released after completion
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_case_advance_raises_when_reentrant_not_folded_into_result(tmp_path):
+    """The same guard applies to case_advance(): a reentrant call RAISES rather than
+    returning an AdvanceResult with the error folded into `exceptions` — mirrors how
+    OwnershipLostError is surfaced."""
+
+    async def scenario():
+        case = _ReentrancyCase.create_case_in_folder(
+            tmp_path / "reent-2", case_id="r-2"
+        )
+        try:
+            case._gate = asyncio.Event()
+            task = asyncio.create_task(case.case_advance())
+            await asyncio.sleep(0.01)
+
+            with pytest.raises(CaseTransitionInFlightError):
+                await case.case_advance()
+
+            case._gate.set()
+            result = await task
+            assert result.progressed
+            assert result.trigger == "go"
+            assert result.exceptions == ()  # the rejection never touched this result
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+class _FlakyOnceCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Auto edge whose work raises exactly once, to verify the reentrancy guard is
+    released even when the guarded transition itself fails. Needs an explicit @FAIL
+    tolerance above 1 — an auto edge with no @FAIL annotation gets an implicit
+    @FAIL<1 (one attempt, no retry), which would otherwise block the SECOND attempt
+    regardless of the reentrancy guard and make this test's intent ambiguous."""
+    fsm_state_chains = ["[*] --> new -- go [@FAIL<3] --> done --> [*]"]
+    fail_once: bool = True
+
+    async def perform_go(self, tctx):
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("boom")
+
+
+def test_guard_releases_after_failed_transition(tmp_path):
+    async def scenario():
+        case = _FlakyOnceCase.create_case_in_folder(tmp_path / "flaky", case_id="f-1")
+        try:
+            result1 = await case.case_advance()
+            assert result1.failed
+            assert isinstance(result1.exceptions[0], RuntimeError)
+            assert case._transition_in_flight is False  # released despite the failure
+
+            result2 = await case.case_advance()  # retry now succeeds
+            assert result2.progressed
+            assert case.case_state == "done"
+
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+class _StampCase(FolderBackedCase):
+    flexible_asset_alias_loading = True
+    asset_aliases = {
+    'rlist': AssetSpec(relative_path="receipts/rlist.json",
+            loader=lambda p: p.read_text()),
+}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
+
+    async def perform_begin(self, tctx):
+        pass
+
+
+def test_missing_asset_schema_raises_at_class_definition():
+    with pytest.raises(MissingAssetSchemaError):
+
+        class UndeclaredCase(FolderBackedCase):
+            fsm_trigger_chokes = {}
+            fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
+
+            async def perform_begin(self, tctx):
+                pass
+
+
+def test_resolve_asset_book_projects_strings():
+    class DeclCase(FolderBackedCase):
+        flexible_asset_alias_loading = True
+        asset_aliases = {
+    'rlist': AssetSpec(relative_path="receipts/Overall--rlist.json",
+                loader=lambda p: p),
+}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
+
+        async def perform_begin(self, tctx):
+            pass
+
+    assert DeclCase._resolve_asset_book().to_record() == {
+        "rlist": {"path": "receipts/Overall--rlist.json", "loader": "Callable"}
+    }
+
+
+def test_creation_stamps_asset_aliases_into_record(tmp_path):
+    (tmp_path / "case").mkdir()
+    case = _StampCase.create_case_in_folder(tmp_path / "case" / "s1")
+    try:
+        assert case._record.asset_aliases == {
+            "rlist": {"path": "receipts/rlist.json", "loader": "Callable"}
+        }
+    finally:
+        case.case_detach()
+
+
+def test_bind_passes_specs_to_live_assets(tmp_path):
+    (tmp_path / "case").mkdir()
+    case = _StampCase.create_case_in_folder(tmp_path / "case" / "s2")
+    try:
+        assert case.case_assets.registered_aliases() == ["rlist"]
+    finally:
+        case.case_detach()
+
+
+# ---------------------------------------------------------------------------
+# Same-state (self-loop) edges + AdvanceResult.progressed = successful commit
+# ---------------------------------------------------------------------------
+
+
+def test_advance_result_progressed_is_successful_commit_not_state_rename():
+    from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
+
+    assert AdvanceResult("a", "b", trigger="go").progressed
+    assert bool(AdvanceResult("a", "b", trigger="go"))
+    # Same-state success still counts as progress.
+    same = AdvanceResult("a", "a", trigger="tick")
+    assert same.progressed and bool(same)
+    assert same.initial_state == same.final_state
+    # Failed attempt: trigger set but not progressed.
+    failed = AdvanceResult("a", "a", trigger="tick", exceptions=(RuntimeError("x"),))
+    assert failed.failed and not failed.progressed and not bool(failed)
+    # Pure no-op.
+    noop = AdvanceResult("a", "a")
+    assert not noop.progressed and not bool(noop)
+
+
+class _SelfLoopCase(FolderBackedCase):
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    """Guarded auto self-loop that declines after two ticks so `finish` can fire."""
+    fsm_state_chains = ["[*] --> ready -- tick [still] --> ready -- finish --> done --> [*]"]
+    ticks: int = 0
+    fail_tick: bool = False
+
+    async def guard_still(self, tctx):
+        return self.ticks < 2
+
+    async def perform_tick(self, tctx):
+        if self.fail_tick:
+            raise RuntimeError("tick boom")
+        self.ticks += 1
+
+    async def perform_finish(self, tctx):
+        pass
+
+
+def test_guarded_auto_self_loop_progresses_without_state_rename(tmp_path):
+    async def scenario():
+        case = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-1", case_id="sl-1")
+        try:
+            result = await case.case_advance()
+            assert result.trigger == "tick"
+            assert result.progressed
+            assert result.initial_state == result.final_state == "ready"
+            assert case.ticks == 1
+            lt = case._journal.last_transition()
+            assert lt is not None
+            assert lt.from_state == "ready"
+            assert lt.to_state == "ready"
+            assert lt.trigger == "tick"
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_failed_auto_self_loop_is_not_progressed(tmp_path):
+    async def scenario():
+        case = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-2", case_id="sl-2")
+        try:
+            case.fail_tick = True
+            result = await case.case_advance()
+            assert result.trigger == "tick"
+            assert result.failed
+            assert not result.progressed
+            assert case.case_state == "ready"
+            assert case.ticks == 0
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())
+
+
+def test_self_loop_guard_decline_lets_sibling_auto_edge_and_drive_finish(tmp_path):
+    from case_test_utils import drive_to_completion
+
+    async def scenario():
+        case = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-3", case_id="sl-3")
+        try:
+            r1 = await case.case_advance()
+            assert r1.trigger == "tick" and r1.progressed and case.ticks == 1
+            r2 = await case.case_advance()
+            assert r2.trigger == "tick" and r2.progressed and case.ticks == 2
+            # Guard now declines; unrestricted sweep should take `finish`.
+            r3 = await case.case_advance()
+            assert r3.trigger == "finish" and r3.progressed
+            assert case.case_state == "done"
+
+            case2 = _SelfLoopCase.create_case_in_folder(tmp_path / "sl-4", case_id="sl-4")
+            try:
+                last = await drive_to_completion(case2)
+                assert case2.case_state == "done"
+                assert last is not None and last.progressed and last.trigger == "finish"
+                assert case2.ticks == 2
+            finally:
+                case2.case_detach()
+        finally:
+            case.case_detach()
+
+    asyncio.run(scenario())

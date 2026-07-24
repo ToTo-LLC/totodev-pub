@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 import time
 from typing import Generator
 
+pytest.importorskip("luigi")  # 'pipes' extra; skip when luigi is unavailable
+
 import luigi
 
 from totodev_pub.pipes.toto_pipe_factory import ToToPipeFactory
