@@ -1030,7 +1030,12 @@ class FsmChainSpec:
         names in its body, binding fails — a subclass that wrote `def case_state(self)` has
         silently broken the base. This catches only class-body definitions (methods,
         properties, class attributes); a purely runtime `self.case_state = ...` reassignment
-        is out of scope. A no-op when either argument is empty/None."""
+        is out of scope. A no-op when either argument is empty/None.
+
+        TRIGGER COLLISIONS — each DSL trigger name must be free on `obj`. The transitions
+        library skip-binds (with a warning) when a same-named attribute already exists, so a
+        hand-written `def ingest(...)` would silently steal the trigger. That is almost
+        always a mistaken `perform_<trigger>`; we reject it here instead."""
         if orphan_detection not in {"off", "warn", "error"}:
             raise ValueError("orphan_detection must be one of {'off', 'warn', 'error'}")
         missing: dict[str, tuple[str, str, str]] = {}
@@ -1075,8 +1080,17 @@ class FsmChainSpec:
         )
         bad_arity = self._find_bad_arity_hook_methods(obj) if require_tctx else []
         sealed = self._find_sealed_overrides(obj, sealed_names, sealed_owner)
+        # Same predicate transitions uses in Machine._checked_assignment: any existing
+        # attribute blocks bind of the convenience trigger method.
+        trigger_collisions = [
+            trigger for trigger in self.triggers
+            if getattr(obj, trigger, None) is not None
+        ]
 
-        if missing or sync or bad_arity or sealed or (orphan_detection == "error" and orphaned):
+        if (
+            missing or sync or bad_arity or sealed or trigger_collisions
+            or (orphan_detection == "error" and orphaned)
+        ):
             raise FsmBindingError(
                 type(obj).__name__,
                 missing=list(missing.values()),
@@ -1084,6 +1098,7 @@ class FsmChainSpec:
                 orphaned=orphaned if orphan_detection == "error" else [],
                 bad_arity=bad_arity,
                 sealed=sealed,
+                trigger_collisions=trigger_collisions,
             )
         if orphan_detection == "warn" and orphaned:
             warnings.warn(

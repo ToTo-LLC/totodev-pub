@@ -46,6 +46,33 @@ def test_missing_hook_for_manual_trigger_is_allowed():
     spec.validate_object_compatibility(Carrier())
 
 
+def test_bare_trigger_named_member_is_rejected():
+    """A carrier method named like an FSM trigger would block transitions from binding
+    the real trigger; authors almost always meant perform_<trigger> instead."""
+    spec = StateChainParser.parse(["[*] --> new == finish ==> done --> [*]"])
+
+    class Carrier:
+        async def finish(self, tctx):
+            return None
+
+    with pytest.raises(FsmBindingError) as excinfo:
+        spec.validate_object_compatibility(Carrier())
+    assert "finish" in excinfo.value.trigger_collisions
+    msg = str(excinfo.value)
+    assert "perform_finish" in msg
+    assert "collides" in msg
+
+
+def test_perform_hook_without_bare_trigger_member_binds_cleanly():
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
+
+    class Carrier:
+        async def perform_assign(self, tctx):
+            return None
+
+    spec.validate_object_compatibility(Carrier())
+
+
 def test_required_auto_hook_must_be_async():
     spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 

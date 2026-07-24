@@ -409,6 +409,11 @@ class FsmBindingError(Exception):
       * BAD_ASSERTION — a `case_assert_*` method violates the assertion convention
         (unknown state, missing slug, `async def`, or missing the `ltx` parameter).
         See validate_case_assertion_methods in case_assertions.py.
+      * TRIGGER_COLLISION — the carrier already defines a member whose name matches an FSM
+        trigger. The transitions library would skip-bind the real trigger (warning only) and
+        leave the author's method in place, so calling `case.<trigger>()` would not advance
+        the FSM. Authors almost always meant `perform_<trigger>` (the trigger's work hook);
+        trigger methods themselves are auto-created and must not be declared.
 
     The whole point is a loud, early, unambiguous failure: future developers WILL write a sync
     guard, misspell a method name, forget the `tctx` parameter, or clobber a base member, and
@@ -416,7 +421,7 @@ class FsmBindingError(Exception):
     message at construction time.
 
     Carries `carrier_name` and structured `missing` / `sync` / `orphaned` / `bad_arity` /
-    `sealed` / `bad_assertions` lists for programmatic inspection."""
+    `sealed` / `bad_assertions` / `trigger_collisions` lists for programmatic inspection."""
 
     # transition-dict slot -> human label, for readable messages.
     _SLOT_LABEL = {
@@ -431,7 +436,7 @@ class FsmBindingError(Exception):
 
     def __init__(
         self, carrier_name: str, *, missing=None, sync=None, orphaned=None, bad_arity=None,
-        sealed=None, bad_assertions=None,
+        sealed=None, bad_assertions=None, trigger_collisions=None,
     ):
         self.carrier_name = carrier_name
         self.missing = list(missing or [])
@@ -440,6 +445,7 @@ class FsmBindingError(Exception):
         self.bad_arity = list(bad_arity or [])
         self.sealed = list(sealed or [])
         self.bad_assertions = list(bad_assertions or [])
+        self.trigger_collisions = list(trigger_collisions or [])
         lines = [f"{carrier_name!r} is not a valid carrier for its FSM:"]
         for name, slot, trigger in self.missing:
             label = self._SLOT_LABEL.get(slot, slot)
@@ -480,4 +486,13 @@ class FsmBindingError(Exception):
             )
         for name, reason in self.bad_assertions:
             lines.append(f"  - assertion method {name!r}: {reason}")
+        for trigger in self.trigger_collisions:
+            lines.append(
+                f"  - member {trigger!r} collides with FSM trigger {trigger!r}; the "
+                "transitions library will not bind the real trigger onto this object, so "
+                f"calling {trigger}() would run your method instead of advancing the FSM. "
+                "Trigger methods are auto-created — do not declare them. If you meant the "
+                f"trigger's work, define `async def perform_{trigger}(self, tctx): ...` and "
+                f"remove {trigger!r}."
+            )
         super().__init__("\n".join(lines))

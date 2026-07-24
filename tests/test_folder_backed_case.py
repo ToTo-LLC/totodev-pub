@@ -628,6 +628,29 @@ def test_orphan_guard_method_fails_construction(tmp_path):
     assert not (folder / ".case.lease").exists()
 
 
+def test_bare_trigger_named_method_fails_construction(tmp_path):
+    """A method named like an FSM trigger (instead of perform_<trigger>) is rejected at
+    first construction — transitions would otherwise skip-bind the real trigger."""
+
+    class CollidingTriggerCase(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == finish ==> done --> [*]"]
+
+        async def finish(self, tctx):  # bare trigger name — should be perform_finish
+            return None
+
+    folder = tmp_path / "case-trig-collision"
+    with pytest.raises(FsmBindingError) as excinfo:
+        CollidingTriggerCase.create_case_in_folder(folder, case_id="tc-1")
+    msg = str(excinfo.value)
+    assert "finish" in excinfo.value.trigger_collisions
+    assert "perform_finish" in msg
+    assert "collides" in msg
+    # Binding runs before any disk/lease I/O, so nothing is left claimed.
+    assert not (folder / ".case.lease").exists()
+
+
 def test_hook_missing_tctx_param_fails_construction(tmp_path):
     """Every hook is dispatched with one `tctx` argument (send_event=True); a hook declared
     without it is rejected at first construction rather than exploding at first transition."""
