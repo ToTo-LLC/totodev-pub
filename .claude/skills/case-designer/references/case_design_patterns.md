@@ -105,9 +105,9 @@ expiry (#4) so a consumer that never shows up doesn't park the case forever.
 valuable (quality tracking, training data, dispute trail).
 
 **Shape:** a `FileMappedPydanticMixin` model (e.g. `rating: int`,
-`approved: bool`, `comments: str = ""`) behind an
-`AssetSpec(alias="user_review", relative_path="user_review.yaml",
-loader=UserReview, states={...}, keep=True)`. `keep=True` because feedback is
+`approved: bool`, `comments: str = ""`) behind
+`asset_aliases = {"user_review": AssetSpec(relative_path="user_review.yaml",
+loader=UserReview, states={...}, keep=True)}`. `keep=True` because feedback is
 almost always worth surviving termination. Often paired with a manual gate
 (pattern 1c / 7) so the case waits for the review to be submitted.
 
@@ -174,7 +174,7 @@ possibly at different rates or with per-file outcomes.
 **Shape:** a manifest asset — a `FileMappedPydanticMixin` model holding a list
 of per-file entries (filename, source, size/hash, `status: "pending" |
 "processed" | "failed"`, error note). Declared as a single-file
-`AssetSpec(alias="manifest", ...)` alongside the `many=True` alias that globs
+`AssetSpec(...)` alongside the `many=True` alias that globs
 the actual incoming files. Pair with **#0 (Inert intake)** — populate the
 manifest from `add_attachments` (or equivalent), not from
 `create_case_in_folder`.

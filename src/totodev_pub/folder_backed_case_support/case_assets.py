@@ -157,7 +157,7 @@ class CaseAssets:
             raise ValueError(
                 f"Asset {alias!r} is many=True; use load_dataclasses()."
             )
-        return self._load(spec, self.dataclass_path(alias))
+        return self._load(alias, self.dataclass_path(alias))
 
     def load_dataclasses(self, alias: str) -> list:
         """Resolve a ``many=True`` alias to zero or more files and deserialize each.
@@ -169,14 +169,14 @@ class CaseAssets:
             raise ValueError(
                 f"Asset {alias!r} is not many=True; use load_dataclass()."
             )
-        return [self._load(spec, path) for path in self.dataclass_paths(alias)]
+        return [self._load(alias, path) for path in self.dataclass_paths(alias)]
 
     def load_dataclass_file(self, relative_path: str | Path):
         """Deserialize ONE explicit file, using the loader of the spec whose pattern
         matches it. ValueError if no/ambiguous spec; FileNotFoundError if absent."""
         rel = self.relative_path(relative_path)
         matches = [
-            s for s in self._asset_specs.values()
+            (alias, s) for alias, s in self._asset_specs.items()
             if rel == s.relative_path
             or (any(ch in s.relative_path for ch in "*?[")
                 and self._rule_matches(rel, s.relative_path))
@@ -185,23 +185,26 @@ class CaseAssets:
             raise ValueError(f"No registered asset spec matches {rel!r}.")
         if len(matches) > 1:
             raise ValueError(
-                f"{rel!r} matches multiple asset specs: {[m.alias for m in matches]}."
+                f"{rel!r} matches multiple asset specs: "
+                f"{[alias for alias, _ in matches]}."
             )
+        alias, _spec = matches[0]
         path = self.asset_path(rel)
         if not path.exists():
             raise FileNotFoundError(f"Asset file {path} does not exist.")
-        return self._load(matches[0], path)
+        return self._load(alias, path)
 
-    def _load(self, spec: AssetSpec, path: Path):
+    def _load(self, alias: str, path: Path):
+        spec = self._require_spec(alias)
         if not path.exists():
             raise FileNotFoundError(
-                f"Asset file {path} (alias {spec.alias!r}) does not exist."
+                f"Asset file {path} (alias {alias!r}) does not exist."
             )
         loader = spec.loader
         if loader is None:
             if not self._flexible:
                 raise AssetSchemaError(
-                    f"alias {spec.alias!r} has no loader and flexible loading is off."
+                    f"alias {alias!r} has no loader and flexible loading is off."
                 )
             return LazyLoadedFileData(str(path))
         if loader is Path:

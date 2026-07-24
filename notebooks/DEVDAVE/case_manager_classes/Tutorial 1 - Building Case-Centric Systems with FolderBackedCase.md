@@ -279,14 +279,20 @@ class InquiryCase(FolderBackedCase):
     """
 
     # 2. The on-disk data objects other tiers may read — and WHEN they may trust them.
-    asset_aliases = [
-        AssetSpec(relative_path="analysis.yaml", loader=InquiryAnalysis,
-                  states=POST_TRIAGE, keep=True),
-        AssetSpec(relative_path="expert_answers.yaml", loader=ExpertAnswers,
-                  states={"drafted", "waiting_for_approval", "approved"}),
-        AssetSpec(relative_path="reply_draft.md", loader=lambda p: p.read_text(),
-                  states={"waiting_for_approval", "approved", "sent"}, keep=True),
-    ]
+    asset_aliases = {
+        'analysis': AssetSpec(
+            relative_path="analysis.yaml", loader=InquiryAnalysis,
+            states=POST_TRIAGE, keep=True
+        ),
+        'expert_answers': AssetSpec(
+            relative_path="expert_answers.yaml", loader=ExpertAnswers,
+            states={"drafted", "waiting_for_approval", "approved"}
+        ),
+        'reply_draft': AssetSpec(
+            relative_path="reply_draft.md", loader=lambda p: p.read_text(),
+            states={"waiting_for_approval", "approved", "sent"}, keep=True
+        ),
+    }
 
     # 3. Which capacity-constrained resources each step draws on.
     #    The case only NAMES them; the pool supplies the numeric limits.

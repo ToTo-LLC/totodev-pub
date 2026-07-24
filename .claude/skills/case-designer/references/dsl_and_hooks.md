@@ -323,15 +323,19 @@ def case_assert_<state>_<slug>(self, ltx) -> None | str:
 
 ## `AssetSpec` fields (`asset_aliases`)
 
+Class-level ``asset_aliases`` is a ``dict[str, AssetSpec]`` — the alias is the
+dict key, not a field on the spec:
+
 ```python
-AssetSpec(
-    alias="...",            # required, no path separators or glob chars
-    relative_path="...",    # path under assets/, or a glob when many=True
-    loader=SomeModel,       # a FileMappedPydanticMixin subclass, `Path` (identity), or a Callable[[Path], Any]
-    states={"state_a", ...},# states in which this asset is trustworthy; omit only if flexible_asset_alias_loading=True
-    keep=True,               # declare here (not in on_terminating) for assets ALWAYS worth keeping past termination
-    many=False,              # True => relative_path is a glob; case_load_assets() returns a list
-)
+asset_aliases = {
+    "ticket": AssetSpec(
+        relative_path="...",    # path under assets/, or a glob when many=True
+        loader=SomeModel,       # FileMappedPydanticMixin subclass, Path, or Callable[[Path], Any]
+        states={"state_a", ...},# trustworthy FSM states; omit only if flexible_asset_alias_loading=True
+        keep=True,              # always keep past termination (not persisted on the record)
+        many=False,             # True => relative_path is a glob; case_load_assets() returns a list
+    ),
+}
 ```
 
 `flexible_asset_alias_loading = True` on the class relaxes the loader/states
@@ -405,9 +409,9 @@ class MyCase(FolderBackedCase):
         "result": frozenset({"done"}),
     })
     fsm_state_chains = [...]
-    asset_aliases = [
-        AssetSpec(..., states=asset_trust_states["result"], ...),
-    ]
+    asset_aliases = {
+        "result": AssetSpec(..., states=asset_trust_states["result"], ...),
+    }
     fsm_trigger_chokes = {...}
 
     def _not_implemented(self, retval: Any = None) -> Any:

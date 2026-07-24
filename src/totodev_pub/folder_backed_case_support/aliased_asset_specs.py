@@ -61,53 +61,53 @@ class AliasedAssetSpecs:
         *,
         flexible: bool,
     ) -> AliasedAssetSpecs:
-        """Normalize a class-level `asset_aliases` declaration: a list (or tuple) of
-        AssetSpec instances, `[]` when the case has no protocol-elevated data objects.
-        `flexible` is accepted for symmetry with `validate_against_fsm` and is not
-        otherwise used here — omitted loader/states are always legal per-entry;
-        strict-mode enforcement of their presence happens at FSM-binding time."""
-        if not isinstance(raw, (list, tuple)):
+        """Normalize a class-level `asset_aliases` declaration: a ``dict`` mapping
+        alias name → ``AssetSpec``, or ``{}`` when the case has no protocol-elevated
+        data objects. `flexible` is accepted for symmetry with
+        `validate_against_fsm` and is not otherwise used here — omitted
+        loader/states are always legal per-entry; strict-mode enforcement of
+        their presence happens at FSM-binding time."""
+        if isinstance(raw, (list, tuple)):
             raise AssetSchemaError(
-                "asset_aliases must be a list (or tuple) of AssetSpec instances; "
-                f"got {type(raw).__name__}. Use [] when the case declares none."
+                "asset_aliases must be a dict[str, AssetSpec] (alias → spec); "
+                f"got {type(raw).__name__}. Use {{}} when the case declares none. "
+                'Example: asset_aliases = {"ticket": AssetSpec('
+                'relative_path="ticket.yaml", loader=TicketForm, '
+                'states={"new", "open"})}.'
+            )
+        if not isinstance(raw, dict):
+            raise AssetSchemaError(
+                "asset_aliases must be a dict[str, AssetSpec] (alias → spec); "
+                f"got {type(raw).__name__}. Use {{}} when the case declares none."
             )
 
         specs: dict[str, AssetSpec] = {}
-
-        def _add(spec: AssetSpec) -> None:
-            if spec.alias in specs:
+        for alias, entry in raw.items():
+            if not isinstance(alias, str):
                 raise AssetSchemaError(
-                    f"duplicate alias {spec.alias!r}: both "
-                    f"{specs[spec.alias].relative_path!r} and "
-                    f"{spec.relative_path!r} resolve to it."
+                    f"asset_aliases keys must be strings (alias names); "
+                    f"got {type(alias).__name__}."
                 )
-            specs[spec.alias] = spec
-
-        for index, entry in enumerate(raw):
             if not isinstance(entry, AssetSpec):
                 raise AssetSchemaError(
-                    "asset_aliases list entries must be AssetSpec instances; got "
-                    f"{type(entry).__name__} at index {index}. Construct with "
-                    "AssetSpec(alias=..., relative_path=..., loader=..., states=..., ...)."
+                    f"asset_aliases[{alias!r}] must be an AssetSpec instance; got "
+                    f"{type(entry).__name__}. Construct with "
+                    "AssetSpec(relative_path=..., loader=..., states=..., ...)."
                 )
-            rel = _norm_rel(entry.relative_path)
-            alias = entry.alias
             validate_alias(alias, context=f"AssetSpec({entry.relative_path!r})")
+            rel = _norm_rel(entry.relative_path)
             if entry.many and not _is_glob(rel):
                 raise AssetSchemaError(
                     f"alias {alias!r}: many=True requires a glob relative_path; "
                     f"got {rel!r}."
                 )
             states = _normalize_states(entry.states, context=f"alias {alias!r}")
-            _add(
-                AssetSpec(
-                    alias=alias,
-                    relative_path=rel,
-                    loader=entry.loader,
-                    states=states,
-                    keep=bool(entry.keep),
-                    many=bool(entry.many),
-                )
+            specs[alias] = AssetSpec(
+                relative_path=rel,
+                loader=entry.loader,
+                states=states,
+                keep=bool(entry.keep),
+                many=bool(entry.many),
             )
         return cls(specs)
 
@@ -136,7 +136,6 @@ class AliasedAssetSpecs:
                 frozenset(states_raw) if states_raw is not None else None
             )
             specs[alias] = AssetSpec(
-                alias=alias,
                 relative_path=path,
                 loader=loader,
                 states=states,

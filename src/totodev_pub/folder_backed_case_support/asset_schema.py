@@ -3,9 +3,10 @@
 
 """Declarative asset aliases: AssetSpec and shared parsing helpers.
 
-A class-level `asset_aliases` declaration is a list (or tuple) of AssetSpec
-instances, normalized by AliasedAssetSpecs
-(folder_backed_case_support.aliased_asset_specs)."""
+A class-level `asset_aliases` declaration is a ``dict[str, AssetSpec]``
+(alias name → spec), normalized by AliasedAssetSpecs
+(folder_backed_case_support.aliased_asset_specs). The alias is the dict key —
+it is not a field on AssetSpec."""
 
 from __future__ import annotations
 
@@ -31,23 +32,22 @@ PATH_LOADER_SENTINEL = "Path"
 @dataclass(frozen=True, kw_only=True)
 class AssetSpec:
     """One declared on-disk data object: a `relative_path` under assets/ (an exact
-    path OR a glob pattern), a required lookup `alias`, and a `loader` that is
-    either a FileMappedPydanticMixin subclass, ``Path`` (identity — return path
-    objects), any Callable[[Path], Any], or None (load generically via
-    LazyLoadedFileData when flexible loading is enabled).
+    path OR a glob pattern), and a `loader` that is either a
+    FileMappedPydanticMixin subclass, ``Path`` (identity — return path objects),
+    any Callable[[Path], Any], or None (load generically via LazyLoadedFileData
+    when flexible loading is enabled).
 
-    All fields are keyword-only — construct as
-    ``AssetSpec(alias=..., relative_path=..., loader=..., states=..., keep=...,
-    many=...)``.
+    The lookup alias is **not** on this object — it is the key in the class-level
+    ``asset_aliases: dict[str, AssetSpec]`` map. Construct as
+    ``AssetSpec(relative_path=..., loader=..., states=..., keep=..., many=...)``.
 
-    `alias` is always required. `states` names the FSM states in which this asset
-    is trustworthy (semantics #3); None means unconstrained (guard is a no-op).
-    `keep` is declaration-only sugar for retention seeding at create — it is not
+    `states` names the FSM states in which this asset is trustworthy
+    (semantics #3); None means unconstrained (guard is a no-op). `keep` is
+    declaration-only sugar for retention seeding at create — it is not
     persisted on the case record. `many=True` means the path is a glob and
     ``case_load_assets`` returns a list (empty when nothing matches); it requires
     a glob `relative_path`."""
 
-    alias: str
     relative_path: str
     loader: type | Callable[[Path], Any] | None = None
     states: frozenset[str] | None = None

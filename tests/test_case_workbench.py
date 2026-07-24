@@ -33,7 +33,7 @@ def _isolate_case_registry():
 
 @case_type_registry.register
 class WbTicketCase(FolderBackedCase):
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = [
         "[*] --> created -- triage --> triaged -- price --> priced == approve ==> approved --> [*]",
@@ -55,7 +55,7 @@ class WbTicketCase(FolderBackedCase):
 
 @case_type_registry.register
 class WbGuardedCase(FolderBackedCase):
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {"go": frozenset({"slot_a"})}
     fsm_state_chains = ["[*] --> start -- go [ready] --> done --> [*]"]
 
@@ -505,7 +505,7 @@ def test_class_index_case_modules(tmp_path, monkeypatch):
 
             @case_type_registry.register
             class IndexedMiniCase(FolderBackedCase):
-                asset_aliases = []
+                asset_aliases = {}
                 fsm_trigger_chokes = {}
                 fsm_state_chains = ["[*] --> a -- go --> b --> [*]"]
                 async def perform_go(self, tctx):
@@ -562,7 +562,7 @@ async def test_run_stop_on_problems(tmp_path):
 
     @case_type_registry.register
     class ProblemCase(FolderBackedCase):
-        asset_aliases = []
+        asset_aliases = {}
         fsm_trigger_chokes = {}
         fsm_state_chains = ["[*] --> a -- go --> b -- go2 --> c --> [*]"]
 

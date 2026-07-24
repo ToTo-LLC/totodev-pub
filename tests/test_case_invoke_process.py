@@ -29,7 +29,7 @@ def _isolate_case_registry():
 
 
 class SimpleCase(FolderBackedCase):
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 

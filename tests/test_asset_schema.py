@@ -22,37 +22,36 @@ class _Rec(BaseModel, FileMappedPydanticMixin):
 
 
 def test_asset_spec_is_frozen():
-    spec = AssetSpec(alias="rlist", relative_path="receipts/rlist.json")
-    assert spec.alias == "rlist"
+    spec = AssetSpec(relative_path="receipts/rlist.json")
     assert spec.relative_path == "receipts/rlist.json"
     assert spec.loader is None
     assert spec.states is None
     assert spec.keep is False
     assert spec.many is False
+    with pytest.raises(Exception):
+        spec.relative_path = "other.json"  # type: ignore[misc]
 
 
 def test_asset_spec_states_keep_and_many():
     spec = AssetSpec(
-        alias="ticket", relative_path="ticket.yaml", loader=_Rec,
+        relative_path="ticket.yaml", loader=_Rec,
         states=frozenset({"new", "open"}), keep=True,
     )
     assert spec.states == frozenset({"new", "open"})
     assert spec.keep is True
-    many = AssetSpec(
-        alias="pages", relative_path="pages/*.png", loader=Path, many=True,
-    )
+    many = AssetSpec(relative_path="pages/*.png", loader=Path, many=True)
     assert many.many is True
     assert many.loader is Path
 
 
 def test_asset_spec_is_keyword_only():
     with pytest.raises(TypeError):
-        AssetSpec("rlist", "receipts/rlist.json")  # noqa — deliberate positional
+        AssetSpec("receipts/rlist.json")  # noqa — deliberate positional
 
 
-def test_asset_spec_requires_alias():
+def test_asset_spec_requires_relative_path():
     with pytest.raises(TypeError):
-        AssetSpec(relative_path="ticket.yaml", loader=_Rec)  # noqa — alias omitted
+        AssetSpec(loader=_Rec)  # noqa — relative_path omitted
 
 
 def test_loader_name_filemapped_class():

@@ -111,16 +111,15 @@ asset_trust_states: ClassVar[Mapping[str, frozenset[str]]] = MappingProxyType({
     "index_entries": frozenset({"indexed", "changed"}),
 })
 
-asset_aliases = [
-    AssetSpec(
-        alias="fingerprint",
+asset_aliases = {
+    "fingerprint": AssetSpec(
         relative_path="fingerprint.yaml",
         loader=FileFingerprint,
         states=asset_trust_states["fingerprint"],
         keep=False,
     ),
     # ...
-]
+}
 ```
 
 ### Anti-pattern

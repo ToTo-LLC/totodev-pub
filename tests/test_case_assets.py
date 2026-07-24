@@ -22,7 +22,7 @@ def _write_json(assets, rel, obj):
 def test_load_dataclass_filemapped(tmp_path):
     assets = CaseAssets(
         tmp_path / "c1",
-        asset_specs={"doc": AssetSpec(alias="doc", relative_path="sub/doc.json", loader=_Doc)},
+        asset_specs={"doc": AssetSpec(relative_path="sub/doc.json", loader=_Doc)},
     )
     _write_json(assets, "sub/doc.json", {"name": "hi", "n": 3})
     doc = assets.load_dataclass("doc")
@@ -34,8 +34,7 @@ def test_load_dataclass_callable(tmp_path):
     assets = CaseAssets(
         tmp_path / "c2",
         asset_specs={
-            "raw": AssetSpec(
-                alias="raw", relative_path="raw.json", loader=lambda p: p.read_text(),
+            "raw": AssetSpec(relative_path="raw.json", loader=lambda p: p.read_text(),
             )
         },
     )
@@ -47,7 +46,7 @@ def test_load_dataclass_path_loader(tmp_path):
     assets = CaseAssets(
         tmp_path / "c2b",
         asset_specs={
-            "page": AssetSpec(alias="page", relative_path="inbox/page.png", loader=Path),
+            "page": AssetSpec(relative_path="inbox/page.png", loader=Path),
         },
     )
     path = assets.write("inbox/page.png", b"png")
@@ -57,7 +56,7 @@ def test_load_dataclass_path_loader(tmp_path):
 def test_load_dataclass_missing_file_raises(tmp_path):
     assets = CaseAssets(
         tmp_path / "c3",
-        asset_specs={"doc": AssetSpec(alias="doc", relative_path="doc.json", loader=_Doc)},
+        asset_specs={"doc": AssetSpec(relative_path="doc.json", loader=_Doc)},
     )
     with pytest.raises(FileNotFoundError):
         assets.load_dataclass("doc")
@@ -73,8 +72,7 @@ def test_glob_paths_and_file_loading(tmp_path):
     assets = CaseAssets(
         tmp_path / "c5",
         asset_specs={
-            "scans": AssetSpec(
-                alias="scans", relative_path="scans/*.json", loader=_Doc,
+            "scans": AssetSpec(relative_path="scans/*.json", loader=_Doc,
             ),
         },
     )
@@ -92,8 +90,7 @@ def test_load_dataclasses_many_returns_list(tmp_path):
     assets = CaseAssets(
         tmp_path / "c5b",
         asset_specs={
-            "scans": AssetSpec(
-                alias="scans", relative_path="scans/*.json", loader=_Doc, many=True,
+            "scans": AssetSpec(relative_path="scans/*.json", loader=_Doc, many=True,
             ),
         },
     )
@@ -109,8 +106,7 @@ def test_load_dataclasses_empty_when_no_matches(tmp_path):
     assets = CaseAssets(
         tmp_path / "c5c",
         asset_specs={
-            "attachments": AssetSpec(
-                alias="attachments", relative_path="attachments/*", loader=Path,
+            "attachments": AssetSpec(relative_path="attachments/*", loader=Path,
                 many=True,
             ),
         },
@@ -121,7 +117,7 @@ def test_load_dataclasses_empty_when_no_matches(tmp_path):
 def test_load_dataclasses_rejects_singular_alias(tmp_path):
     assets = CaseAssets(
         tmp_path / "c5d",
-        asset_specs={"doc": AssetSpec(alias="doc", relative_path="doc.json", loader=_Doc)},
+        asset_specs={"doc": AssetSpec(relative_path="doc.json", loader=_Doc)},
     )
     with pytest.raises(ValueError, match="not many=True"):
         assets.load_dataclasses("doc")
@@ -130,7 +126,7 @@ def test_load_dataclasses_rejects_singular_alias(tmp_path):
 def test_flexible_loading_returns_lazy(tmp_path):
     assets = CaseAssets(
         tmp_path / "c6",
-        asset_specs={"cfg": AssetSpec(alias="cfg", relative_path="cfg.json")},
+        asset_specs={"cfg": AssetSpec(relative_path="cfg.json")},
         flexible_asset_alias_loading=True,
     )
     _write_json(assets, "cfg.json", {"feature": True})

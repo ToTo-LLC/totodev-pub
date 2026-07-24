@@ -123,16 +123,18 @@ class FolderBackedCaseInterface(ABC):
                 terminal --> [*]
             \"\"\"
 
-            asset_aliases = [
-                AssetSpec(alias="ticket", relative_path="ticket_info.yaml",
-                          loader=TicketInfo, states={"new", "open", "closed"},
-                          keep=True),
-                AssetSpec(alias="conversation",
-                          relative_path="resolution-log/customer--convo.md",
-                          loader=ChatLog, states={"open"}),
-                AssetSpec(alias="attachments", relative_path="attachments/*",
-                          loader=Path, states={"open"}, many=True),
-            ]
+            asset_aliases = {
+                "ticket": AssetSpec(
+                    relative_path="ticket_info.yaml",
+                    loader=TicketInfo, states={"new", "open", "closed"},
+                    keep=True),
+                "conversation": AssetSpec(
+                    relative_path="resolution-log/customer--convo.md",
+                    loader=ChatLog, states={"open"}),
+                "attachments": AssetSpec(
+                    relative_path="attachments/*",
+                    loader=Path, states={"open"}, many=True),
+            }
             fsm_trigger_chokes = {"open_ticket": {"cpu"}}
             ##### END CLASS CONFIG #####
 
@@ -332,11 +334,12 @@ class FolderBackedCaseInterface(ABC):
     ``case_type_spec()`` (class method on ``FolderBackedCase``).
     """
 
-    asset_aliases: list[AssetSpec] | None = None
+    asset_aliases: dict[str, AssetSpec] | None = None
     """Required declaration of the case's on-disk data objects (see
-    ``aliased_asset_specs``). ``None`` means "not yet declared" — a concrete
-    subclass MUST set this (even to ``[]``). External readers of compiled
-    behavior: ``case_type_spec()`` (class method on ``FolderBackedCase``).
+    ``aliased_asset_specs``): a map of alias name → ``AssetSpec``. ``None`` means
+    "not yet declared" — a concrete subclass MUST set this (even to ``{}``).
+    External readers of compiled behavior: ``case_type_spec()`` (class method
+    on ``FolderBackedCase``).
     """
 
     flexible_asset_alias_loading: bool = False
@@ -680,7 +683,7 @@ class FolderBackedCaseInterface(ABC):
         This object provides access to files in that directory and facilitates
         loading of structured data files. Declaring ``asset_aliases`` (see
         ``case_load_asset()``) is convenience sugar, not a requirement — a
-        subclass is free to leave it ``[]`` and manage its files by hand.
+        subclass is free to leave it ``{}`` and manage its files by hand.
         Without a declared alias (or for unguarded access even with one), use
         this directly: ``case_assets.asset_path(relative_path)`` for the
         filepath, or ``case_assets.read(relative_path)`` / your own parsing
@@ -738,8 +741,9 @@ class FolderBackedCaseInterface(ABC):
         Trust-checked like ``case_load_asset``. Raises ``ValueError`` if the
         alias is not ``many=True``. Typical declaration::
 
-            AssetSpec(alias="attachments", relative_path="attachments/*",
+            AssetSpec(relative_path="attachments/*",
                       loader=Path, states={"open"}, many=True)
+            # keyed under asset_aliases["attachments"]
         """
         ...
 

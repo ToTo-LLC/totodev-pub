@@ -98,29 +98,26 @@ class PermitApplicationCase(FolderBackedCase):
         * == cancel ==> cancelled --> [*]
     """
 
-    asset_aliases = [
-        AssetSpec(
-            alias="application",
+    asset_aliases = {
+        "application": AssetSpec(
             relative_path="application.yaml",
             loader=ApplicationData,
             states=asset_trust_states["application"],
             keep=True,
         ),
-        AssetSpec(
-            alias="eligibility",
+        "eligibility": AssetSpec(
             relative_path="eligibility.yaml",
             loader=EligibilityAssessment,
             states=asset_trust_states["eligibility"],
             keep=True,
         ),
-        AssetSpec(
-            alias="supporting_docs",
+        "supporting_docs": AssetSpec(
             relative_path="documents/*",
             loader=Path,
             states=asset_trust_states["supporting_docs"],
             many=True,
         ),
-    ]
+    }
 
     fsm_trigger_chokes = {
         # Name a resource only for triggers whose perform_ contends for a

@@ -17,7 +17,7 @@ from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import Tie
 
 class IntakeCase(FolderBackedCase):
     """Generic intake meant to be reclassified out of existence at 'sorted'."""
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = [
         "[*] --> start -- sort --> sorted",
@@ -30,7 +30,7 @@ class IntakeCase(FolderBackedCase):
 
 class RoutedCase(FolderBackedCase):
     """Specialized continuation; shares the 'sorted' handoff state (as initial)."""
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> sorted -- finish --> done --> [*]"]
 
@@ -40,7 +40,7 @@ class RoutedCase(FolderBackedCase):
 
 class UnrelatedCase(FolderBackedCase):
     """No shared states with IntakeCase — reclassify must be refused."""
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> alpha -- go --> omega --> [*]"]
 

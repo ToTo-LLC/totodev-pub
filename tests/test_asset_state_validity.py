@@ -28,28 +28,19 @@ class ChatLog(BaseModel, FileMappedPydanticMixin):
 
 class TicketCase(FolderBackedCase):
     fsm_state_chains = ["[*] --> new == open_ticket ==> open == close_ticket ==> closed --> [*]"]
-    asset_aliases = [
-        AssetSpec(
-            alias="ticket",
-            relative_path="ticket.yaml",
+    asset_aliases = {
+    'ticket': AssetSpec(relative_path="ticket.yaml",
             loader=TicketForm,
             states={"new", "open", "closed"},
-            keep=True,
-        ),
-        AssetSpec(
-            alias="conversation",
-            relative_path="customer--conversation.json",
+            keep=True),
+    'conversation': AssetSpec(relative_path="customer--conversation.json",
             loader=ChatLog,
-            states={"open"},
-        ),
-        AssetSpec(
-            alias="attachments",
-            relative_path="attachments/*",
+            states={"open"}),
+    'attachments': AssetSpec(relative_path="attachments/*",
             loader=Path,
             states={"new", "open"},
-            many=True,
-        ),
-    ]
+            many=True),
+}
     fsm_trigger_chokes = {}
 
     async def perform_open_ticket(self, tctx):
@@ -62,13 +53,11 @@ class TicketCase(FolderBackedCase):
 class FlexibleCase(FolderBackedCase):
     flexible_asset_alias_loading = True
     fsm_state_chains = ["[*] --> new == go ==> done --> [*]"]
-    asset_aliases = [
-        AssetSpec(alias="unguarded", relative_path="unguarded.json"),
-        AssetSpec(
-            alias="guarded", relative_path="guarded.json", loader=TicketForm,
-            states={"new"},
-        ),
-    ]
+    asset_aliases = {
+    'unguarded': AssetSpec(relative_path="unguarded.json"),
+    'guarded': AssetSpec(relative_path="guarded.json", loader=TicketForm,
+            states={"new"}),
+}
     fsm_trigger_chokes = {}
 
     async def perform_go(self, tctx):
@@ -77,15 +66,12 @@ class FlexibleCase(FolderBackedCase):
 
 class ReclassSource(FolderBackedCase):
     fsm_state_chains = ["[*] --> new == go ==> shared --> [*]"]
-    asset_aliases = [
-        AssetSpec(
-            alias="old",
-            relative_path="old.yaml",
+    asset_aliases = {
+    'old': AssetSpec(relative_path="old.yaml",
             loader=TicketForm,
             states={"new", "shared"},
-            keep=True,
-        ),
-    ]
+            keep=True),
+}
     fsm_trigger_chokes = {}
 
     async def perform_go(self, tctx):
@@ -94,12 +80,10 @@ class ReclassSource(FolderBackedCase):
 
 class ReclassTarget(FolderBackedCase):
     fsm_state_chains = ["[*] --> new == go ==> shared --> [*]"]
-    asset_aliases = [
-        AssetSpec(
-            alias="new", relative_path="new.yaml", loader=ChatLog,
-            states={"shared"}, keep=True,
-        ),
-    ]
+    asset_aliases = {
+    'new': AssetSpec(relative_path="new.yaml", loader=ChatLog,
+            states={"shared"}, keep=True),
+}
     fsm_trigger_chokes = {}
 
     async def perform_go(self, tctx):
@@ -108,7 +92,7 @@ class ReclassTarget(FolderBackedCase):
 
 def test_empty_declaration_warns(caplog):
     class EmptyAliasesCase(FolderBackedCase):
-        asset_aliases = []
+        asset_aliases = {}
         fsm_trigger_chokes = {}
         fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
@@ -124,12 +108,10 @@ def test_build_time_validation_at_class_definition():
     with pytest.raises(AssetSchemaError, match="opne"):
 
         class BadStateCase(FolderBackedCase):
-            asset_aliases = [
-                AssetSpec(
-                    alias="a", relative_path="a.json", loader=TicketForm,
-                    states={"opne"},
-                ),
-            ]
+            asset_aliases = {
+    'a': AssetSpec(relative_path="a.json", loader=TicketForm,
+                    states={"opne"}),
+}
             fsm_trigger_chokes = {}
             fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 

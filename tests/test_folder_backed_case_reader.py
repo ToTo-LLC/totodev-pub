@@ -22,7 +22,7 @@ from totodev_pub.lazy_loaded_file_data import LazyLoadedFileData
 
 
 class SimpleCase(FolderBackedCase):
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
@@ -187,7 +187,7 @@ def test_reader_has_no_write_surface(tmp_path):
 class SlowWorkCase(FolderBackedCase):
     """One auto edge whose perform sleeps — enough to observe a trigger in flight."""
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new -- work --> done --> [*]"]
 
@@ -258,12 +258,10 @@ def test_live_case_prep_properties(tmp_path):
 
 class ReceiptCase(FolderBackedCase):
     flexible_asset_alias_loading = True
-    asset_aliases = [
-        AssetSpec(
-            alias="rlist", relative_path="receipts/rlist.json",
-            loader=lambda p: p.read_text(),
-        ),
-    ]
+    asset_aliases = {
+    'rlist': AssetSpec(relative_path="receipts/rlist.json",
+            loader=lambda p: p.read_text()),
+}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 
@@ -294,12 +292,10 @@ class ReceiptListRecord(BaseModel, FileMappedPydanticMixin):
 
 class TypedReceiptCase(FolderBackedCase):
     flexible_asset_alias_loading = True
-    asset_aliases = [
-        AssetSpec(
-            alias="rlist", relative_path="receipts/rlist.json",
-            loader=ReceiptListRecord,
-        ),
-    ]
+    asset_aliases = {
+    'rlist': AssetSpec(relative_path="receipts/rlist.json",
+            loader=ReceiptListRecord),
+}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new -- begin --> done --> [*]"]
 

@@ -36,12 +36,10 @@ class SampleCase(FolderBackedCase):
         * == cancel ==> cancelled --> [*]
     """
     fsm_trigger_chokes = {"approve": {"finance-api"}}
-    asset_aliases = [
-        AssetSpec(
-            alias="ticket", relative_path="ticket.yaml", loader=Path,
-            states={"reviewing", "done"}, keep=True,
-        ),
-    ]
+    asset_aliases = {
+    'ticket': AssetSpec(relative_path="ticket.yaml", loader=Path,
+            states={"reviewing", "done"}, keep=True),
+}
 
     async def perform_intake(self, tctx):
         """Pull the raw ticket payload into the case folder."""
@@ -75,7 +73,7 @@ class SampleCase(FolderBackedCase):
 
 
 class UndocumentedCase(FolderBackedCase):
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new -- go --> done --> [*]"]
 

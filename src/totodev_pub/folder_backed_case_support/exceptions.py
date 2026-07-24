@@ -272,16 +272,16 @@ class MissingFsmError(Exception):
 
 class AssetSchemaError(Exception):
     """Raised when a FolderBackedCase subclass's `asset_aliases` declaration is malformed,
-    or when a declared alias fails FSM-state validation at first instantiation: a non-list
-    declaration, a non-AssetSpec list entry, an empty or invalid alias, ``many=True``
-    without a glob path, a duplicate alias, unknown state names, missing loader/states
+    or when a declared alias fails FSM-state validation at first instantiation: a non-dict
+    declaration, a non-AssetSpec value, an empty or invalid alias key, ``many=True``
+    without a glob path, unknown state names, missing loader/states
     in strict mode, or valid-in-terminal without keep=True. The message names the
     specific offence and how to fix it."""
 
 
 class MissingAssetSchemaError(Exception):
     """Raised at class-definition time for any FolderBackedCase subclass that never
-    declared `asset_aliases`. Declaring nothing is still declaring: set an empty list if
+    declared `asset_aliases`. Declaring nothing is still declaring: set an empty dict if
     the case has no protocol-elevated data objects. Legal only on `FolderBackedCase`
     itself, exactly like MissingFsmError."""
 
@@ -291,9 +291,9 @@ class MissingAssetSchemaError(Exception):
             f"{carrier_name!r} does not declare its asset aliases. Set `asset_aliases` on "
             "the class to the data objects this case elevates to the cross-process trust "
             "protocol, e.g. "
-            '`asset_aliases = [{"path": "ticket.yaml", "loader": TicketForm, '
-            '"states": {"new", "open"}}]`; declare an empty list (`asset_aliases = []`) '
-            "if this case has none."
+            '`asset_aliases = {"ticket": AssetSpec(relative_path="ticket.yaml", '
+            'loader=TicketForm, states={"new", "open"})}`; declare an empty dict '
+            "(`asset_aliases = {}`) if this case has none."
         )
 
 

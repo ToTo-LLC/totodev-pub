@@ -46,7 +46,7 @@ def _isolate_case_registry():
 
 class AutoCase(FolderBackedCase):
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """Two auto edges to a terminal: progresses on every step, then closes."""
     fsm_state_chains = ["[*] --> s0 -- step --> s1 -- step2 --> s2 --> [*]"]
@@ -60,7 +60,7 @@ class AutoCase(FolderBackedCase):
 
 class LongAutoCase(FolderBackedCase):
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """Four auto edges to a terminal: progresses on every step, then closes.
     Long enough to observe several consecutive eager-paced beats before the
@@ -83,7 +83,7 @@ class LongAutoCase(FolderBackedCase):
 class ManualCase(FolderBackedCase):
 
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """Manual-only (no auto exit): not advanceable -> accelerated demotion."""
     fsm_state_chains = ["[*] --> waiting == push ==> done --> [*]"]
@@ -92,7 +92,7 @@ class ManualCase(FolderBackedCase):
 class GuardedCase(FolderBackedCase):
 
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """Has an auto exit (advanceable) whose guard always declines: blocked, normal ladder."""
     fsm_state_chains = ["[*] --> hold -- go [blockit] --> done --> [*]"]
@@ -107,7 +107,7 @@ class GuardedCase(FolderBackedCase):
 class FailCase(FolderBackedCase):
 
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """Auto edge whose work raises, with retry room (@FAIL<5): repeated failures."""
     fsm_state_chains = ["[*] --> start -- tryit [@FAIL<5] --> done --> [*]"]
@@ -119,7 +119,7 @@ class FailCase(FolderBackedCase):
 class AlertProgressCase(FolderBackedCase):
 
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """One step that logs an alert AND progresses to a terminal (exercises event order)."""
     fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
@@ -131,7 +131,7 @@ class AlertProgressCase(FolderBackedCase):
 class BlockingCase(FolderBackedCase):
 
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """Auto step that blocks on an injected gate, to hold a case in-flight."""
     fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
@@ -142,7 +142,7 @@ class BlockingCase(FolderBackedCase):
 
 class BlockingThenManualCase(FolderBackedCase):
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     """Blocking auto step into a state with a manual exit: lets a test queue a pinned
     trigger behind an in-flight step."""
@@ -154,7 +154,7 @@ class BlockingThenManualCase(FolderBackedCase):
 
 class ChokedBlockingCase(FolderBackedCase):
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {"step": {"cpu"}}
     fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
@@ -164,7 +164,7 @@ class ChokedBlockingCase(FolderBackedCase):
 
 class CpuChokedCase(FolderBackedCase):
 
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {"step": {"cpu"}}
     fsm_state_chains = ["[*] --> s0 -- step --> s1 --> [*]"]
 
@@ -478,7 +478,7 @@ def test_attach_fire_runs_pinned_trigger_on_sweep(tmp_path):
 def test_attach_fire_multiple_apply_one_per_beat(tmp_path):
     async def body():
         class ChainManual(FolderBackedCase):
-            asset_aliases = []
+            asset_aliases = {}
             fsm_trigger_chokes = {}
             fsm_state_chains = ["[*] --> s0 == a ==> s1 == b ==> s2 --> [*]"]
 

@@ -247,7 +247,7 @@ def _isolate_case_registry():
 # ---------------------------------------------------------------------------
 
 class SweepCase(FolderBackedCase):
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
@@ -519,7 +519,7 @@ def test_vanished_assertion_file_is_journaled_not_raised(tmp_path):
 # ---------------------------------------------------------------------------
 
 class WiredCase(FolderBackedCase):
-    asset_aliases = []
+    asset_aliases = {}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
@@ -572,7 +572,7 @@ def test_end_to_end_sweeps_on_real_transitions(tmp_path):
 
 def test_assertion_failure_never_disturbs_the_machine(tmp_path):
     class FailingAssertCase(FolderBackedCase):
-        asset_aliases = []
+        asset_aliases = {}
         fsm_trigger_chokes = {}
         fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
@@ -593,7 +593,7 @@ def test_assertion_failure_never_disturbs_the_machine(tmp_path):
 
 def test_orphan_assertion_method_fails_at_bind(tmp_path):
     class OrphanAssertCase(FolderBackedCase):
-        asset_aliases = []
+        asset_aliases = {}
         fsm_trigger_chokes = {}
         fsm_state_chains = ["[*] --> new == begin ==> done --> [*]"]
 
@@ -625,13 +625,11 @@ from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 
 
 class AssetCheckCase(FolderBackedCase):
-    asset_aliases = [
-        AssetSpec(alias="widget", relative_path="widget.txt", loader=Path, states={"open"}),
-        AssetSpec(
-            alias="items", relative_path="items/*", loader=Path,
-            states={"open"}, many=True,
-        ),
-    ]
+    asset_aliases = {
+    'widget': AssetSpec(relative_path="widget.txt", loader=Path, states={"open"}),
+    'items': AssetSpec(relative_path="items/*", loader=Path,
+            states={"open"}, many=True),
+}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
     # Deliberately NO case_assert_open_* methods: proves the check runs even
@@ -700,12 +698,10 @@ class ReportForm(BaseModel, FileMappedPydanticMixin):
 
 
 class ManyAssetFailCase(FolderBackedCase):
-    asset_aliases = [
-        AssetSpec(
-            alias="reports", relative_path="reports/*.yaml", loader=ReportForm,
-            states={"open"}, many=True,
-        ),
-    ]
+    asset_aliases = {
+    'reports': AssetSpec(relative_path="reports/*.yaml", loader=ReportForm,
+            states={"open"}, many=True),
+}
     fsm_trigger_chokes = {}
     fsm_state_chains = ["[*] --> new == begin ==> open == finish ==> done --> [*]"]
 
