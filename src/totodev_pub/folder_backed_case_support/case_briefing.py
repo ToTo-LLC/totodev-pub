@@ -571,9 +571,13 @@ def _fmt_trust_states(trust_states: Optional[frozenset]) -> str:
     return ", ".join(f"`{s}`" for s in sorted(trust_states))
 
 
-def _fmt_can_go_to(dests: list[str]) -> str:
-    """Sparse Can-go-to cell: individually backticked dests, blank when none."""
-    return ", ".join(f"`{s}`" for s in dests)
+def _fmt_can_go_to(dests: list[tuple[str, bool]]) -> str:
+    """Can-go-to cell: dest names sorted; bold when reachable via a manual edge
+    (parallel to thick ``==>`` in the flowchart diagram). Blank when none."""
+    parts: list[str] = []
+    for name, via_manual in dests:
+        parts.append(f"**{name}**" if via_manual else name)
+    return ", ".join(parts)
 
 
 def _has_non_wildcard_trigger(graph, state: str, trigger: str) -> bool:
@@ -586,23 +590,31 @@ def _has_non_wildcard_trigger(graph, state: str, trigger: str) -> bool:
 
 def _can_go_to_states(
     graph, state: str, *, include_wildcard_expanded: bool,
-) -> list[str]:
+) -> list[tuple[str, bool]]:
     """Distinct 1-hop destinations from ``state``, including self-loops.
+
+    Each item is ``(dest, via_manual)`` where ``via_manual`` is True if at least
+    one edge to that dest is manual (``==`` / thick ``==>``). Sorted by dest name.
 
     Wildcard policy matches the triggers table / diagram: by default omit
     ``wildcard_expanded`` fan-out and instead apply abstract ``wildcard_pending``
     rules to eligible states; with fan-out on, use the concrete edges only.
     """
-    dests: set[str] = set()
+    # dest → True if reachable via any manual edge considered for this cell
+    via_manual: dict[str, bool] = {}
+
+    def _note(dest: str, manual: bool) -> None:
+        if dest == _WILDCARD_SENTINEL:
+            return
+        via_manual[dest] = via_manual.get(dest, False) or manual
+
     for _, v, data in graph.out_edges(state, data=True):
         if data.get("wildcard_expanded") and not include_wildcard_expanded:
             continue
         if data.get("wildcard_pending"):
             continue
         dest = data.get("wildcard_dest") or v
-        if dest == _WILDCARD_SENTINEL:
-            continue
-        dests.add(dest)
+        _note(dest, not bool(data.get("auto", False)))
 
     if not include_wildcard_expanded and _WILDCARD_SENTINEL in graph:
         node = graph.nodes.get(state) or {}
@@ -615,9 +627,9 @@ def _can_go_to_states(
                 trigger = data.get("trigger")
                 if trigger and _has_non_wildcard_trigger(graph, state, trigger):
                     continue
-                dests.add(dest)
+                _note(dest, not bool(data.get("auto", False)))
 
-    return sorted(dests)
+    return sorted(via_manual.items(), key=lambda item: item[0])
 
 
 def _fmt_doc(doc: Optional[str]) -> str:

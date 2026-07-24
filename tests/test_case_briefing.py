@@ -370,15 +370,23 @@ def test_render_states_table_sparse_bools():
         in text
     )
     # new is default initial → **Initial**; timed escape blank; no enter/exit hooks
-    # Can go to: intake→reviewing + wildcard cancel→cancelled (sorted)
-    assert "| new | **Initial** |  | — | — | `cancelled`, `reviewing` |" in text
-    # Mid-lifecycle: self-loop recheck included; reviewing has @DWELL + on_enter
+    # Can go to: manual cancel→**cancelled**, auto intake→reviewing (sorted)
+    assert "| new | **Initial** |  | — | — | **cancelled**, reviewing |" in text
+    # Mid-lifecycle: manual dests bold; auto recheck/expire plain; on_enter present
     assert (
         "| reviewing |  | True | `on_enter_reviewing()` | — | "
-        "`cancelled`, `done`, `expired`, `reviewing` |"
+        "**cancelled**, **done**, expired, reviewing |"
     ) in text
     # Terminal with no exits → blank Can go to
     assert "| done | Terminal |  | — | — |  |" in text
+
+
+def test_fmt_can_go_to_bolds_manual_dests():
+    assert case_briefing._fmt_can_go_to([]) == ""
+    assert case_briefing._fmt_can_go_to([("reviewing", False)]) == "reviewing"
+    assert case_briefing._fmt_can_go_to([("cancelled", True), ("reviewing", False)]) == (
+        "**cancelled**, reviewing"
+    )
 
 
 def test_render_states_can_go_to_respects_wildcard_fanout_flag():
@@ -388,8 +396,8 @@ def test_render_states_can_go_to_respects_wildcard_fanout_flag():
     fanout = generate_case_briefing(
         SampleCase, options=CaseBriefingOptions(include_wildcard_expanded_edges=True),
     )
-    assert "| new | **Initial** |  | — | — | `cancelled`, `reviewing` |" in default
-    assert "| new | **Initial** |  | — | — | `cancelled`, `reviewing` |" in fanout
+    assert "| new | **Initial** |  | — | — | **cancelled**, reviewing |" in default
+    assert "| new | **Initial** |  | — | — | **cancelled**, reviewing |" in fanout
 
 
 def test_render_trigger_guards_merged_declaration_order():
