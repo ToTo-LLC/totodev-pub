@@ -35,6 +35,7 @@ from .exceptions import (
     TriggerTimeout,
     CaseInvokedProcessError,
     UnconfiguredChokeError,
+    PerformParamsError,
 )
 from .case_record import CaseRecord
 from .case_read_protocol import CaseReadProtocol
@@ -85,6 +86,7 @@ __all__ = [
     "TriggerTimeout",
     "CaseInvokedProcessError",
     "UnconfiguredChokeError",
+    "PerformParamsError",
     "CaseRecord",
     "CaseReadProtocol",
     "CaseEventJournal",

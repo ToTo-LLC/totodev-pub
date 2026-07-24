@@ -47,7 +47,8 @@ specifically needs create-time import.
 - Initial state is **inert and empty**, named outside the domain (`new`,
   `initial`, …) — not `submitted` / `received` / `uploaded`.
 - A **manual** trigger (e.g. `add_attachments`) takes a filepath or filepaths
-  via kwargs (`tctx.kwargs`; keep them JSON-serializable when the manager may
+  via kwargs (declared as keyword-only params on `perform_*`; keep them
+  JSON-serializable when the manager may
   relay them). Its `perform_` copies/links those files into the case assets.
 - Transition into a very temporary state such as `attachments_added`, then
   either loop back to `new` or enter the first real-flow state. Prefer a

@@ -135,13 +135,21 @@ NEEDS_SUMMARY = {"summarized", "indexed", ...}
 
 Import `from transitions.core import EventData` and type every transition hook
 argument. `EventData` is the transitions library trigger-context object (not
-the case event journal); call kwargs land in `tctx.kwargs`.
+the case event journal); call kwargs land in `tctx.kwargs` and are bound to
+`perform_*` keyword-only parameters. Auto triggers take no kwargs; manual
+triggers may declare JSON/YAML-friendly keyword-only params after `tctx`.
 
 ```python
 from transitions.core import EventData
 
 async def perform_analyze_file(self, tctx: EventData) -> None:
-    """TODO(responsibility): ..."""
+    """TODO(responsibility): auto step — no caller kwargs."""
+    return self._not_implemented(None)
+
+async def perform_add_attachments(
+    self, tctx: EventData, *, paths: list[str],
+) -> None:
+    """TODO(responsibility): manual intake — copy/link `paths` into assets."""
     return self._not_implemented(None)
 
 async def guard_needs_ocr(self, tctx: EventData) -> bool:

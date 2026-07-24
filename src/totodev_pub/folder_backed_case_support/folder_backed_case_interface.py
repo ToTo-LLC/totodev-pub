@@ -205,6 +205,23 @@ class FolderBackedCaseInterface(ABC):
         through; ``trigger_kwargs`` is REQUIRED for MANUAL (``==``) edges via the
         reporter.
 
+    ``perform_<trigger>`` is the kwargs contract. Declare trigger inputs as
+    keyword-only parameters after ``tctx``; the library binds and type-checks
+    ``tctx.kwargs`` against that signature before work runs:
+
+        async def perform_examine_file(
+            self, tctx: EventData, *, path: str, force: bool = False,
+        ) -> None:
+            ...
+
+        async def perform_go(self, tctx: EventData) -> None:
+            # no kwargs allowed — unexpected keys raise PerformParamsError
+            ...
+
+    Use the declared parameters inside ``perform_*`` (do not re-read those keys
+    from ``tctx.kwargs``). Other hooks (``before_``/``after_``/guards/``on_enter_``)
+    still receive only ``tctx``. Triggers with no ``perform_*`` are not checked.
+
     Contract — hooks must be well-behaved async. The lease keepalive depends on
     a trigger's work actually yielding the event loop: await at reasonable
     intervals and offload blocking or long-running work via

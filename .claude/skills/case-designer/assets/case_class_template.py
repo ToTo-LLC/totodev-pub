@@ -129,8 +129,10 @@ class PermitApplicationCase(FolderBackedCase):
     # perform_<trigger>
     # =======================================================================
 
-    async def perform_add_attachments(self, tctx: EventData) -> None:
-        """TODO(responsibility): copy/link filepath(s) from tctx.kwargs into
+    async def perform_add_attachments(
+        self, tctx: EventData, *, paths: list[str],
+    ) -> None:
+        """TODO(responsibility): copy/link filepath(s) from `paths` into
         the `supporting_docs` asset location. Intake only — no OCR/parse here.
         """
         return self._not_implemented(None)
