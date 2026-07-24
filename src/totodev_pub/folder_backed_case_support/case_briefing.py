@@ -11,13 +11,13 @@ overridden lifecycle hooks — assembled from the CLASS alone
 No case folder or live instance is ever required; this is a pure
 static-analysis tool, not a status report (see the mini-spec's non-goals).
 
-Spec: volatile/specs/2026-07-18-case-doc-gen-mini-spec.md.
+Spec: volatile/specs/2026-07-18-case-briefing-gen-mini-spec.md.
 
 Two-stage design, mirroring ``FsmChainSpec.to_networkx()``'s own "graph now,
 format later" split:
 
-  * ``collect()``   — builds a ``CaseTypeDoc`` (plain data, no formatting).
-  * ``render_markdown()`` — turns a ``CaseTypeDoc`` into a case briefing
+  * ``collect()``   — builds a ``CaseBriefingDoc`` (plain data, no formatting).
+  * ``render_markdown()`` — turns a ``CaseBriefingDoc`` into a case briefing
     (Markdown string).
   * ``to_mermaid()`` — renders an ``FsmChainSpec.to_networkx()`` graph as a
     Mermaid diagram; used by ``render_markdown()`` but usable standalone.
@@ -25,7 +25,7 @@ format later" split:
 Not wired into ``FolderBackedCase``/``FolderBackedCaseInterface`` — this is a
 tool, not a runtime contract (mini-spec decision #7). Import it directly from
 this module, or invoke it as a CLI (``python -m
-totodev_pub.folder_backed_case_support.case_doc <module>:<ClassName>``).
+totodev_pub.folder_backed_case_support.case_briefing <module>:<ClassName>``).
 """
 
 from __future__ import annotations
@@ -54,9 +54,9 @@ if TYPE_CHECKING:
     from totodev_pub.folder_backed_case import FolderBackedCase
 
 __all__ = [
-    "CaseDocOptions", "CaseTypeDoc", "StateDoc", "TriggerDoc", "EdgeDoc",
+    "CaseBriefingOptions", "CaseBriefingDoc", "StateDoc", "TriggerDoc", "EdgeDoc",
     "GuardDoc", "AssetDoc", "HookDoc",
-    "collect", "render_markdown", "to_mermaid", "generate_case_docs",
+    "collect", "render_markdown", "to_mermaid", "generate_case_briefing",
 ]
 
 # The DSL's method-guard prefix (see FsmChainSpec.to_networkx()'s own docstring:
@@ -77,8 +77,8 @@ _WILDCARD_SENTINEL = "*"  # must match state_chain_parser._WILDCARD_SOURCE
 _MERMAID_WILDCARD_ID = "ANY_STATE"
 
 # Module path used in generated-doc stamps and CLI prog — keep in sync with
-# ``python -m totodev_pub.folder_backed_case_support.case_doc``.
-_GENERATOR_TOOL = "totodev_pub.folder_backed_case_support.case_doc"
+# ``python -m totodev_pub.folder_backed_case_support.case_briefing``.
+_GENERATOR_TOOL = "totodev_pub.folder_backed_case_support.case_briefing"
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ _GENERATOR_TOOL = "totodev_pub.folder_backed_case_support.case_doc"
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class CaseDocOptions:
+class CaseBriefingOptions:
     """Toggles for what ``collect()``/``render_markdown()`` produce. Mirrors
     ``to_networkx()``'s own kwarg style; ``wildcard_pseudo_state`` and
     ``include_implied_caps`` are passed straight through to it."""
@@ -104,17 +104,17 @@ class CaseDocOptions:
     # DSL round-trip and ``--diagram-style state``.
     diagram_style: Literal["state", "flowchart"] = "flowchart"
     wildcard_pseudo_state: bool = False
-    # Diagram clarity: ``to_networkx()`` always emits both the abstract
-    # ``* -> dest`` pending rule AND the concrete per-state fan-out
-    # (``wildcard_expanded``). Docs default to hiding the fan-out so the
-    # diagram keeps a single ``*`` hub edge; set True to draw every expanded
-    # edge too. The triggers table still lists both regardless.
+    # Diagram + triggers-table clarity: ``to_networkx()`` always emits both the
+    # abstract ``* -> dest`` pending rule AND the concrete per-state fan-out
+    # (``wildcard_expanded``). Docs default to the abstract ``*`` row/edge only;
+    # set True to show the concrete fan-out instead (diagram draws those edges
+    # too; the table then lists real source states rather than ``*``).
     include_wildcard_expanded_edges: bool = False
     include_implied_caps: bool = True
 
 
 # ---------------------------------------------------------------------------
-# Data model (CaseTypeDoc and friends) — pure data, no formatting opinions
+# Data model (CaseBriefingDoc and friends) — pure data, no formatting opinions
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -175,7 +175,7 @@ class HookDoc:
 
 
 @dataclass
-class CaseTypeDoc:
+class CaseBriefingDoc:
     case_cls_name: str
     source: str  # ``module:ClassName`` — same shape the CLI target uses
     class_doc: Optional[str]
@@ -216,8 +216,8 @@ def _bare_guard_name(condition: str) -> str:
     return condition
 
 
-def collect(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = CaseDocOptions()) -> CaseTypeDoc:
-    """Build a ``CaseTypeDoc`` for ``case_cls`` — class-level only, no case
+def collect(case_cls: "type[FolderBackedCase]", *, options: CaseBriefingOptions = CaseBriefingOptions()) -> CaseBriefingDoc:
+    """Build a ``CaseBriefingDoc`` for ``case_cls`` — class-level only, no case
     folder or instance is ever touched."""
     mode = options.docstring_mode
     spec = case_cls.case_type_spec()
@@ -319,7 +319,7 @@ def collect(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = Cas
         if getattr(case_cls, name) is not getattr(_Base, name)
     ]
 
-    return CaseTypeDoc(
+    return CaseBriefingDoc(
         case_cls_name=case_cls.__name__,
         source=f"{case_cls.__module__}:{case_cls.__name__}",
         class_doc=class_doc,
@@ -446,7 +446,7 @@ def to_mermaid(
     Styles share the same label text (``trigger~<dur> [guard, ...]``) but differ
     in how they show auto vs manual:
 
-    * **flowchart** (documentation default via ``CaseDocOptions``): auto edges
+    * **flowchart** (documentation default via ``CaseBriefingOptions``): auto edges
       use plain ``-->``; manual edges use Mermaid's thick ``==>``. Labels never
       carry a leading ``==`` — thickness is the signal.
     * **state** (``stateDiagram-v2``): Mermaid has only one transition arrow and
@@ -571,6 +571,55 @@ def _fmt_trust_states(trust_states: Optional[frozenset]) -> str:
     return ", ".join(f"`{s}`" for s in sorted(trust_states))
 
 
+def _fmt_can_go_to(dests: list[str]) -> str:
+    """Sparse Can-go-to cell: individually backticked dests, blank when none."""
+    return ", ".join(f"`{s}`" for s in dests)
+
+
+def _has_non_wildcard_trigger(graph, state: str, trigger: str) -> bool:
+    """True if ``state`` has an explicit (non-fan-out) edge for ``trigger``."""
+    for _, _, data in graph.out_edges(state, data=True):
+        if data.get("trigger") == trigger and not data.get("wildcard_expanded"):
+            return True
+    return False
+
+
+def _can_go_to_states(
+    graph, state: str, *, include_wildcard_expanded: bool,
+) -> list[str]:
+    """Distinct 1-hop destinations from ``state``, including self-loops.
+
+    Wildcard policy matches the triggers table / diagram: by default omit
+    ``wildcard_expanded`` fan-out and instead apply abstract ``wildcard_pending``
+    rules to eligible states; with fan-out on, use the concrete edges only.
+    """
+    dests: set[str] = set()
+    for _, v, data in graph.out_edges(state, data=True):
+        if data.get("wildcard_expanded") and not include_wildcard_expanded:
+            continue
+        if data.get("wildcard_pending"):
+            continue
+        dest = data.get("wildcard_dest") or v
+        if dest == _WILDCARD_SENTINEL:
+            continue
+        dests.add(dest)
+
+    if not include_wildcard_expanded and _WILDCARD_SENTINEL in graph:
+        node = graph.nodes.get(state) or {}
+        if not node.get("terminal", False):
+            for _, dest, data in graph.out_edges(_WILDCARD_SENTINEL, data=True):
+                if not data.get("wildcard_pending"):
+                    continue
+                if dest == state:
+                    continue
+                trigger = data.get("trigger")
+                if trigger and _has_non_wildcard_trigger(graph, state, trigger):
+                    continue
+                dests.add(dest)
+
+    return sorted(dests)
+
+
 def _fmt_doc(doc: Optional[str]) -> str:
     return doc.replace("\n", " ") if doc else "—"
 
@@ -589,9 +638,30 @@ def _fmt_sparse_bool(v: bool) -> str:
     return "True" if v else ""
 
 
+def _fmt_initial_terminal(s: StateDoc) -> str:
+    """Compact Initial / Terminal role cell; blank when neither applies.
+
+    Bold **Initial** marks the default initial state. ``Both`` covers the rare
+    case where a state is both initial and terminal.
+    """
+    if s.initial and s.terminal:
+        return "Both"
+    if s.initial:
+        return "**Initial**" if s.default_initial else "Initial"
+    if s.terminal:
+        return "Terminal"
+    return ""
+
+
 def _fmt_guard_item(item) -> str:
     if _is_fact_guard(item):
-        return f"`{_fmt_fact_guard(item)}`"
+        text = _fmt_fact_guard(item)
+        # Implied @FAIL<1> (compiler default) is italic, not code — so it reads as
+        # framework policy rather than an author-declared guard. Explicit facts stay
+        # in backticks like method guards.
+        if item.get("implicit"):
+            return f"*{text}*"
+        return f"`{text}`"
     return _fmt_method(item)
 
 
@@ -601,6 +671,17 @@ def _fmt_guards_cell(guards: list) -> str:
     return ", ".join(_fmt_guard_item(g) for g in guards)
 
 
+def _fmt_asset_path(relative_path: str, *, many: bool) -> str:
+    """Path cell: code span; italicize the whole cell when ``many=True`` (glob)."""
+    cell = f"`{relative_path}`"
+    return f"*{cell}*" if many else cell
+
+
+def _fmt_asset_flags(*, keep: bool) -> str:
+    """Sparse Flags cell — currently only ``keep``; blank when nothing to flag."""
+    return "keep" if keep else ""
+
+
 def _fmt_state_hook_cell(kind: str, state: str, doc: Optional[str]) -> str:
     """On Enter / On Exit flag-table cell: method() only when present, else —."""
     if doc is None:
@@ -608,7 +689,7 @@ def _fmt_state_hook_cell(kind: str, state: str, doc: Optional[str]) -> str:
     return _fmt_method(f"{kind}_{state}")
 
 
-def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOptions()) -> str:
+def render_markdown(doc: CaseBriefingDoc, *, options: CaseBriefingOptions = CaseBriefingOptions()) -> str:
     stamp = (
         f"<!-- Case briefing generated by {_GENERATOR_TOOL} from {doc.source} "
         f"on {datetime.now(timezone.utc).isoformat(timespec='seconds')} -->"
@@ -626,14 +707,22 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
         parts.append(f"## Lifecycle\n\n```mermaid\n{mermaid}\n```")
 
     if options.include_states_table and doc.states:
-        rows = ["| State | Initial | Default Initial | Terminal | Timed Escape | On Enter | On Exit |",
-                "|---|---|---|---|---|---|---|"]
+        rows = [
+            "| State | Initial / Terminal | Has Timed Escape | On Enter | On Exit | Can go to |",
+            "|---|---|---|---|---|---|",
+        ]
         for s in doc.states:
+            can_go = _fmt_can_go_to(
+                _can_go_to_states(
+                    doc.fsm_graph,
+                    s.name,
+                    include_wildcard_expanded=options.include_wildcard_expanded_edges,
+                )
+            )
             rows.append(
-                f"| {s.name} | {_fmt_sparse_bool(s.initial)} | {_fmt_sparse_bool(s.default_initial)} | "
-                f"{_fmt_sparse_bool(s.terminal)} | {_fmt_sparse_bool(s.timed_escape)} | "
+                f"| {s.name} | {_fmt_initial_terminal(s)} | {_fmt_sparse_bool(s.timed_escape)} | "
                 f"{_fmt_state_hook_cell('on_enter', s.name, s.on_enter_doc)} | "
-                f"{_fmt_state_hook_cell('on_exit', s.name, s.on_exit_doc)} |"
+                f"{_fmt_state_hook_cell('on_exit', s.name, s.on_exit_doc)} | {can_go} |"
             )
         states_block = "## States\n\n" + "\n".join(rows)
         # Docstrings for enter/exit hooks live outside the flags table — the
@@ -658,33 +747,35 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
     if options.include_triggers_table and doc.triggers:
         sections = []
         for t in doc.triggers:
-            lines = [
-                f"### `{t.name}`",
-                f"**Method:** {_fmt_method(f'perform_{t.name}')}",
-            ]
+            # Guard-area arrow style: DSL name → bound perform_*()
+            lines = [f"### `{t.name}` → {_fmt_method(f'perform_{t.name}')}"]
             if t.perform_doc:
-                lines.append(f"**Perform:** {t.perform_doc}")
+                lines.append(t.perform_doc)
             if t.before_doc:
                 lines.append(f"**Before:** {_fmt_method(f'before_{t.name}')} — {t.before_doc}")
             if t.after_doc:
                 lines.append(f"**After:** {_fmt_method(f'after_{t.name}')} — {t.after_doc}")
+            timeout_cell = ""
             if t.soft_timeout_secs is not None:
-                timeout = (
+                timeout_cell = (
                     f"{t.soft_timeout_secs:g}s "
                     f"({'explicit' if t.soft_timeout_is_explicit else 'default'})"
                 )
-                lines.append(f"Soft timeout: {timeout}")
             chokes_cell = ", ".join(sorted(t.chokes)) if t.chokes else ""
-            edge_rows = ["| Source | Dest | Auto | Guards | Wildcard | Chokes |",
-                         "|---|---|---|---|---|---|"]
-            for e in t.edges:
-                wildcard = (
-                    "pending" if e.wildcard_pending
-                    else ("expanded" if e.wildcard_expanded else "")
-                )
+            # Match diagram fan-out policy: default keeps abstract ``*`` rows;
+            # ``include_wildcard_expanded_edges`` swaps those for concrete sources.
+            if options.include_wildcard_expanded_edges:
+                edges = [e for e in t.edges if not e.wildcard_pending]
+            else:
+                edges = [e for e in t.edges if not e.wildcard_expanded]
+            edge_rows = [
+                "| Source | Dest | Auto | Guards | Chokes | Soft timeout |",
+                "|---|---|---|---|---|---|",
+            ]
+            for e in edges:
                 edge_rows.append(
                     f"| {e.source} | {e.dest} | {_fmt_sparse_bool(e.auto)} | "
-                    f"{_fmt_guards_cell(e.guards)} | {wildcard} | {chokes_cell} |"
+                    f"{_fmt_guards_cell(e.guards)} | {chokes_cell} | {timeout_cell} |"
                 )
             lines.append("\n".join(edge_rows))
             sections.append("\n\n".join(lines))
@@ -703,28 +794,31 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
         parts.append("## Guards\n\n" + "\n\n".join(sections))
 
     if options.include_assertions and any(s.assertions for s in doc.states):
-        sections = []
+        # Flat table: method names already encode the state (case_assert_<state>_…).
+        rows = ["| Method | Description |", "|---|---|"]
         for s in doc.states:
-            if not s.assertions:
-                continue
-            items = "\n".join(
-                f"- **{_fmt_method(f'case_assert_{s.name}_{slug}')}**: {_fmt_doc(d)}"
-                for slug, d in s.assertions
-            )
-            sections.append(f"### {s.name}\n\n{items}")
+            for slug, d in s.assertions:
+                desc = d.replace("\n", " ") if d else ""
+                rows.append(
+                    f"| {_fmt_method(f'case_assert_{s.name}_{slug}')} | {desc} |"
+                )
         footnote = (
             "Cases of this type may also carry per-case file assertions "
             "(`assertions/*.py`) not shown here — those are runtime, per-folder, "
             "and invisible to static class inspection."
         )
-        parts.append("## Assertions\n\n" + "\n\n".join(sections) + f"\n\n*{footnote}*")
+        parts.append("## Assertions\n\n" + "\n".join(rows) + f"\n\n*{footnote}*")
 
     if options.include_assets and doc.assets:
-        rows = ["| Alias | Path | Loader | Trust states | Keep | Many |", "|---|---|---|---|---|---|"]
+        rows = [
+            "| Alias | Path | Loader | Trust states | Flags |",
+            "|---|---|---|---|---|",
+        ]
         for a in doc.assets:
             rows.append(
-                f"| {a.alias} | `{a.relative_path}` | {a.loader_name or '—'} | "
-                f"{_fmt_trust_states(a.trust_states)} | {a.keep} | {a.many} |"
+                f"| {a.alias} | {_fmt_asset_path(a.relative_path, many=a.many)} | "
+                f"{a.loader_name or '—'} | {_fmt_trust_states(a.trust_states)} | "
+                f"{_fmt_asset_flags(keep=a.keep)} |"
             )
         parts.append("## Asset Aliases\n\n" + "\n".join(rows))
 
@@ -737,7 +831,7 @@ def render_markdown(doc: CaseTypeDoc, *, options: CaseDocOptions = CaseDocOption
     return "\n\n".join(parts) + "\n"
 
 
-def generate_case_docs(case_cls: "type[FolderBackedCase]", *, options: CaseDocOptions = CaseDocOptions()) -> str:
+def generate_case_briefing(case_cls: "type[FolderBackedCase]", *, options: CaseBriefingOptions = CaseBriefingOptions()) -> str:
     """Build a case briefing for ``case_cls`` — ``collect()`` + ``render_markdown()``."""
     return render_markdown(collect(case_cls, options=options), options=options)
 
@@ -748,7 +842,7 @@ def generate_case_docs(case_cls: "type[FolderBackedCase]", *, options: CaseDocOp
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m totodev_pub.folder_backed_case_support.case_doc",
+        prog="python -m totodev_pub.folder_backed_case_support.case_briefing",
         description=(
             "Render a case briefing (class-level design handoff) for a "
             "FolderBackedCase subclass. Section flags below omit parts of "
@@ -799,8 +893,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         dest="include_wildcard_expanded_edges",
         action="store_true",
         default=False,
-        help="Include concrete per-state wildcard fan-out edges in the Mermaid "
-             "diagram (default: only the abstract '* -> dest' pending rule).",
+        help="Show concrete per-state wildcard fan-out in the Mermaid diagram "
+             "and triggers table instead of the abstract '* -> dest' rule "
+             "(default: abstract '*' only).",
     )
     parser.add_argument(
         "--no-implied-caps", dest="include_implied_caps", action="store_false", default=True,
@@ -831,7 +926,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error(f"{args.target} is not a FolderBackedCase subclass")
         return 2
 
-    options = CaseDocOptions(
+    options = CaseBriefingOptions(
         include_diagram=args.include_diagram,
         include_states_table=args.include_states_table,
         include_triggers_table=args.include_triggers_table,
@@ -845,7 +940,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         include_wildcard_expanded_edges=args.include_wildcard_expanded_edges,
         include_implied_caps=args.include_implied_caps,
     )
-    print(generate_case_docs(case_cls, options=options))
+    print(generate_case_briefing(case_cls, options=options))
     return 0
 
 

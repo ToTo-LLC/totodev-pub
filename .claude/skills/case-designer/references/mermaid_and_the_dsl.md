@@ -12,7 +12,7 @@ The chain DSL is deliberately Mermaid-flavoured: `[*]` boundary hops,
 `-- label -->` edges, `A --> B : label` colon labels, and `%%` comments are
 shared vocabulary. The relationship is asymmetric by design:
 
-- **DSL → Mermaid is lossless.** `case_doc.to_mermaid` (state style) emits a
+- **DSL → Mermaid is lossless.** `case_briefing.to_mermaid` (state style) emits a
   diagram that is *itself a valid declaration* — it parses back to the same
   FSM. Rendering is safe to do at any time.
 - **Mermaid → DSL is lossy but visible.** A sketch under-specifies an FSM, so
@@ -92,5 +92,5 @@ This file is orientation, not contract. Authoritative behavior:
 - Conversion rules: module docstring of
   `src/totodev_pub/folder_backed_case_support/mermaid_intake.py`
 - Rendering / round-trip contract: `to_mermaid` docstring in
-  `src/totodev_pub/folder_backed_case_support/case_doc.py`
+  `src/totodev_pub/folder_backed_case_support/case_briefing.py`
 - Lint heuristics: `lint_spec` docstring in `state_chain_parser.py`

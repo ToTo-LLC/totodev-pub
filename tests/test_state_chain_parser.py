@@ -499,6 +499,79 @@ def test_to_networkx_shows_implicit_fail_cap_after_apply_implicit_fail_cap():
     assert after["guards"] == [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
 
 
+_IMPLIED_FAIL = {"name": "FAIL", "op": "<", "operand": 1, "implicit": True}
+
+
+def _compile_with_fail_cap(decl: str):
+    return (
+        StateChainParser.parse(decl)
+        .validate()
+        .expand_wildcards()
+        .classify()
+        .apply_implicit_fail_cap()
+    )
+
+
+def test_apply_implicit_fail_cap_updates_auto_wildcard_pending_in_lockstep():
+    """Auto wildcard expanded edges already got the cap; pending_wildcards must too so
+    to_networkx()'s abstract ``*`` edge matches runtime."""
+    pytest.importorskip("networkx")
+    spec = _compile_with_fail_cap("""
+        [*] --> new -- go --> done --> [*]
+        * -- boom --> done
+    """)
+
+    assert spec.pending_wildcards[0]["_guards"] == [_IMPLIED_FAIL]
+    expanded = [t for t in spec.transitions if t["trigger"] == "boom"]
+    assert expanded and all(t.get("_guards") == [_IMPLIED_FAIL] for t in expanded)
+
+    g = spec.to_networkx()
+    pending = [
+        d for _, _, d in g.edges(data=True)
+        if d.get("trigger") == "boom" and d.get("wildcard_pending")
+    ]
+    assert len(pending) == 1
+    assert pending[0]["guards"] == [_IMPLIED_FAIL]
+
+
+def test_apply_implicit_fail_cap_skips_manual_wildcard_pending():
+    spec = _compile_with_fail_cap("""
+        [*] --> new -- go --> done --> [*]
+        * == cancel ==> done
+    """)
+    assert not (spec.pending_wildcards[0].get("_guards") or [])
+    for t in spec.transitions:
+        if t["trigger"] == "cancel":
+            assert not (t.get("_guards") or [])
+
+
+def test_apply_implicit_fail_cap_skips_exempt_auto_wildcard_pending():
+    """Explicit @FAIL and pure timed-escape wildcards stay uncapped on pending too."""
+    explicit = _compile_with_fail_cap("""
+        [*] --> new -- go --> active
+        active --> [*]
+        * -- retry [@FAIL<3] --> active
+    """)
+    assert explicit.pending_wildcards[0]["_guards"] == [
+        {"name": "FAIL", "op": "<", "operand": 3},
+    ]
+    assert not any(
+        g.get("implicit") for g in explicit.pending_wildcards[0]["_guards"] if isinstance(g, dict)
+    )
+
+    timed = _compile_with_fail_cap("""
+        [*] --> new -- go --> active
+        active --> [*]
+        * -- expire [@DWELL>=1h] --> active
+    """)
+    guards = timed.pending_wildcards[0]["_guards"]
+    assert len(guards) == 1
+    assert guards[0]["name"] == "DWELL"
+    assert not any(
+        isinstance(g, dict) and g.get("name") == "FAIL" for g in guards
+    )
+
+
 # ---------------------------------------------------------------------------
 # to_networkx(include_implied_caps=False): hide compiler-filled-in defaults
 # (the implicit @FAIL<1 retry cap, and the default soft-timeout for

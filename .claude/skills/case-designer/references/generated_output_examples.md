@@ -57,7 +57,7 @@ Lifecycle:
 
 ## Class docstring (short identity)
 
-One or two lines naming the recurring unit of work. This is what `case_doc`
+One or two lines naming the recurring unit of work. This is what `case_briefing`
 pulls as the briefing lede — keep it crisp; put the story in the module
 docstring.
 

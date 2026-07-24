@@ -629,6 +629,23 @@ class FsmChainSpec:
                 return False
         return True
 
+    def _inject_implicit_fail_if_eligible(self, edge: dict, *, is_auto: bool) -> None:
+        """Append implicit ``@FAIL<1`` to ``edge["_guards"]`` when eligible.
+
+        Skips manual edges, edges with an explicit ``@FAIL``, and pure timed escapes.
+        Mutates ``edge`` in place; no-op when not eligible.
+        """
+        if not is_auto:
+            return
+        guards = list(edge.get("_guards") or [])
+        if any(_is_fact_guard(g) and g["name"] in _COUNT_FACTS for g in guards):
+            return                       # explicit @FAIL policy wins
+        if self._is_pure_timed_escape(edge):
+            return                       # timed escape => unlimited fail tolerance
+        edge["_guards"] = guards + [
+            {"name": "FAIL", "op": "<", "operand": 1, "implicit": True},
+        ]
+
     def apply_implicit_fail_cap(self) -> "FsmChainSpec":
         """Inject a default `@FAIL<1` (one attempt, NO retry) onto every AUTO edge that does
         not already declare a `@FAIL` guard and is not a pure timed escape. Retry is thus
@@ -645,6 +662,11 @@ class FsmChainSpec:
         Only AUTO edges are touched: manual/event-driven (`==`) triggers are never
         driven by advance(), so a retry cap on them would have no meaning.
 
+        Abstract `pending_wildcards` rules are updated in lockstep with expanded auto
+        edges so `to_networkx()` / case briefings show the same implied cap the runtime
+        expanded transitions already carry (display consistency only — advance() fires the
+        expanded edges).
+
         The injected guard dict carries an extra `"implicit": True` key (absent from every
         author-written fact guard) — the ONLY way to later tell "the DSL declared this" from
         "the compiler defaulted it in", since the two are otherwise bit-for-bit identical
@@ -653,14 +675,10 @@ class FsmChainSpec:
         author actually wrote."""
         for t in self.transitions:
             srcs = t["source"] if isinstance(t["source"], (list, tuple)) else [t["source"]]
-            if not any((s, t["trigger"]) in self.auto_edges for s in srcs):
-                continue
-            guards = list(t.get("_guards") or [])
-            if any(_is_fact_guard(g) and g["name"] in _COUNT_FACTS for g in guards):
-                continue                       # explicit @FAIL policy wins
-            if self._is_pure_timed_escape(t):
-                continue                       # timed escape => unlimited fail tolerance
-            t["_guards"] = guards + [{"name": "FAIL", "op": "<", "operand": 1, "implicit": True}]
+            is_auto = any((s, t["trigger"]) in self.auto_edges for s in srcs)
+            self._inject_implicit_fail_if_eligible(t, is_auto=is_auto)
+        for w in self.pending_wildcards:
+            self._inject_implicit_fail_if_eligible(w, is_auto=bool(w.get("auto")))
         return self
 
     # ---- rendering (visualization / analysis) ----
@@ -1849,8 +1867,8 @@ def lint_spec(spec: FsmChainSpec) -> list[str]:
 # ---------------------------------------------------------------------------
 # CLI — validate a chain declaration, or render it as a Mermaid diagram
 # ---------------------------------------------------------------------------
-# Mirrors case_doc's module-as-CLI pattern. Validation needs nothing beyond this
-# module; --render goes through to_networkx() -> case_doc.to_mermaid(), both
+# Mirrors case_briefing's module-as-CLI pattern. Validation needs nothing beyond this
+# module; --render goes through to_networkx() -> case_briefing.to_mermaid(), both
 # imported/raised lazily so the parser keeps its zero-dependency core.
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1864,7 +1882,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     inline. Default mode parses and runs the whole-graph checks, printing a
     short summary; ``--render`` emits Mermaid source on stdout instead (the
     ``state`` style's output is itself a valid declaration — see
-    ``case_doc.to_mermaid``). Exit codes: 0 success, 1 parse/validation
+    ``case_briefing.to_mermaid``). Exit codes: 0 success, 1 parse/validation
     failure, 2 usage error.
     """
     import argparse
@@ -1973,7 +1991,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         except ImportError as e:                 # networkx is an optional dependency
             print(f"error: {e}", file=sys.stderr)
             return 1
-        from totodev_pub.folder_backed_case_support.case_doc import to_mermaid
+        from totodev_pub.folder_backed_case_support.case_briefing import to_mermaid
         print(to_mermaid(graph, style=args.style))
         return 0
 

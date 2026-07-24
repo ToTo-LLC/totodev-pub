@@ -23,7 +23,7 @@ CaseAssets              — working-file playground (assets/); retention-blind.
 FolderBackedCaseInterface — basic-usage contract (read this first).
 FolderBackedCase        — ABC you subclass to define a case type.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
-case_doc.generate_case_docs — static Markdown report for a case type (lifecycle diagram + tables); import from folder_backed_case_support.case_doc.
+case_briefing.generate_case_briefing — static Markdown report for a case type (lifecycle diagram + tables); import from folder_backed_case_support.case_briefing.
 """
 
 from __future__ import annotations

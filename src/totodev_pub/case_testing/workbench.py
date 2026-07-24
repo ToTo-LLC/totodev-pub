@@ -135,7 +135,7 @@ from totodev_pub.folder_backed_case_support.constants import (
     RECORD_NAME,
     WORKBENCH_DIR_NAME,
 )
-from totodev_pub.folder_backed_case_support.case_doc import _fmt_fact_guard
+from totodev_pub.folder_backed_case_support.case_briefing import _fmt_fact_guard
 from totodev_pub.folder_backed_case_support.state_chain_parser import _is_method_guard
 
 _ASSET_LIKE_SUFFIXES = frozenset({

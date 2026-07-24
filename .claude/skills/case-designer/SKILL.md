@@ -391,21 +391,21 @@ the class — don't generate it unprompted; it's a few extra seconds of output
 some developers won't want.
 
 A case briefing is the class-level design handoff produced by
-`totodev_pub.folder_backed_case_support.case_doc`: lifecycle diagram plus
+`totodev_pub.folder_backed_case_support.case_briefing`: lifecycle diagram plus
 states/triggers/guards/assertions/asset-alias tables. It is *not* a live
 status report (no folder, no current state).
 
 If they say yes, generate it:
 
 ```python
-from totodev_pub.folder_backed_case_support.case_doc import generate_case_docs
-print(generate_case_docs(<GeneratedClass>))
+from totodev_pub.folder_backed_case_support.case_briefing import generate_case_briefing
+print(generate_case_briefing(<GeneratedClass>))
 ```
 
 or, equivalently, from the CLI:
 
 ```bash
-python -m totodev_pub.folder_backed_case_support.case_doc <module path>:<GeneratedClass>
+python -m totodev_pub.folder_backed_case_support.case_briefing <module path>:<GeneratedClass>
 ```
 
 Like Step 6's import check, this touches the class only — no case folder is
