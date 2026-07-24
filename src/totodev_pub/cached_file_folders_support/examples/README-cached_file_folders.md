@@ -59,7 +59,7 @@ optional one-time `zoho_workdrive_token_bootstrap.py` (grant code -> refresh tok
   `pypandoc` + the `pandoc` system binary for nicer non-text summaries
 
 **Connecting to a real account:** see the step-by-step
-[Zoho WorkDrive connectivity guide](../../../../docs/zoho-workdrive-connectivity.md) —
+[Zoho WorkDrive connectivity guide](./zoho-workdrive-connectivity.md) —
 how to acquire each credential, how to find the root folder id, and a recommended
 `volatile/credentials/zoho_workdrive_env.sh` you `source` before running.
 

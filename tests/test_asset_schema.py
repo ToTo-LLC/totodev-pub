@@ -1,0 +1,70 @@
+from pathlib import Path
+
+import pytest
+from pydantic import BaseModel
+
+from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
+from totodev_pub.folder_backed_case_support.asset_schema import (
+    AssetSpec,
+    CALLABLE_SENTINEL,
+    PATH_LOADER_SENTINEL,
+    loader_name,
+)
+
+
+class _Des:
+    def __call__(self, path):  # pragma: no cover
+        return path
+
+
+class _Rec(BaseModel, FileMappedPydanticMixin):
+    n: int = 0
+
+
+def test_asset_spec_is_frozen():
+    spec = AssetSpec(relative_path="receipts/rlist.json")
+    assert spec.relative_path == "receipts/rlist.json"
+    assert spec.loader is None
+    assert spec.trust_states is None
+    assert spec.keep is False
+    assert spec.many is False
+    with pytest.raises(Exception):
+        spec.relative_path = "other.json"  # type: ignore[misc]
+
+
+def test_asset_spec_states_keep_and_many():
+    spec = AssetSpec(
+        relative_path="ticket.yaml", loader=_Rec,
+        trust_states=frozenset({"new", "open"}), keep=True,
+    )
+    assert spec.trust_states == frozenset({"new", "open"})
+    assert spec.keep is True
+    many = AssetSpec(relative_path="pages/*.png", loader=Path, many=True)
+    assert many.many is True
+    assert many.loader is Path
+
+
+def test_asset_spec_is_keyword_only():
+    with pytest.raises(TypeError):
+        AssetSpec("receipts/rlist.json")  # noqa — deliberate positional
+
+
+def test_asset_spec_requires_relative_path():
+    with pytest.raises(TypeError):
+        AssetSpec(loader=_Rec)  # noqa — relative_path omitted
+
+
+def test_loader_name_filemapped_class():
+    assert loader_name(_Rec) == "_Rec"
+
+
+def test_loader_name_path():
+    assert loader_name(Path) == PATH_LOADER_SENTINEL
+
+
+def test_loader_name_callable():
+    assert loader_name(_Des()) == CALLABLE_SENTINEL
+
+
+def test_loader_name_none():
+    assert loader_name(None) is None

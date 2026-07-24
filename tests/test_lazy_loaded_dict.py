@@ -609,8 +609,8 @@ third: 3
         finally:
             os.unlink(yaml_file)
 
-    def test_has_changed_method(self):
-        """Test the has_changed() method."""
+    def test_file_was_modified_method(self):
+        """Test file_was_modified() (and has_changed() alias) for on-disk change detection."""
         yaml_content = "name: test\nvalue: 42"
         
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
@@ -620,13 +620,15 @@ third: 3
         try:
             lazy_dict = LazyLoadedFileData(yaml_file)
             
-            # Before loading, has_changed() should return False (not "changed", just needs loading)
-            assert lazy_dict.has_changed() is False
+            # Before loading, no baseline snapshot — not "changed"
+            assert lazy_dict.file_was_modified() is False
+            assert lazy_dict.has_changed() is False  # alias
             
             # Load the file
             _ = lazy_dict.as_dict()
             
             # After loading, file should not have changed
+            assert lazy_dict.file_was_modified() is False
             assert lazy_dict.has_changed() is False
             
             # Modify the file
@@ -634,18 +636,25 @@ third: 3
             with open(yaml_file, 'w') as f:
                 f.write("name: modified\nvalue: 100")
             
-            # Now has_changed() should return True
+            # Now file_was_modified() should return True
+            assert lazy_dict.file_was_modified() is True
             assert lazy_dict.has_changed() is True
             
-            # Test with non-existent file
+            # Missing file after a successful load is treated as out of sync (True), not an error
             os.unlink(yaml_file)
-            with pytest.raises(FileNotFoundError):
-                lazy_dict.has_changed()
+            assert lazy_dict.file_was_modified() is True
+            assert lazy_dict.has_changed() is True
             
         finally:
             # Clean up in case of early exit
             if os.path.exists(yaml_file):
                 os.unlink(yaml_file)
+
+    def test_file_was_modified_never_loaded_missing_file(self):
+        """No baseline means False even if the path does not exist."""
+        lazy_dict = LazyLoadedFileData("/nonexistent/path/does_not_exist.yaml")
+        assert lazy_dict.file_was_modified() is False
+        assert lazy_dict.has_changed() is False
 
     @very_lazy_test(['totodev_pub.lazy_loaded_file_data'], reverify_days=14)
     def test_automatic_change_detection_and_reload(self):
@@ -767,10 +776,11 @@ third: 3
             # Wait for change detection interval
             time.sleep(0.15)
             
-            # Delete the file to cause FileNotFoundError in has_changed()
+            # Delete the file — file_was_modified() is True, but as_dict keeps cached data
+            # rather than attempting a reload that would fail
             os.unlink(yaml_file)
             
-            # This should not raise an exception - it should be caught and handled gracefully
+            # This should not raise an exception - cached data is returned gracefully
             data = lazy_dict.as_dict()
             assert data['name'] == 'test'  # Should still return cached data
             

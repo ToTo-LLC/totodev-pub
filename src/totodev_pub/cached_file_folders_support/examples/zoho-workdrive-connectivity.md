@@ -1,7 +1,7 @@
 # Running the Zoho WorkDrive demo against a real account
 
 This guide walks through connecting the
-[`zoho_workdrive_sync.py`](../src/totodev_pub/cached_file_folders_support/examples/zoho_workdrive_sync.py)
+[`zoho_workdrive_sync.py`](./zoho_workdrive_sync.py)
 example to a live Zoho WorkDrive account: where each credential comes from, how to find
 the folder you want to mirror, and a recommended way to store it all in a single sourced
 shell script.

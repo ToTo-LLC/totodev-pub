@@ -11,6 +11,9 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Dict, List, Type, Any, Optional
 import time
+
+pytest.importorskip("luigi")  # 'pipes' extra; skip when luigi is unavailable
+
 import luigi
 import json
 import asyncio

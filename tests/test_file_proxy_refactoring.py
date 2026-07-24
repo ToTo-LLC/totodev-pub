@@ -9,6 +9,9 @@ import pytest
 import tempfile
 import os
 from pathlib import Path
+
+pytest.importorskip("aiohttp")  # 'connectors' extra; skip when unavailable
+
 from totodev_pub.cached_file_folders_support.file_proxy_base import FileProxyBase
 from totodev_pub.cached_file_folders_support.file_proxy_local_file import LocalFileProxy
 from totodev_pub.cached_file_folders_support.file_proxy_sharepoint import SharepointFileProxy

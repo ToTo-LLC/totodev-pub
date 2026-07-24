@@ -16,6 +16,7 @@ dependencies = [
   "sqlitedict",
   "tomli-w",
   "xxhash",
+  "transitions>=0.9.3",
 ]
 
 [project.optional-dependencies]
@@ -42,9 +43,12 @@ llm = [
   "google-auth",
   "jinja2",
   "json-repair",
-  "langchain",
-  "langchain-community",
-  "langchain-core",
+  # simplified_llm.py uses the legacy 0.x import surface (langchain.prompts,
+  # langchain.schema, langchain_community.chat_models); langchain 1.x removed it.
+  # Pinned until the planned simplified_llm refactor lands.
+  "langchain>=0.3,<1",
+  "langchain-community<0.4",
+  "langchain-core<0.4",
   "langchain-google-genai",
   "nest-asyncio",
   "openai",
@@ -72,9 +76,10 @@ all = [
   "requests",
   "jinja2",
   "json-repair",
-  "langchain",
-  "langchain-community",
-  "langchain-core",
+  # Mirrors the llm extra's langchain pins (see comment there).
+  "langchain>=0.3,<1",
+  "langchain-community<0.4",
+  "langchain-core<0.4",
   "langchain-google-genai",
   "nest-asyncio",
   "openai",

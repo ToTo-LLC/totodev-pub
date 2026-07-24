@@ -8,6 +8,8 @@ from typing import Dict, Any, List, Optional
 import pytest
 from pydantic import BaseModel
 
+pytest.importorskip("luigi")  # 'pipes' extra; skip when luigi is unavailable
+
 from totodev_pub.pipes.toto_pipe_base import ToToPipeBase
 from totodev_pub.pipes.toto_pipe_type_info import ToToPipeTypeInfo
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin

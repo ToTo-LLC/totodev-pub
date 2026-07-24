@@ -624,14 +624,41 @@ def test_file_modification_detection(test_model_cls: Type[FileMappedPydanticMixi
     
     assert model.file_was_modified() is True
     
-    # Test force_check parameter
-    assert model.file_was_modified(force_check=True) is True
-    
     # Test after reloading
     model.reload_from_file()
     assert model.file_was_modified() is False
     assert model.name == "modified"
     assert model.value == 42
+
+
+def test_file_was_modified_no_baseline(test_model_cls: Type[FileMappedPydanticMixin], tmp_path: Path) -> None:
+    """file_was_modified() is False until a load/save establishes a file snapshot."""
+    file_path = tmp_path / "no_baseline.yaml"
+
+    # Missing file + fallback open: absolute path is set, but no snapshot yet
+    model = test_model_cls.open(str(file_path), without_lock=True)
+    assert model._file_stat is None
+    assert model.file_was_modified() is False
+
+    # After save, snapshot exists and file matches
+    model = test_model_cls.open(str(file_path))
+    model.save()
+    assert model._file_stat is not None
+    assert model.file_was_modified() is False
+
+    # After a successful load/save baseline, a deleted file is out of sync
+    os.unlink(str(file_path))
+    assert model.file_was_modified() is True
+
+
+def test_file_was_modified_detached_copy(test_model_cls: Type[FileMappedPydanticMixin], tmp_path: Path) -> None:
+    """Detached copies have no file snapshot, so file_was_modified() is False."""
+    file_path = tmp_path / "detached.yaml"
+    model = test_model_cls.open(str(file_path))
+    model.save()
+    clone = model.detached_copy()
+    assert clone._file_stat is None
+    assert clone.file_was_modified() is False
 
 @pytest.mark.slow
 @very_lazy_test(['totodev_pub.file_mapped_pydantic_mixin'], reverify_days=20)
