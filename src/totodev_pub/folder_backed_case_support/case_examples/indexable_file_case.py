@@ -194,11 +194,13 @@ class IndexableFileCase(FolderBackedCase):
     # perform_<trigger>
     # =======================================================================
 
-    async def perform_examine_file(self, tctx: EventData) -> None:
-        """TODO(responsibility): read the source file named in tctx.kwargs
-        (filename/path) and write/update the `fingerprint` asset. No OCR, text
-        extract, LLM, index write, or active→retire rename here — supersede
-        happens in `commit_index` / `mark_deleted`.
+    async def perform_examine_file(
+        self, tctx: EventData, *, path: str,
+    ) -> None:
+        """TODO(responsibility): read the source file named by `path` and
+        write/update the `fingerprint` asset. No OCR, text extract, LLM, index
+        write, or active→retire rename here — supersede happens in
+        `commit_index` / `mark_deleted`.
         """
         return self._not_implemented(None)
 

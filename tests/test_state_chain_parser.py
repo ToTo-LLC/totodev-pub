@@ -301,13 +301,30 @@ def test_guard_without_tctx_param_is_rejected():
 
 
 def test_hook_with_varargs_accepts_tctx():
+    """Non-perform hooks may still use *args to receive tctx (legacy-tolerant)."""
     spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
 
     class Carrier:
-        async def perform_assign(self, *args):  # *args can receive the single tctx
+        async def perform_assign(self, tctx):
+            return None
+
+        async def before_assign(self, *args):  # *args can receive the single tctx
             return None
 
     spec.validate_object_compatibility(Carrier())
+
+
+def test_perform_with_varargs_rejected():
+    spec = StateChainParser.parse(["[*] --> new -- assign --> assigned --> [*]"])
+
+    class Carrier:
+        async def perform_assign(self, *args):
+            return None
+
+    with pytest.raises(FsmBindingError) as ei:
+        spec.validate_object_compatibility(Carrier())
+    assert ei.value.bad_perform_signatures
+    assert "perform_assign" in str(ei.value)
 
 
 def test_require_tctx_false_skips_arity_check():

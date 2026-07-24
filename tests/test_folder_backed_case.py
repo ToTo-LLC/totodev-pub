@@ -1031,7 +1031,7 @@ class _OverloadCase(FolderBackedCase):
     fsm_trigger_chokes = {}
     """An AUTO edge (`go`), a MANUAL edge (`submit`), and a guarded AUTO edge
     (`gated#approve`) — the full surface the overloaded case_advance() must drive. Hooks
-    record the kwargs they receive (to prove `trigger_kwargs` flows into `tctx.kwargs`), and
+    record the kwargs they receive (bound from `trigger_kwargs` onto perform_* params), and
     `fail_submit` lets a test force a manual-edge failure to check it is FOLDED, not raised."""
 
     fsm_state_chains = ["[*] --> new -- go --> ready == submit ==> review -- approve [gated] --> done --> [*]"]
@@ -1040,11 +1040,11 @@ class _OverloadCase(FolderBackedCase):
     go_kwargs: dict | None = None
     submit_kwargs: dict | None = None
 
-    async def perform_go(self, tctx):
-        self.go_kwargs = dict(tctx.kwargs)
+    async def perform_go(self, tctx, *, x: int | None = None):
+        self.go_kwargs = {} if x is None else {"x": x}
 
-    async def perform_submit(self, tctx):
-        self.submit_kwargs = dict(tctx.kwargs)
+    async def perform_submit(self, tctx, *, note: str | None = None):
+        self.submit_kwargs = {} if note is None else {"note": note}
         if self.fail_submit:
             raise RuntimeError("submit boom")
 
@@ -1082,8 +1082,8 @@ def test_pinned_auto_trigger_fires_only_that_edge(tmp_path):
 
 
 def test_pinned_auto_trigger_accepts_optional_kwargs(tmp_path):
-    """The softened contract: an AUTO edge MAY be pinned WITH trigger_kwargs, and those
-    kwargs reach the hook via tctx.kwargs (the no-argument sweep still gets an empty bag)."""
+    """An AUTO edge MAY be pinned WITH trigger_kwargs; those kwargs bind onto
+    perform_* keyword-only params (the no-argument sweep still gets defaults)."""
 
     async def scenario():
         case = _OverloadCase.create_case_in_folder(tmp_path / "autokw", case_id="ak-1")
@@ -1100,8 +1100,8 @@ def test_pinned_auto_trigger_accepts_optional_kwargs(tmp_path):
 
 
 def test_pinned_manual_trigger_fires_and_passes_kwargs(tmp_path):
-    """A MANUAL ('==') edge can be driven through the reporter with trigger_kwargs, which
-    flow into the hook's tctx.kwargs — and the outcome is a normal progressed AdvanceResult."""
+    """A MANUAL ('==') edge can be driven through the reporter with trigger_kwargs,
+    which bind onto perform_* params — outcome is a normal progressed AdvanceResult."""
 
     async def scenario():
         case = _OverloadCase.create_case_in_folder(tmp_path / "man", case_id="m-1")

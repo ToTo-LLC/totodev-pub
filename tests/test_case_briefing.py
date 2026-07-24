@@ -48,7 +48,7 @@ class SampleCase(FolderBackedCase):
             trust_states={"reviewing", "done"}, keep=True),
 }
 
-    async def perform_intake(self, tctx):
+    async def perform_intake(self, tctx, *, source: str):
         """Pull the raw ticket payload into the case folder."""
 
     async def guard_funded(self, tctx) -> bool:
@@ -58,7 +58,7 @@ class SampleCase(FolderBackedCase):
     async def before_approve(self, tctx):
         """Snapshot the reviewer's decision before the transition commits."""
 
-    async def perform_approve(self, tctx):
+    async def perform_approve(self, tctx, *, notify: bool = True):
         """Stamp the ticket as approved and notify the customer."""
 
     async def perform_recheck(self, tctx):
@@ -145,20 +145,24 @@ def test_collect_triggers_docs_and_chokes():
 
     intake = by_name["intake"]
     assert intake.perform_doc == "Pull the raw ticket payload into the case folder."
+    assert intake.perform_params == ["source: str"]
     assert {(e.source, e.dest, e.auto) for e in intake.edges} == {("new", "reviewing", True)}
 
     approve = by_name["approve"]
     assert approve.before_doc == "Snapshot the reviewer's decision before the transition commits."
     assert approve.perform_doc == "Stamp the ticket as approved and notify the customer."
+    assert approve.perform_params == ["notify: bool = True"]
     assert approve.chokes == frozenset({"finance-api"})
     # Manual edges never receive the compiler's implicit @FAIL cap.
     assert approve.edges[0].guards == ["guard_funded"]
 
     fasttrack = by_name["fasttrack"]
     assert fasttrack.perform_doc is None          # never defined -> None, not an error
+    assert fasttrack.perform_params == []
     assert fasttrack.edges[0].guards == ["guard_funded"]
 
     recheck = by_name["recheck"]
+    assert recheck.perform_params == []
     # Auto + method guard: declaration order keeps the method, then implied @FAIL.
     assert recheck.edges[0].guards == [
         "guard_funded",
@@ -306,11 +310,16 @@ def test_render_markdown_surfaces_bound_method_names():
     """DSL names stay as identity; bound methods appear with trailing ()."""
     text = generate_case_briefing(SampleCase)
 
-    # Triggers: DSL → perform_*() in heading (guard-area arrow style); before_ stays below
-    assert "### `approve` → `perform_approve()`" in text
+    # Triggers: DSL → perform_*(..., kwargs) in heading; before_ stays below
+    assert "### `intake` → `perform_intake(..., source: str)`" in text
+    assert "### `approve` → `perform_approve(..., notify: bool = True)`" in text
+    assert "### `recheck` → `perform_recheck(...)`" in text
     assert "**Method:**" not in text
     assert "**Before:** `before_approve()`" in text
     assert "**Perform:**" not in text
+    assert "**Params:**" not in text
+    assert "perform_intake(*," not in text
+    assert "perform_recheck()`" not in text
 
     # Guards: DSL → method as a heading; docs stay out of a cramped table cell
     assert "### `funded` → `guard_funded()`" in text

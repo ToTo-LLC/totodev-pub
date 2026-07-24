@@ -42,6 +42,7 @@ from totodev_pub.folder_backed_case_support.case_assertions import (
     discover_class_assertions,
 )
 from totodev_pub.folder_backed_case_support.asset_schema import loader_name
+from totodev_pub.folder_backed_case_support.perform_signature import format_perform_params
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     _copy_guards,
     _is_fact_guard,
@@ -143,6 +144,7 @@ class StateDoc:
 class TriggerDoc:
     name: str
     perform_doc: Optional[str] = None
+    perform_params: list[str] = field(default_factory=list)
     before_doc: Optional[str] = None
     after_doc: Optional[str] = None
     edges: list[EdgeDoc] = field(default_factory=list)
@@ -280,9 +282,14 @@ def collect(case_cls: "type[FolderBackedCase]", *, options: CaseBriefingOptions 
             chokes = data.get("chokes", frozenset())
             soft_timeout_secs = data.get("soft_timeout_secs")
             soft_timeout_is_explicit = bool(data.get("soft_timeout_is_explicit", False))
+        perform_name = f"perform_{trigger}"
+        perform_fn = getattr(case_cls, perform_name, None)
         triggers.append(TriggerDoc(
             name=trigger,
-            perform_doc=_hook_doc(case_cls, f"perform_{trigger}", mode),
+            perform_doc=_hook_doc(case_cls, perform_name, mode),
+            perform_params=(
+                format_perform_params(perform_fn) if callable(perform_fn) else []
+            ),
             before_doc=_hook_doc(case_cls, f"before_{trigger}", mode),
             after_doc=_hook_doc(case_cls, f"after_{trigger}", mode),
             edges=edges,
@@ -641,6 +648,17 @@ def _fmt_method(name: str) -> str:
     return f"`{name}()`"
 
 
+def _fmt_perform_method(name: str, params: list[str]) -> str:
+    """Format ``perform_<trigger>`` with its kwargs contract for programmer eyes.
+
+    ``...`` stands for omitted ``self`` / ``tctx`` (not shown for clarity); the
+    listed names are the trigger kwargs callers pass through ``case.<trigger>``.
+    """
+    if not params:
+        return f"`{name}(...)`"
+    return f"`{name}(..., {', '.join(params)})`"
+
+
 def _fmt_guard_ref(name: str) -> str:
     """DSL guard identity mapped to the bound ``guard_<name>()`` method."""
     return f"`{name}` → {_fmt_method(f'{_GUARD_PREFIX}{name}')}"
@@ -759,8 +777,10 @@ def render_markdown(doc: CaseBriefingDoc, *, options: CaseBriefingOptions = Case
     if options.include_triggers_table and doc.triggers:
         sections = []
         for t in doc.triggers:
-            # Guard-area arrow style: DSL name → bound perform_*()
-            lines = [f"### `{t.name}` → {_fmt_method(f'perform_{t.name}')}"]
+            # Guard-area arrow style: DSL name → bound perform_*(kwargs contract)
+            lines = [
+                f"### `{t.name}` → {_fmt_perform_method(f'perform_{t.name}', t.perform_params)}"
+            ]
             if t.perform_doc:
                 lines.append(t.perform_doc)
             if t.before_doc:

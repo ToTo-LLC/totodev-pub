@@ -195,6 +195,15 @@ class AutoAdvanceBlocked(Exception):
         self.candidates = candidates or []
 
 
+class PerformParamsError(Exception):
+    """``tctx.kwargs`` did not match the ``perform_<trigger>`` signature.
+
+    Raised by the perform wrapper before work starts (missing/extra keys or light
+    type-check failure). Ordinary ``Exception`` so it absorbs through the usual
+    pre-commit failure path like any other ``before``/``perform_`` error.
+    """
+
+
 class TriggerTimeout(Exception):
     """A trigger's work (`perform_<trigger>`) was HARD-ABORTED for outrunning its kill
     ceiling (the `~<dur>` soft timeout, or the default, times the kill multiple). Raised by
@@ -398,10 +407,16 @@ class FsmBindingError(Exception):
         guard, action method, and callback the FSM touches MUST be a coroutine function
         (`async def`). A stray `def` would silently block the event loop for every other case
         a driver is advancing, so we reject it loudly here. (Relax with force_async=False.)
-      * BAD_ARITY — a recognized hook method cannot accept the trigger context `tctx`. Every
-        hook is dispatched with a single `tctx` argument (the case runs with send_event=True),
-        so a hook declared `(self)` would raise TypeError the instant its edge fired. We
-        reject it at construction instead. (Relax with require_tctx=False.)
+      * BAD_ARITY — a recognized non-perform hook method cannot accept the trigger
+        context `tctx`. Guards, `before_`/`after_`/`on_enter_`/`on_exit_` are
+        dispatched with a single `tctx` argument (the case runs with send_event=True),
+        so a hook declared `(self)` would raise TypeError the instant its edge fired.
+        We reject it at construction instead. (Relax with require_tctx=False.)
+        ``perform_<trigger>`` methods are checked separately (see BAD_PERFORM_SIGNATURE):
+        they take `tctx` plus optional keyword-only trigger kwargs.
+      * BAD_PERFORM_SIGNATURE — a `perform_<trigger>` method violates the kwargs
+        contract: must be `(self, tctx, *, ...)` with annotations on every keyword-only
+        param, no `*args`/`**kwargs`, and only list/dict/set (or immutable) defaults.
       * SEALED — a subclass redefined a name the base class reserves for its own machinery
         (e.g. `case_state`, `case_advance`). These names back core behavior and must not be
         shadowed; a subclass that wrote `def case_state(self)` has silently broken the base,
@@ -421,7 +436,8 @@ class FsmBindingError(Exception):
     message at construction time.
 
     Carries `carrier_name` and structured `missing` / `sync` / `orphaned` / `bad_arity` /
-    `sealed` / `bad_assertions` / `trigger_collisions` lists for programmatic inspection."""
+    `bad_perform_signatures` / `sealed` / `bad_assertions` / `trigger_collisions` lists for
+    programmatic inspection."""
 
     # transition-dict slot -> human label, for readable messages.
     _SLOT_LABEL = {
@@ -436,13 +452,14 @@ class FsmBindingError(Exception):
 
     def __init__(
         self, carrier_name: str, *, missing=None, sync=None, orphaned=None, bad_arity=None,
-        sealed=None, bad_assertions=None, trigger_collisions=None,
+        bad_perform_signatures=None, sealed=None, bad_assertions=None, trigger_collisions=None,
     ):
         self.carrier_name = carrier_name
         self.missing = list(missing or [])
         self.sync = list(sync or [])
         self.orphaned = list(orphaned or [])
         self.bad_arity = list(bad_arity or [])
+        self.bad_perform_signatures = list(bad_perform_signatures or [])
         self.sealed = list(sealed or [])
         self.bad_assertions = list(bad_assertions or [])
         self.trigger_collisions = list(trigger_collisions or [])
@@ -469,9 +486,17 @@ class FsmBindingError(Exception):
             )
         for name, kind, suffix in self.bad_arity:
             lines.append(
-                f"  - hook {name!r} cannot accept the trigger context; every hook is called "
-                f"with one `tctx` argument (send_event=True), so declare it "
+                f"  - hook {name!r} cannot accept the trigger context; every non-perform "
+                f"hook is called with one `tctx` argument (send_event=True), so declare it "
                 f"`async def {name}(self, tctx)` (use `tctx` even if unused)"
+            )
+        for name, problems in self.bad_perform_signatures:
+            detail = "; ".join(problems)
+            lines.append(
+                f"  - perform hook {name!r} has an invalid signature ({detail}); "
+                f"declare trigger kwargs as keyword-only after tctx, e.g. "
+                f"`async def {name}(self, tctx, *, path: str): ...` "
+                f"(or `async def {name}(self, tctx): ...` when the trigger takes no kwargs)"
             )
         for name, kind, suffix in self.orphaned:
             lines.append(
