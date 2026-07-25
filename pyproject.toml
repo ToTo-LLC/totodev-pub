@@ -43,9 +43,12 @@ llm = [
   "google-auth",
   "jinja2",
   "json-repair",
-  "langchain",
-  "langchain-community",
-  "langchain-core",
+  # simplified_llm.py uses the legacy 0.x import surface (langchain.prompts,
+  # langchain.schema, langchain_community.chat_models); langchain 1.x removed it.
+  # Pinned until the planned simplified_llm refactor lands.
+  "langchain>=0.3,<1",
+  "langchain-community<0.4",
+  "langchain-core<0.4",
   "langchain-google-genai",
   "nest-asyncio",
   "openai",
@@ -56,6 +59,11 @@ git = [
 ]
 sweep = [
   "pathspec",
+]
+# CaseWorkbench marimo skeleton generator only *emits* notebook text (no import
+# needed to generate); marimo is required at runtime to open a generated one.
+workbench = [
+  "marimo",
 ]
 all = [
   "luigi",
@@ -73,16 +81,19 @@ all = [
   "requests",
   "jinja2",
   "json-repair",
-  "langchain",
-  "langchain-community",
-  "langchain-core",
+  # Mirrors the llm extra's langchain pins (see comment there).
+  "langchain>=0.3,<1",
+  "langchain-community<0.4",
+  "langchain-core<0.4",
   "langchain-google-genai",
   "nest-asyncio",
   "openai",
   "GitPython",
   "pathspec",
+  "marimo",
 ]
 dev = [
+  "marimo",
   "mypy",
   "pytest",
   "pytest-asyncio",

@@ -198,6 +198,9 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     FsmChainParseError,
     FsmBindingError,
 )
+from totodev_pub.folder_backed_case_support.perform_signature import (
+    validate_perform_signature,
+)
 from totodev_pub.optional_dependencies import raise_missing_dependency
 
 # A state name: one or more [A-Za-z0-9_] characters (no dashes). This keeps state names
@@ -1017,16 +1020,20 @@ class FsmChainSpec:
             async (advance(), the generated triggers); a stray `def` instead of `async def`
             would silently block the event loop, so it is rejected here. Set force_async=False
             for the rare carrier that deliberately mixes in synchronous callables.
-          * ARITY (require_tctx, default True) — every RECOGNIZED hook method (a
-            `perform_`/`before_`/`after_`/`on_enter_`/`on_exit_`/`guard_` whose suffix maps
-            to a known state/trigger/guard) must accept the trigger context `tctx` as its
-            one argument after `self`. The machine runs with send_event=True, so every hook
-            is dispatched with a single `tctx`; a bare `(self)` hook would raise TypeError
+          * ARITY (require_tctx, default True) — every RECOGNIZED non-perform hook
+            (`before_`/`after_`/`on_enter_`/`on_exit_`/`guard_` whose suffix maps to a
+            known state/trigger/guard) must accept the trigger context `tctx` as its one
+            argument after `self`. The machine runs with send_event=True, so those hooks
+            are dispatched with a single `tctx`; a bare `(self)` hook would raise TypeError
             the instant its edge fired, so it is rejected here at build time instead. A
             `(self, *args)` hook passes. Set require_tctx=False to skip this scan.
+          * PERFORM SIGNATURE (require_tctx, default True) — every recognized
+            `perform_<trigger>` must be `(self, tctx, *, ...)` with annotations on every
+            keyword-only param (see validate_perform_signature). Those kwargs are the
+            trigger's call contract, bound from `tctx.kwargs` at fire time.
 
         `perform_<trigger>` stays OPTIONAL for manual-only triggers (`==`) — but if present
-        it is held to the async rule like everything else.
+        it is held to the async and signature rules like everything else.
 
         orphan_detection controls scanning for hook-looking typo traps:
           * "off"  — skip orphan scan
@@ -1097,6 +1104,9 @@ class FsmChainSpec:
             self._find_orphan_hook_methods(obj) if orphan_detection != "off" else []
         )
         bad_arity = self._find_bad_arity_hook_methods(obj) if require_tctx else []
+        bad_perform_signatures = (
+            self._find_bad_perform_signatures(obj) if require_tctx else []
+        )
         sealed = self._find_sealed_overrides(obj, sealed_names, sealed_owner)
         # Same predicate transitions uses in Machine._checked_assignment: any existing
         # attribute blocks bind of the convenience trigger method.
@@ -1106,7 +1116,8 @@ class FsmChainSpec:
         ]
 
         if (
-            missing or sync or bad_arity or sealed or trigger_collisions
+            missing or sync or bad_arity or bad_perform_signatures or sealed
+            or trigger_collisions
             or (orphan_detection == "error" and orphaned)
         ):
             raise FsmBindingError(
@@ -1115,6 +1126,7 @@ class FsmChainSpec:
                 sync=list(sync.values()),
                 orphaned=orphaned if orphan_detection == "error" else [],
                 bad_arity=bad_arity,
+                bad_perform_signatures=bad_perform_signatures,
                 sealed=sealed,
                 trigger_collisions=trigger_collisions,
             )
@@ -1178,14 +1190,13 @@ class FsmChainSpec:
         return orphans
 
     def _find_bad_arity_hook_methods(self, obj) -> list[tuple[str, str, str]]:
-        """Return RECOGNIZED hook methods (suffix maps to a known state/trigger/guard) that
-        cannot accept the trigger context `tctx`. Tuples are (method_name, kind, suffix),
-        same shape as _find_orphan_hook_methods. Every hook is dispatched with a single
-        `tctx` argument (the machine runs with send_event=True), so a hook declared `(self)`
-        would raise TypeError the moment its edge fires; this pulls that failure forward to
-        construction. Inverts the orphan suffix test (known, not unknown) and gates on arity
-        instead of name; explicit hand-built callables in compile_fsm() overrides are out of
-        scope (only convention-named carrier methods are scanned)."""
+        """Return RECOGNIZED non-perform hook methods that cannot accept `tctx`.
+
+        Tuples are (method_name, kind, suffix). Guards / before / after / on_enter /
+        on_exit are dispatched with a single `tctx` (send_event=True). ``perform_*``
+        methods are excluded — they use `_find_bad_perform_signatures` instead because
+        they may declare keyword-only trigger kwargs after `tctx`.
+        """
         expected_by_kind = self._orphan_expected_names_by_kind()
         bad: list[tuple[str, str, str]] = []
         for name in dir(type(obj)):
@@ -1195,10 +1206,34 @@ class FsmChainSpec:
             for prefix, kind in _HOOK_METHOD_PREFIXES.items():
                 if not name.startswith(prefix):
                     continue
+                if prefix == _PERFORM_METHOD_PREFIX:
+                    break
                 suffix = name[len(prefix):]
                 if suffix and suffix in expected_by_kind[kind] and not _accepts_tctx(fn):
                     bad.append((name, kind, suffix))
                 break
+        return bad
+
+    def _find_bad_perform_signatures(self, obj) -> list[tuple[str, list[str]]]:
+        """Return recognized ``perform_<trigger>`` methods with invalid kwargs contracts.
+
+        Each entry is ``(method_name, problem_strings)`` from
+        :func:`validate_perform_signature`.
+        """
+        expected_triggers = self._orphan_expected_names_by_kind()["trigger"]
+        bad: list[tuple[str, list[str]]] = []
+        for name in dir(type(obj)):
+            if not name.startswith(_PERFORM_METHOD_PREFIX):
+                continue
+            suffix = name[len(_PERFORM_METHOD_PREFIX):]
+            if not suffix or suffix not in expected_triggers:
+                continue
+            fn = getattr(obj, name, None)
+            if not callable(fn):
+                continue
+            problems = validate_perform_signature(fn)
+            if problems:
+                bad.append((name, problems))
         return bad
 
     @staticmethod

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import textwrap
 from pathlib import Path
 
@@ -614,3 +615,86 @@ def test_keep_all_idempotent(tmp_path):
     wb.focus(wb.case)
     text2 = keep.read_text(encoding="utf-8") if keep.exists() else ""
     assert "**" in text2 or "**" in text1
+
+
+# ---------------------------------------------------------------------------
+# custom_assertions / custom_assertions_dir
+# ---------------------------------------------------------------------------
+
+def test_custom_assertions_dir_points_at_case_folder(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    d = wb.custom_assertions_dir()
+    assert d == Path(wb.case.case_folder) / "assertions"
+
+
+def test_custom_assertions_empty(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    report = wb.custom_assertions()
+    assert report.paths == []
+    assert "No custom assertions" in report.narrative
+    assert report.directory == Path(wb.case.case_folder) / "assertions"
+
+
+def test_custom_assertions_lists_files(tmp_path):
+    wb = _wb(tmp_path)
+    wb.create(WbTicketCase)
+    adir = Path(wb.case.case_folder) / "assertions"
+    adir.mkdir()
+    (adir / "b_check.py").write_text("# assertion b\n", encoding="utf-8")
+    (adir / "a_check.py").write_text("# assertion a\n", encoding="utf-8")
+    (adir / "notes.txt").write_text("ignored\n", encoding="utf-8")  # non-.py ignored
+    report = wb.custom_assertions()
+    assert [p.name for p in report.paths] == ["a_check.py", "b_check.py"]  # sorted
+    assert "a_check.py" in report.narrative
+
+
+# ---------------------------------------------------------------------------
+# marimo_skeleton
+# ---------------------------------------------------------------------------
+
+def test_marimo_skeleton_default_stamped_path(tmp_path):
+    wb = _wb(tmp_path)
+    report = wb.marimo_skeleton(WbTicketCase)
+    assert report.path is not None
+    assert report.path.parent == wb.notebooks_root
+    assert report.path.name.startswith("WbTicketCase_workbench_")
+    assert report.path.name.endswith("Z.py")
+    src = report.path.read_text(encoding="utf-8")
+    ast.parse(src)  # valid python
+    # manual triggers of WbTicketCase surface as commented fire-cells
+    assert '"approve"' in src
+    assert '"reject"' in src
+
+
+def test_marimo_skeleton_survives_cleanup(tmp_path):
+    wb = _wb(tmp_path)
+    report = wb.marimo_skeleton(WbTicketCase)
+    assert report.path.exists()
+    wb.cleanup()  # wipes scratch_root children only
+    assert report.path.exists()
+
+
+def test_marimo_skeleton_by_class_name_string(tmp_path):
+    wb = _wb(tmp_path)
+    report = wb.marimo_skeleton("WbTicketCase")
+    assert report.path.exists()
+    ast.parse(report.path.read_text(encoding="utf-8"))
+
+
+def test_marimo_skeleton_explicit_path_and_overwrite_guard(tmp_path):
+    wb = _wb(tmp_path)
+    dest = tmp_path / "nb" / "my_notebook.py"
+    report = wb.marimo_skeleton(WbTicketCase, path=dest)
+    assert report.path == dest.resolve()
+    assert dest.exists()
+    with pytest.raises(WorkbenchError):
+        wb.marimo_skeleton(WbTicketCase, path=dest)  # exists, no overwrite
+    wb.marimo_skeleton(WbTicketCase, path=dest, overwrite=True)  # ok
+
+
+def test_marimo_skeleton_rejects_non_case(tmp_path):
+    wb = _wb(tmp_path)
+    with pytest.raises(WorkbenchError):
+        wb.marimo_skeleton(dict)  # not a FolderBackedCase

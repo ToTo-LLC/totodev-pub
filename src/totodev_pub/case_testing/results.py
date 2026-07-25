@@ -163,3 +163,14 @@ class FreezeDryReport(WorkbenchReport):
 @dataclass
 class ListExamplesReport(WorkbenchReport):
     examples: list[tuple[str, str]] = field(default_factory=list)  # (nickname, description)
+
+
+@dataclass
+class CustomAssertionsReport(WorkbenchReport):
+    paths: list[Path] = field(default_factory=list)  # assertions/*.py in the case folder
+    directory: Optional[Path] = None
+
+
+@dataclass
+class MarimoSkeletonReport(WorkbenchReport):
+    path: Optional[Path] = None  # the written notebook, or None when returned as text

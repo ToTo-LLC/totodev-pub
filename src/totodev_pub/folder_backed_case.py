@@ -63,7 +63,7 @@ from totodev_pub.folder_backed_case_support.exceptions import (
     CaseTypeMismatchError, RecordTypeMismatchError,
     IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
     AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError, MissingTriggerChokesError,
-    CaseTransitionInFlightError, CaseInvokedProcessError,
+    CaseTransitionInFlightError, CaseInvokedProcessError, PerformParamsError,
 )
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.aliased_asset_specs import AliasedAssetSpecs
@@ -102,6 +102,7 @@ __all__ = [
     "DetachedCaseError", "CaseTypeMismatchError",
     "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
+    "PerformParamsError",
     "CaseInvokedProcessError",
     "MissingAssetSchemaError", "MissingTriggerChokesError",
     "CaseIDGenerator", "TimeSlugCaseIDGenerator", "UUIDCaseIDGenerator",

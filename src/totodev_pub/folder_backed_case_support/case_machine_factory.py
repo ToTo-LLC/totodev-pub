@@ -25,8 +25,9 @@ from totodev_pub.folder_backed_case_support.constants import (
     LEASE_PULSE_FRACTION_DIVISOR,
 )
 from totodev_pub.folder_backed_case_support.exceptions import (
-    OwnershipLostError, TriggerTimeout,
+    OwnershipLostError, PerformParamsError, TriggerTimeout,
 )
+from totodev_pub.folder_backed_case_support.perform_signature import bind_perform_kwargs
 from totodev_pub.folder_backed_case_support.state_chain_parser import (
     FsmChainSpec,
     _PERFORM_METHOD_PREFIX,
@@ -186,8 +187,8 @@ class _CaseMachineFactory:
         # lease TTL (per state, once for this case's machine — see the check in _wrapped).
         ttl_warned_states: set[str] = set()
 
-        async def _invoke(tctx):
-            result = getattr(case, method_name)(tctx)
+        async def _invoke(tctx, bound):
+            result = getattr(case, method_name)(tctx, **bound)
             if inspect.isawaitable(result):
                 result = await result
             return result
@@ -211,6 +212,13 @@ class _CaseMachineFactory:
                     "still let the lease lapse; consider a shorter trigger_warn_secs.",
                     trigger, state, kill, DEFAULT_LEASE_TTL_SECS,
                 )
+            # Bind/check kwargs BEFORE journal start so invalid calls never look "started".
+            method = getattr(case, method_name)
+            raw_kwargs = getattr(tctx, "kwargs", None) or {}
+            try:
+                bound = bind_perform_kwargs(method, dict(raw_kwargs))
+            except PerformParamsError as exc:
+                raise PerformParamsError(f"trigger {trigger!r}: {exc}") from None
             # CASE_TRIGGER_STARTED before work (see CaseEventJournal.log_trigger_started).
             journal.log_trigger_started(trigger, state=state, warn=warn, kill=kill)
             start = time.monotonic()
@@ -220,7 +228,7 @@ class _CaseMachineFactory:
                 # kill-bounded) awaited step, so a slow step does not lapse the lease. It
                 # only spans the work — guards already ran and passed before `before` fires.
                 async with _LeaseKeepalive(case):
-                    result = await asyncio.wait_for(_invoke(tctx), kill)
+                    result = await asyncio.wait_for(_invoke(tctx, bound), kill)
                 completed = True
                 return result
             except asyncio.TimeoutError:

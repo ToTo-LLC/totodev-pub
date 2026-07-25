@@ -325,7 +325,16 @@ import random
 
 # Setup logger
 logger: logging.Logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for development
+# NOTE: this library deliberately does NOT configure the root logger — the host
+# application owns logging config (the example scripts under
+# cached_file_folders_support/examples/ call logging.basicConfig() in their own
+# main(), which is the right place). A prior `logging.basicConfig(level=DEBUG)`
+# lived here and, because this mixin is imported almost everywhere, ran at import
+# time for every embedder: it forced DEBUG onto the root logger and bound a
+# StreamHandler to whatever sys.stderr was in effect *at import*. That single
+# bound reference then defeated later stream redirection (pytest capture,
+# notebooks/marimo cell output, service log routing) and silently pre-empted the
+# host's own config. Do not re-add a basicConfig()/handler here.
 
 # File operations
 _DEFAULT_ENCODING = 'utf-8'
