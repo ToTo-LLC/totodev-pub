@@ -32,22 +32,14 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import inspect
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Optional
 
-from totodev_pub.folder_backed_case_support.case_assertions import (
-    discover_class_assertions,
-)
-from totodev_pub.folder_backed_case_support.asset_schema import loader_name
-from totodev_pub.folder_backed_case_support.perform_signature import format_perform_params
-from totodev_pub.folder_backed_case_support.state_chain_parser import (
-    _copy_guards,
-    _is_fact_guard,
-    _is_method_guard,
-)
+from totodev_pub.folder_backed_case_support.case_analysis import analyze
+from totodev_pub.folder_backed_case_support.perform_signature import format_perform_param
+from totodev_pub.folder_backed_case_support.state_chain_parser import _is_fact_guard
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -65,14 +57,6 @@ __all__ = [
 # importing the parser's private _GUARD_METHOD_PREFIX -- to_networkx()'s public
 # contract is the source of truth this module consumes, not parser internals.
 _GUARD_PREFIX = "guard_"
-
-# The overridable lifecycle hooks a subclass may customize (SECTION 3 of
-# FolderBackedCase). Checked by identity against the base class to decide
-# whether a subclass actually overrode one.
-_OVERRIDABLE_HOOKS = (
-    "on_transition_exception", "on_terminating", "on_assertion_failed",
-    "case_ext_status_info",
-)
 
 _WILDCARD_SENTINEL = "*"  # must match state_chain_parser._WILDCARD_SOURCE
 _MERMAID_WILDCARD_ID = "ANY_STATE"
@@ -200,16 +184,14 @@ def _first_paragraph(doc: Optional[str]) -> Optional[str]:
     return first.strip() or None
 
 
-def _hook_doc(case_cls: type, name: str, mode: str) -> Optional[str]:
-    if mode == "none":
+def _apply_docstring_mode(raw: Optional[str], mode: str) -> Optional[str]:
+    """Apply the briefing's ``docstring_mode`` to a raw docstring from the
+    analyzer: ``none`` drops it, ``full`` keeps it, ``first_paragraph`` trims.
+    Reproduces the old ``_hook_doc`` behavior now that extraction lives in
+    ``case_analysis``."""
+    if mode == "none" or not raw:
         return None
-    fn = getattr(case_cls, name, None)
-    if fn is None or not callable(fn):
-        return None
-    doc = inspect.getdoc(fn)
-    if not doc:
-        return None
-    return doc if mode == "full" else _first_paragraph(doc)
+    return raw if mode == "full" else _first_paragraph(raw)
 
 
 def _bare_guard_name(condition: str) -> str:
@@ -220,117 +202,91 @@ def _bare_guard_name(condition: str) -> str:
 
 def collect(case_cls: "type[FolderBackedCase]", *, options: CaseBriefingOptions = CaseBriefingOptions()) -> CaseBriefingDoc:
     """Build a ``CaseBriefingDoc`` for ``case_cls`` — class-level only, no case
-    folder or instance is ever touched."""
+    folder or instance is ever touched.
+
+    Thin adapter over ``case_analysis.analyze()``: the shared analyzer does the
+    introspection and carries raw docstrings; this maps its facts into the
+    briefing's data model, applying ``options.docstring_mode`` trimming."""
     mode = options.docstring_mode
-    spec = case_cls.case_type_spec()
-    fsm = spec.fsm
-    graph = fsm.to_networkx(
+    analysis = analyze(
+        case_cls,
         wildcard_pseudo_state=options.wildcard_pseudo_state,
         include_implied_caps=options.include_implied_caps,
     )
 
-    # case_cls.__doc__ (not inspect.getdoc()) deliberately: a subclass that omits its
-    # own docstring should render with none, not silently inherit FolderBackedCase's
-    # generic class blurb (inspect.getdoc() walks the MRO for exactly that fallback).
-    own_doc = case_cls.__doc__
-    class_doc = inspect.cleandoc(own_doc) if own_doc and mode != "none" else None
-    if class_doc is not None and mode != "full":
-        class_doc = _first_paragraph(class_doc)
+    states = [
+        StateDoc(
+            name=s.name,
+            initial=s.initial,
+            default_initial=s.default_initial,
+            terminal=s.terminal,
+            timed_escape=s.timed_escape,
+            on_enter_doc=_apply_docstring_mode(s.on_enter_doc_raw, mode),
+            on_exit_doc=_apply_docstring_mode(s.on_exit_doc_raw, mode),
+            assertions=[
+                (slug, _apply_docstring_mode(raw, mode))
+                for slug, _method, raw in s.class_assertions
+            ],
+        )
+        for s in analysis.states
+    ]
 
-    assertions_by_state = discover_class_assertions(case_cls, fsm.states)
-
-    states: list[StateDoc] = []
-    for name in fsm.states:
-        node = graph.nodes[name]
-        assertions = [
-            (slug, _hook_doc(case_cls, method_name, mode))
-            for slug, method_name in assertions_by_state.get(name, [])
-        ]
-        states.append(StateDoc(
-            name=name,
-            initial=node["initial"],
-            default_initial=node["default_initial"],
-            terminal=node["terminal"],
-            timed_escape=node["timed_escape"],
-            on_enter_doc=_hook_doc(case_cls, f"on_enter_{name}", mode),
-            on_exit_doc=_hook_doc(case_cls, f"on_exit_{name}", mode),
-            assertions=assertions,
-        ))
-
-    guard_users: dict[str, set[str]] = {}
-    triggers: list[TriggerDoc] = []
-    for trigger in fsm.triggers:
-        edges: list[EdgeDoc] = []
-        chokes = frozenset()
-        soft_timeout_secs = None
-        soft_timeout_is_explicit = False
-        for u, v, data in graph.edges(data=True):
-            if data.get("trigger") != trigger:
-                continue
-            guards = _copy_guards(data.get("guards"))
-            for item in guards:
-                if _is_method_guard(item):
-                    guard_users.setdefault(_bare_guard_name(item), set()).add(trigger)
-            edges.append(EdgeDoc(
-                source=u,
-                dest=v,
-                auto=bool(data.get("auto", False)),
-                guards=guards,
-                wildcard_expanded=bool(data.get("wildcard_expanded", False)),
-                wildcard_pending=bool(data.get("wildcard_pending", False)),
-            ))
-            chokes = data.get("chokes", frozenset())
-            soft_timeout_secs = data.get("soft_timeout_secs")
-            soft_timeout_is_explicit = bool(data.get("soft_timeout_is_explicit", False))
-        perform_name = f"perform_{trigger}"
-        perform_fn = getattr(case_cls, perform_name, None)
-        triggers.append(TriggerDoc(
-            name=trigger,
-            perform_doc=_hook_doc(case_cls, perform_name, mode),
-            perform_params=(
-                format_perform_params(perform_fn) if callable(perform_fn) else []
-            ),
-            before_doc=_hook_doc(case_cls, f"before_{trigger}", mode),
-            after_doc=_hook_doc(case_cls, f"after_{trigger}", mode),
-            edges=edges,
-            chokes=chokes,
-            soft_timeout_secs=soft_timeout_secs,
-            soft_timeout_is_explicit=soft_timeout_is_explicit,
-        ))
+    triggers = [
+        TriggerDoc(
+            name=t.name,
+            perform_doc=_apply_docstring_mode(t.perform_doc_raw, mode),
+            perform_params=[format_perform_param(p) for p in t.perform_params],
+            before_doc=_apply_docstring_mode(t.before_doc_raw, mode),
+            after_doc=_apply_docstring_mode(t.after_doc_raw, mode),
+            edges=[
+                EdgeDoc(
+                    source=e.source,
+                    dest=e.dest,
+                    auto=e.auto,
+                    guards=e.guards,
+                    wildcard_expanded=e.wildcard_expanded,
+                    wildcard_pending=e.wildcard_pending,
+                )
+                for e in t.edges
+            ],
+            chokes=t.chokes,
+            soft_timeout_secs=t.soft_timeout_secs,
+            soft_timeout_is_explicit=t.soft_timeout_is_explicit,
+        )
+        for t in analysis.triggers
+    ]
 
     guards = [
         GuardDoc(
-            name=bare,
-            doc=_hook_doc(case_cls, f"{_GUARD_PREFIX}{bare}", mode),
-            used_by_triggers=sorted(users),
+            name=g.name,
+            doc=_apply_docstring_mode(g.doc_raw, mode),
+            used_by_triggers=list(g.used_by_triggers),
         )
-        for bare, users in sorted(guard_users.items())
+        for g in analysis.guards
     ]
 
     assets = [
         AssetDoc(
-            alias=alias,
-            relative_path=(a_spec := spec.assets.spec(alias)).relative_path,
-            loader_name=loader_name(a_spec.loader),
-            trust_states=a_spec.trust_states,
-            keep=a_spec.keep,
-            many=a_spec.many,
+            alias=a.alias,
+            relative_path=a.relative_path,
+            loader_name=a.loader_name,
+            trust_states=a.trust_states,
+            keep=a.keep,
+            many=a.many,
         )
-        for alias in spec.assets.aliases()
+        for a in analysis.assets
     ]
 
-    from totodev_pub.folder_backed_case import FolderBackedCase as _Base
     overridden_hooks = [
-        HookDoc(name=name, doc=_hook_doc(case_cls, name, mode))
-        for name in _OVERRIDABLE_HOOKS
-        if getattr(case_cls, name) is not getattr(_Base, name)
+        HookDoc(name=h.name, doc=_apply_docstring_mode(h.doc_raw, mode))
+        for h in analysis.overridden_hooks
     ]
 
     return CaseBriefingDoc(
-        case_cls_name=case_cls.__name__,
-        source=f"{case_cls.__module__}:{case_cls.__name__}",
-        class_doc=class_doc,
-        fsm_graph=graph,
+        case_cls_name=analysis.case_cls_name,
+        source=analysis.source,
+        class_doc=_apply_docstring_mode(analysis.class_doc_raw, mode),
+        fsm_graph=analysis.fsm_graph,
         states=states,
         triggers=triggers,
         guards=guards,

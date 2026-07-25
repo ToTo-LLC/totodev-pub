@@ -60,6 +60,11 @@ git = [
 sweep = [
   "pathspec",
 ]
+# CaseWorkbench marimo skeleton generator only *emits* notebook text (no import
+# needed to generate); marimo is required at runtime to open a generated one.
+workbench = [
+  "marimo",
+]
 all = [
   "luigi",
   "networkx",
@@ -85,8 +90,10 @@ all = [
   "openai",
   "GitPython",
   "pathspec",
+  "marimo",
 ]
 dev = [
+  "marimo",
   "mypy",
   "pytest",
   "pytest-asyncio",

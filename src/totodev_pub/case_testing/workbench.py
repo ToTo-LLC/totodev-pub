@@ -102,6 +102,7 @@ from totodev_pub.case_testing.results import (
     CasesReport,
     CloneReport,
     CreateReport,
+    CustomAssertionsReport,
     DoctorFinding,
     DoctorReport,
     FocusReport,
@@ -111,6 +112,7 @@ from totodev_pub.case_testing.results import (
     HistoryStep,
     IncomingAssetsReport,
     ListExamplesReport,
+    MarimoSkeletonReport,
     PathReport,
     ProbeEdge,
     ProbeReport,
@@ -123,6 +125,7 @@ from totodev_pub.case_testing.results import (
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.folder_backed_case_support.constants import (
+    ASSERTS_DIR_NAME,
     EV_ALERTED,
     EV_ASSERT_FAILED,
     EV_ENTRY_EXCEPTION,
@@ -136,6 +139,10 @@ from totodev_pub.folder_backed_case_support.constants import (
     WORKBENCH_DIR_NAME,
 )
 from totodev_pub.folder_backed_case_support.case_briefing import _fmt_fact_guard
+from totodev_pub.folder_backed_case_support.case_workbench_marimo import (
+    MarimoSkeletonOptions,
+    generate_workbench_notebook,
+)
 from totodev_pub.folder_backed_case_support.state_chain_parser import _is_method_guard
 
 _ASSET_LIKE_SUFFIXES = frozenset({
@@ -147,6 +154,7 @@ _ASSET_LIKE_SUFFIXES = frozenset({
 _HELP_SECTIONS: list[tuple[str, frozenset[str]]] = [
     ("Construct / shelf", frozenset({
         "for_project", "list_examples", "clone", "create", "freeze_dry",
+        "marimo_skeleton",
     })),
     ("Scratch / focus", frozenset({
         "cases", "focus", "case", "cleanup", "path", "tree", "head",
@@ -155,10 +163,11 @@ _HELP_SECTIONS: list[tuple[str, frozenset[str]]] = [
     ("Drive", frozenset({"advance", "trigger", "run"})),
     ("Inspect", frozenset({
         "status", "probe", "problems", "history", "doctor",
+        "custom_assertions", "custom_assertions_dir",
     })),
     ("Meta", frozenset({
         "help", "refresh_class_index", "fixtures_root", "scratch_root",
-        "project_root",
+        "notebooks_root", "project_root",
     })),
 ]
 
@@ -195,6 +204,11 @@ class CaseWorkbench:
     """Single-session helper for constructing, cloning, driving, and freeze-drying one case at a time.
 
     See the module docstring for a usage tour (project setup, happy path, async notes).
+
+    Two static-analysis generators pair with the workbench: the case briefing
+    (``case_briefing.generate_case_briefing``) documents a case type, and
+    ``marimo_skeleton()`` here emits a ready-to-drive marimo notebook for one —
+    the interactive twin of the briefing.
     """
 
     _HELP_EXCLUDE: frozenset[str] = frozenset()
@@ -243,6 +257,13 @@ class CaseWorkbench:
     @property
     def scratch_root(self) -> Path:
         return self._scratch_root
+
+    @property
+    def notebooks_root(self) -> Path:
+        """Where generated marimo notebooks are written by default: a sibling of
+        the scratch pool (``volatile/case-workbench/notebooks/``), so it survives
+        ``cleanup()`` (which only wipes ``scratch_root``'s children)."""
+        return self._scratch_root.parent / "notebooks"
 
     @property
     def project_root(self) -> Path | None:
@@ -1285,6 +1306,91 @@ class CaseWorkbench:
             narrative="\n".join(lines) if lines else f"(empty group {group})",
             paths=paths,
             group=group,
+        )
+
+    def custom_assertions_dir(self, case: FolderBackedCase | None = None) -> Path:
+        """The case's ``assertions/`` folder — where per-case ("custom")
+        assertion files (``case_assert_<state>_<slug>`` functions) live. The
+        folder may not exist yet; this just points at where they go."""
+        case = self._resolve_case(case)
+        return Path(case.case_folder) / ASSERTS_DIR_NAME
+
+    def custom_assertions(
+        self, case: FolderBackedCase | None = None, *, full: bool = False,
+    ) -> CustomAssertionsReport:
+        """List the case's custom-assertion files (``assertions/*.py``) — exactly
+        the files the runtime assertion sweep discovers.
+
+        These are the per-folder channel ("code that arrived as data"), distinct
+        from CLASS assertions defined as methods on the subclass.
+        """
+        case = self._resolve_case(case)
+        directory = Path(case.case_folder) / ASSERTS_DIR_NAME
+        shown = self._display_path(directory, full=full)
+        if not directory.is_dir():
+            return CustomAssertionsReport(
+                narrative=(
+                    f"No custom assertions yet. Create {shown} and drop a file "
+                    "defining case_assert_<state>_<slug>(case_reader, ltx)."
+                ),
+                paths=[],
+                directory=directory,
+            )
+        paths = sorted(p.resolve() for p in directory.glob("*.py"))
+        if paths:
+            narrative = "\n".join(self._display_path(p, full=full) for p in paths)
+        else:
+            narrative = f"No custom assertions yet (empty {shown})."
+        return CustomAssertionsReport(
+            narrative=narrative, paths=paths, directory=directory,
+        )
+
+    def marimo_skeleton(
+        self,
+        case_cls_or_name: type | str,
+        *,
+        path: Path | str | None = None,
+        options: MarimoSkeletonOptions | None = None,
+        overwrite: bool = False,
+    ) -> MarimoSkeletonReport:
+        """Generate a marimo skeleton notebook for a case CLASS and write it out.
+
+        *case_cls_or_name* may be a ``FolderBackedCase`` subclass or a class-name
+        string (resolved through the class index, like ``create`` / ``clone``).
+        With no *path*, writes a datetime-stamped file under ``notebooks_root``;
+        a fresh stamp each call means regeneration never clobbers a notebook you
+        have edited. A notebook is seeded from one class but may drive many
+        cases — it is not owned by any case folder.
+        """
+        case_cls = case_cls_or_name
+        if isinstance(case_cls, str):
+            case_cls = self._class_index.ensure_registered(case_cls, case_type_registry)
+        if not isinstance(case_cls, type) or not issubclass(case_cls, FolderBackedCase):
+            raise WorkbenchError(
+                "marimo_skeleton() expects a FolderBackedCase subclass or "
+                f"class-name string; got {case_cls_or_name!r}."
+            )
+        opts = options if options is not None else MarimoSkeletonOptions()
+        text = generate_workbench_notebook(
+            case_cls, module_path=case_cls.__module__, options=opts,
+        )
+
+        if path is not None:
+            dest = Path(path).resolve()
+            if dest.exists() and not overwrite:
+                raise WorkbenchError(
+                    f"{self._display_path(dest)} exists; pass overwrite=True to replace it."
+                )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            notebooks = self.notebooks_root
+            notebooks.mkdir(parents=True, exist_ok=True)
+            dest = notebooks / f"{case_cls.__name__}_workbench_{_utc_stamp()}Z.py"
+
+        dest.write_text(text, encoding="utf-8")
+        return MarimoSkeletonReport(
+            narrative=f"Wrote marimo notebook → {self._display_path(dest)}",
+            path=dest,
         )
 
     def status(self, case: FolderBackedCase | None = None) -> StatusReport:

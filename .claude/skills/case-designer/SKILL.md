@@ -60,6 +60,8 @@ instead of linking out.
 10. **Offer a case briefing** — ask if the developer wants a rendered
     summary of the finished class (lifecycle diagram, states/triggers/guards/
     assertions/assets tables) to sanity-check the whole design at a glance.
+11. **Offer a workbench notebook** — ask if they'd like a ready-to-drive marimo
+    skeleton for exercising the new class in a `CaseWorkbench`.
 
 Before drafting chains, read **FSM design principles** in
 `references/dsl_and_hooks.md` (start of that file). Then use the same file for
@@ -478,3 +480,36 @@ tables — worth fixing before handing the file back if so.
 Show the case briefing to the developer directly (or save it alongside the
 generated class if they'd like a copy) — don't just report that it
 succeeded.
+
+## Step 11 — Offer a workbench notebook
+
+Where the briefing *documents* the class, a **workbench notebook** lets the
+developer *drive* it. After the briefing (or instead of it, if they skipped),
+**ask** whether they'd like a ready-to-run **marimo skeleton** for exercising
+the new class in a `CaseWorkbench` — again, don't generate it unprompted.
+
+It is produced by the interactive twin of the briefing generator,
+`totodev_pub.folder_backed_case_support.case_workbench_marimo`, from the same
+class-level analysis: import + `CaseWorkbench.create()`, commented run-button-
+gated examples for each manual trigger (with every `perform_<trigger>` kwarg
+pre-filled), a few run-loop flavors, the custom-assertions folder, and
+freeze-dry / detach.
+
+If they say yes, either write it via the workbench (stamped file under
+`volatile/case-workbench/notebooks/`):
+
+```python
+from totodev_pub.case_testing import CaseWorkbench
+wb = CaseWorkbench.for_project()
+print(wb.marimo_skeleton(<GeneratedClass>))
+```
+
+or emit the text via the CLI:
+
+```bash
+python -m totodev_pub.folder_backed_case_support.case_workbench_marimo <module path>:<GeneratedClass>
+```
+
+Like the briefing, this touches the class only — no case folder is created (the
+*notebook*, when run, is what creates and drives a live case). See
+`docs/case-workbench-notebooks.md` for the full guide.

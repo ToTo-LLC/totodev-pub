@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import inspect
 import types
+from dataclasses import dataclass
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 # Defaults we accept and deepcopy when applying (shared mutable default footgun).
@@ -240,23 +241,65 @@ def _format_annotation(annotation: Any) -> str:
     return text
 
 
-def format_perform_params(fn) -> list[str]:
-    """Human-readable keyword-only param summaries for briefing/docs.
+@dataclass(frozen=True)
+class PerformParam:
+    """One keyword-only parameter of a ``perform_<trigger>`` method.
 
-    Each entry looks like ``path: str`` or ``force: bool = False``.
+    The structured form behind :func:`format_perform_params`: unlike the
+    display string, it carries the *raw* ``default`` value (not its ``repr``)
+    and an explicit ``required`` flag, so callers that need to build real
+    keyword arguments — e.g. a notebook generator emitting
+    ``await wb.trigger("x", path=..., force=False)`` — have what they need
+    without re-parsing the signature.
+    """
+
+    name: str
+    annotation_display: str
+    has_default: bool
+    default: Any
+    required: bool
+
+
+def describe_perform_params(fn) -> list[PerformParam]:
+    """Structured keyword-only params of a ``perform_<trigger>`` callable.
+
+    Empty list when the signature is not introspectable. Skips ``tctx`` and any
+    non-keyword-only parameter, mirroring :func:`format_perform_params` (which
+    is now built on top of this).
     """
     try:
         params = _params_after_self(fn)
     except (TypeError, ValueError):
         return []
     hints = _resolved_annotations(fn)
-    lines: list[str] = []
+    out: list[PerformParam] = []
     for param in params[1:]:
         if param.kind != inspect.Parameter.KEYWORD_ONLY:
             continue
         ann = _format_annotation(_annotation_for(fn, param, hints))
-        if param.default is inspect.Parameter.empty:
-            lines.append(f"{param.name}: {ann}")
-        else:
-            lines.append(f"{param.name}: {ann} = {param.default!r}")
-    return lines
+        has_default = param.default is not inspect.Parameter.empty
+        out.append(
+            PerformParam(
+                name=param.name,
+                annotation_display=ann,
+                has_default=has_default,
+                default=param.default if has_default else None,
+                required=not has_default,
+            )
+        )
+    return out
+
+
+def format_perform_param(p: PerformParam) -> str:
+    """Render one :class:`PerformParam` as ``path: str`` / ``force: bool = False``."""
+    if p.required:
+        return f"{p.name}: {p.annotation_display}"
+    return f"{p.name}: {p.annotation_display} = {p.default!r}"
+
+
+def format_perform_params(fn) -> list[str]:
+    """Human-readable keyword-only param summaries for briefing/docs.
+
+    Each entry looks like ``path: str`` or ``force: bool = False``.
+    """
+    return [format_perform_param(p) for p in describe_perform_params(fn)]
