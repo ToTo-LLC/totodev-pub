@@ -209,3 +209,181 @@ listing, a resource-throttling service, a log-shipping story, an explicit archiv
 re-implement the concrete class against that foundation instead of against `pathlib`." That's a
 substantial project — closer to "write a new backend from the same contract" than "port an
 existing one" — which is the framing worth carrying into any scoping conversation about that bid.
+
+---
+
+## Brainstorm addendum (2026-07-31): Case Persistence seam
+
+Status: exploratory notes from a design brainstorm. Not scheduled work. Decisions below are
+directional only.
+
+### Directional choices so far
+
+- **Primary abstraction is a local Python persistence interface**, not a networked server.
+  Filesystem-backed persistence remains the dominant / default use case. A remote Case
+  Persistence Server (CPS) is a project-specific backend for large deployments that can
+  tolerate customization cost (and client platform affinity: AWS / Azure / etc.).
+- **Ownership stays sticky.** A worker process still holds a live case object under a lease;
+  the persistence layer supplies durable state plus a real lease/CAS primitive. Heartbeat
+  lifetime may be shorter in networked deployments than today's local default.
+- **External "fire trigger" inbox is enterprise-only** for now. Arbitrary processes enqueue
+  trigger intents for a `case_id`; only the current lease holder dequeues and executes them
+  locally (hooks/guards never run remotely). Optional push-notify to the holder is a delivery
+  optimization on top of a durable inbox. Today, `CaseManager`'s mailbox already carries some
+  of this responsibility in the local/filesystem world — note the overlap; do not try to unify
+  or redesign that here.
+
+### Open question — case identity / unique locator (`Path`)
+
+**Do not change the public API for this before release** (deferred). Documented so we don't
+forget the tension.
+
+Today the public identity of a case is largely a folder `Path`: `create_case_in_folder`,
+rehydrate/peek/`get_case_reader`, pool-driver membership, and `case_folder` all speak `Path`.
+`loader=Path` is also a documented asset pattern. That is natural for the local dominant case,
+but it locks the *addressing model* to filesystem topology if left as the only story.
+
+In a network scenario a bare `case_id` is unlikely to be a globally unique locator (IDs may be
+unique only within one CPS / tenancy / deployment). One escape hatch worth remembering: a
+**pseudo-path / URI locator** that still acts as the unique locator type in client code, e.g.
+something that embeds both the CPS authority and the case id
+(`cps://host:port/cases/{case_id}`, or similar), so pools/readers keep a single "locator"
+concept while the FS backend continues to interpret a real filesystem `Path`. Whether that
+locator remains a `pathlib.Path`, becomes a dedicated locator type, or is an opaque string is
+unsettled — just a thought for preserving "unique locator" semantics without pretending every
+case lives on a POSIX tree.
+
+**Pre-release stance:** leave folder-as-identity alone for now; revisit only if we find a
+stronger release-blocker. The pseudo-path idea is a future compatibility strategy, not a
+current task.
+
+### Pre-release risk ranking (brainstorm)
+
+Goal: catch architectural debt that becomes costly the day external code depends on
+`FolderBackedCase`. Not a commitment to do the enterprise port.
+
+#### Fix / discipline before release (small)
+
+1. **Stop growing Path deeper into the basic contract.** New cross-cutting APIs (pool lookup,
+   manager client helpers, peeks aimed at “the case,” etc.) should prefer `case_id` or an
+   opaque locator where practical; don’t add more “folder is the only handle” surfaces.
+2. **Doc clarity: semantic id vs FS locator.** State explicitly that `case_id` is the semantic
+   identity and `case_folder` is the filesystem binding locator for the local backend. No code
+   change required; reduces future confusion when a URI-shaped locator appears.
+
+#### Document only (do not change code now)
+
+3. **Path-as-identity / pseudo-URI locator** — see open question above.
+4. **“Atomically movable folder”** — keep as a *filesystem-backend* property, not a portable
+   promise of the case abstraction.
+5. **`loader=Path` / path-returning asset helpers** — convenient local ergonomics; subclasses that
+   treat assets as openable local files will not port cleanly. Acceptable for v1; call out.
+6. **`CaseManager` mailbox vs future CPS trigger-inbox** — same *shape* of problem, different
+   layer; unify later if ever, not now.
+7. **`TimeSlugCaseIDGenerator` multi-process caveat** — already partly documented; remains a
+   footgun if intake is multi-process against one tree. Fine for dominant single-writer local use.
+
+#### Ignore until an enterprise port
+
+8. Lease CAS / distributed lock semantics  
+9. Event log as a real indexed store (vs directory listing)  
+10. Asset glob / prefix-list semantics on object stores  
+11. Distributed choke / rate limiting  
+12. `logs/case.log` append → log shipper  
+13. Implementing the persistence interface or a CPS at all  
+
+### Architecture shapes under discussion (not chosen)
+
+Shared assumptions for all three: local FS remains default; sticky lease-held live objects;
+enterprise trigger-inbox is CPS-side only (not in the core local interface); CPS internals are
+project-specific (DB + object store as needed).
+
+**Shape 1 — Internal `CasePersistence` protocol (recommended lean-to)**  
+`FolderBackedCase` is rewritten to talk only to a small persistence protocol (mint id, lease
+CAS, event append/list, record read/write, asset get/put/list, optional flush). Default impl:
+`FilesystemCasePersistence` (today’s POSIX behavior). Remote impl: thin client to a CPS.
+Subclass authors keep using `FolderBackedCaseInterface`; storage is an injectable/bind-time
+detail.  
+*Pros:* one case class, clean seam, FS path stays first-class via the default impl.  
+*Cons:* real refactor of internals when the time comes; protocol must be gotcha-resistant
+(conditional writes, not just CRUD).
+
+**Shape 2 — Parallel backend class**  
+Leave `FolderBackedCase` as the FS implementation forever; add something like
+`PersistenceBackedCase` (same interface, different foundation) for enterprise.  
+*Pros:* zero risk to the local/default code path; enterprise customization is literally a
+forked backend.  
+*Cons:* two implementations of journal/assets/lease behavior to keep in contract sync; drift
+risk is high over years.
+
+**Shape 3 — Locator + persistence always explicit**  
+Every bind takes `(locator, persistence)`. FS default can sugar this (`Path` → filesystem
+persistence). Network locators (`cps://…/cases/{id}`) pair with remote persistence.  
+*Pros:* makes the dual-locator story honest; matches the pseudo-path idea cleanly.  
+*Cons:* noisier API for the dominant simple case unless sugar is excellent; easier to
+mis-wire locator/persistence pairs.
+
+**Working lean:** Shape 1 for the library seam, with Shape 3’s locator sugar as a future
+API refinement if/when CPS exists — not a reason to destabilize v1. Shape 2 only if we
+decide the FS class must never be touched again.
+
+### Folder bag as interchange
+
+**Floor (required if CPS exists):** the familiar case folder remains a deep assumption as a
+**canonical bag-of-files interchange format**. CPS can:
+
+- **Import / take ownership** of a case presented as that folder tree (record, events, assets,
+  keep manifest, etc.), then store it in whatever DB/object mix the project chooses.
+- **Export / materialize** the same bag on demand for ops, debug, migration, archival, or
+  handoff back into filesystem-world tooling.
+
+So even a networked case is still “a self-describing directory tree” at the boundary. Local
+`FolderBackedCase` is not an awkward legacy — it is the reference serialization. Live owners
+in a networked deployment are assumed to use the atomic persistence API against CPS; the bag
+is the portable boundary, not the required working set.
+
+**Mention only — lease-tied checkout / working copy:** an interesting future optimization
+where acquiring the lease materializes a local bag and flush/detach reconciles to CPS. Not
+part of the baseline architecture. Concerns if ever pursued: writable checkout must be
+lease-fenced (zombie flush after expiry); full-bag hydrate is costly for fat assets (pushes
+toward lazy/incremental sync, which starts to reinvent the atomic API); flush consistency and
+round-trip fidelity through the folder layout would need explicit design. For now: note the
+idea, do not build the architecture around it.
+
+### Conceptual architecture (draft — pending agreement)
+
+```text
+  [ subclass / CaseManager / admin tools ]
+                 |
+                 v
+        FolderBackedCaseInterface     (domain: FSM, triggers, assets, journal reads)
+                 |
+                 v
+        FolderBackedCase              (orchestration; sticky live object + lease)
+                 |
+                 v
+        CasePersistence (protocol)    << library seam; local Python interface >>
+           |                    |
+           v                    v
+  FilesystemCasePersistence   RemoteCasePersistenceClient
+  (default, dominant)              |
+                                   v
+                          Case Persistence Server (project-specific)
+                          - atomic ops (id, lease CAS, events, record, assets, flush)
+                          - bag import / bag export (canonical folder interchange)
+                          - enterprise-only: trigger inbox (+ optional notify)
+                          - internals: whatever DB/object store the client platform needs
+```
+
+**Roles**
+
+| Piece | Job |
+|---|---|
+| `FolderBackedCaseInterface` | Unchanged domain contract for authors |
+| `FolderBackedCase` | Sticky owner; talks persistence, not raw POSIX (after future refactor) |
+| `CasePersistence` | Atomic, mostly stateless ops; FS impl default; remote client optional |
+| CPS | Project-built server behind the remote client; not a one-size library product |
+| Folder bag | Canonical import/export format; reference serialization = today’s layout |
+| Trigger inbox | CPS/enterprise only; overlaps conceptually with `CaseManager` mailbox — not unified here |
+
+**Non-goals for this sketch:** implementing CPS; changing v1 public identity off `Path`; checkout-as-default; distributed chokes/log-shipping (enterprise port concerns).
