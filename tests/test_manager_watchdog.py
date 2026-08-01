@@ -179,3 +179,158 @@ def test_death_record_roundtrip(tmp_path, caplog):
     old = time.time() - 90000
     os.utime(path, (old, old))
     assert log_recent_death_records(tmp_path) == 0
+
+
+# ---------------------------------------------------------------------------
+# §1 coverage gaps: tick_slow (alarm only, always) and mailbox_neglect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["exit", "alarm_only"])
+async def test_tick_slow_alarms_but_never_kills(tmp_path, action):
+    """tick_slow is alarm-only unconditionally -- watchdog_action is irrelevant.
+
+    Parametrizing over both actions is the assertion: a slow tick is a symptom,
+    not a wedge, so it must never reach the ladder even when the policy says
+    "exit".
+    """
+    manager = provision_manager(
+        tmp_path, watchdog_tick_warn_secs=0.05, watchdog_action=action
+    )
+    await manager.recover()
+    escalations = []
+    manager.on_escalation(escalations.append)
+    manager._running = True
+    manager._run_task = None
+    started = time.monotonic() - 5.0
+    manager._last_tick_started = started
+    manager._last_tick_completed = None
+
+    manager._last_pulse = time.monotonic()
+    exit_fn = ExitRecorder()
+    dog = _make_watchdog(manager, asyncio.get_running_loop(), exit_fn)
+    dog.arm()
+    try:
+        # Keep the pulse fresh so only the tick check can fire.
+        async def _fresh_pulse_until(predicate, timeout=5.0):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                manager._last_pulse = time.monotonic()
+                if predicate():
+                    return True
+                await asyncio.sleep(0.02)
+            return False
+
+        assert await _fresh_pulse_until(lambda: bool(escalations))
+        assert exit_fn.codes == []
+        assert not list(manager._manager_dir.glob("manager_death_*.yaml"))
+        # The tick check returns without parking, unlike the ladder's
+        # alarm_only branch -- that distinction is what "alarm only" means here.
+        assert not dog._parked.is_set()
+
+        # De-dup: the same tick stamp must not re-alarm.
+        first = len(escalations)
+        await _fresh_pulse_until(lambda: False, timeout=0.3)
+        assert len(escalations) == first
+        assert dog._tick_warned_for == started
+
+        # A NEW slow tick alarms again -- the de-dup keys on the stamp, it does
+        # not latch permanently.
+        manager._last_tick_started = time.monotonic() - 5.0
+        assert await _fresh_pulse_until(lambda: len(escalations) > first)
+    finally:
+        dog.stop()
+        manager._running = False
+
+
+@pytest.mark.asyncio
+async def test_mailbox_neglect_kills_when_intake_goes_unserved(tmp_path):
+    manager = provision_manager(tmp_path, watchdog_mailbox_stale_secs=0.2)
+    await manager.recover()
+    escalations = []
+    manager.on_escalation(escalations.append)
+
+    intake = manager._mailbox.fire_intake()
+    intake.mkdir(parents=True, exist_ok=True)
+    stale = intake / "stale.yaml"
+    stale.write_text("correlation_id: x\n", encoding="utf-8")
+    # Intake age uses wall clock; the arm-window gate uses monotonic. Both need
+    # back-dating, by different mechanisms.
+    old = time.time() - 600
+    os.utime(stale, (old, old))
+
+    manager._running = True
+    manager._run_task = None
+    manager._last_pulse = time.monotonic()
+    exit_fn = ExitRecorder()
+    dog = _make_watchdog(manager, asyncio.get_running_loop(), exit_fn)
+    dog.arm()
+    dog._armed_at = time.monotonic() - 99.0
+    try:
+        async def _fresh_pulse_until(predicate, timeout=5.0):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                manager._last_pulse = time.monotonic()
+                if predicate():
+                    return True
+                await asyncio.sleep(0.02)
+            return False
+
+        assert await _fresh_pulse_until(lambda: bool(exit_fn.codes))
+        assert exit_fn.codes == [70]
+        records = list(manager._manager_dir.glob("manager_death_*.yaml"))
+        assert len(records) == 1
+        # Naming the detection catches a mis-fire: a stale pulse would write
+        # check: pulse_stuck and this would fail rather than pass by accident.
+        assert "mailbox_neglect" in records[0].read_text(encoding="utf-8")
+        assert escalations
+        assert stale.exists(), "the watchdog observes intake, it never consumes it"
+    finally:
+        dog.stop()
+        manager._running = False
+
+
+@pytest.mark.asyncio
+async def test_fresh_intake_does_not_alarm(tmp_path):
+    # Threshold must exceed the observation window below: no manager loop is
+    # draining this intake, so any backlog ages in real time and would cross a
+    # short threshold on its own.
+    manager = provision_manager(tmp_path, watchdog_mailbox_stale_secs=5.0)
+    await manager.recover()
+    intake = manager._mailbox.fire_intake()
+    intake.mkdir(parents=True, exist_ok=True)
+    for i in range(20):
+        (intake / f"req{i}.yaml").write_text("correlation_id: x\n", encoding="utf-8")
+
+    manager._running = True
+    manager._run_task = None
+    manager._last_pulse = time.monotonic()
+    exit_fn = ExitRecorder()
+    dog = _make_watchdog(manager, asyncio.get_running_loop(), exit_fn)
+    dog.arm()
+    dog._armed_at = time.monotonic() - 99.0
+    try:
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            manager._last_pulse = time.monotonic()
+            await asyncio.sleep(0.02)
+        assert exit_fn.codes == []
+    finally:
+        dog.stop()
+        manager._running = False
+
+
+def test_mailbox_neglect_disabled_by_config(tmp_path):
+    """Two independent ways to switch the check off, both pure construction."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    loop = asyncio.new_event_loop()
+    try:
+        zeroed = provision_manager(tmp_path / "a", watchdog_mailbox_stale_secs=0)
+        assert _make_watchdog(zeroed, loop, ExitRecorder())._mailbox_stale_secs is None
+
+        no_mailbox = provision_manager(tmp_path / "b", enable_mailbox=False)
+        assert _make_watchdog(no_mailbox, loop, ExitRecorder())._mailbox_stale_secs is None
+    finally:
+        loop.close()

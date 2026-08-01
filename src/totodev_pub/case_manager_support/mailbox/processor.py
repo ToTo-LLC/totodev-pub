@@ -275,10 +275,15 @@ class MailboxProcessor:
         return None
 
     async def maintenance_tick(self) -> None:
+        # Shutdown is process control, not fleet mail: it is polled on every tick,
+        # including when the request mailboxes are switched off. Deliberately above
+        # _ensure_dirs() too — scan_shutdown_intake() tolerates a missing directory
+        # and the writer creates it, so an enable_mailbox=False manager never
+        # materializes the mailbox tree it was configured to do without.
+        self._check_shutdown_intake()
         if not self._policy.enable_mailbox:
             return
         self._ensure_dirs()
-        self._check_shutdown_intake()
         await self._process_fire_intake()
         await self._process_reclassify_intake()
         await self._process_adopt_intake()

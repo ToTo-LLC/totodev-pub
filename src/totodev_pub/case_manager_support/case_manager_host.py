@@ -22,6 +22,7 @@ Typical host program:
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import os
 import signal
@@ -31,7 +32,11 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from totodev_pub.case_manager_support.exceptions import CaseManagerStopTimeoutError
 from totodev_pub.case_manager_support.shutdown import ShutdownDirective, write_shutdown_ack
-from totodev_pub.case_manager_support.watchdog import ManagerWatchdog
+from totodev_pub.case_manager_support.watchdog import (
+    ManagerWatchdog,
+    WatchdogDetection,
+    write_death_record,
+)
 
 if TYPE_CHECKING:
     from totodev_pub.case_manager import CaseManager
@@ -43,13 +48,30 @@ logger = logging.getLogger(__name__)
 # is genuinely meant to be final: an OS-signaled stop, or stop_when
 # self-completion. Anything the manager does *in reaction to* something is
 # nonzero, even if it shuts down cleanly.
-EXIT_WATCHDOG = 70           # EX_SOFTWARE: every watchdog kill, unconditionally.
+EXIT_WATCHDOG = 70           # EX_SOFTWARE: every in-process liveness failure the
+                             # host detects — watchdog kills, a stop that will not
+                             # settle, and loop failure with no watchdog running.
 EXIT_RESTART_REQUESTED = 75  # EX_TEMPFAIL: every mailbox-requested shutdown —
                              # the mailbox has exactly one outcome, "please come back".
 
 # Bound on how long the immediate (non-graceful) shutdown path lets the current
 # loop iteration unwind before exiting.
 IMMEDIATE_SHUTDOWN_GRACE_SECS = 2.0
+
+
+def _tracer_downgrade(policy: Any) -> str | None:
+    """Return ``"alarm_only"`` when a tracer is installed and the policy says
+    ``"exit"``; otherwise None.
+
+    A paused or traced process looks exactly like a wedged one, so a debugger
+    session must not be killed by the watchdog. Module-level, and consulted
+    rather than inlined, so a test that asserts a watchdog exit code can
+    neutralize it explicitly instead of silently depending on whether the suite
+    happens to be running under a coverage tracer."""
+    if sys.gettrace() is not None and policy.watchdog_action == "exit":
+        logger.info("Tracer detected (sys.gettrace()); watchdog defaulting to alarm_only.")
+        return "alarm_only"
+    return None
 
 
 def _hard_exit(code: int) -> None:
@@ -84,11 +106,10 @@ async def serve(
     with an explicit ``stop_when``.
 
     Production deployments should leave ``watchdog_enabled=True`` (the
-    default). Hosting with ``watchdog_enabled=False`` disables in-process
-    wedge remediation entirely: after three consecutive loop failures the
-    task dies and this coroutine never returns, but no exit code is emitted —
-    the process just sits there unless an external supervisor (health probe,
-    orchestrator restart policy) catches the resulting stale heartbeat.
+    default). ``watchdog_enabled=False`` gives up wedge *detection* — no pulse,
+    loop-task-death, or mailbox-neglect monitoring — but not the fail-loud
+    contract: three consecutive loop failures still exit ``EXIT_WATCHDOG``,
+    just without the pre-death diagnosis a detected wedge would get.
     """
     if manager.is_recovered or manager.is_running:
         raise ValueError(
@@ -114,13 +135,7 @@ async def serve(
     await manager.recover()
     await manager.start()
 
-    # Debugger sessions: a paused process looks exactly like a wedged one.
-    action: str | None = None
-    if sys.gettrace() is not None and manager._policy.watchdog_action == "exit":
-        logger.info(
-            "Debugger detected (sys.gettrace()); watchdog defaulting to alarm_only."
-        )
-        action = "alarm_only"
+    action = _tracer_downgrade(manager._policy)
 
     def _shutdown_from_watchdog(directive: ShutdownDirective) -> None:
         # Watchdog-thread pickup path (§6): hand off to the loop; if the loop
@@ -138,6 +153,39 @@ async def serve(
         time.sleep(deadline)  # a healthy path exits the process before this returns
         _hard_exit(EXIT_RESTART_REQUESTED)
 
+    def _loop_failure_no_watchdog(exc: BaseException) -> None:
+        """on_loop_failure when no watchdog is running: diagnose inline, then die.
+
+        Runs ON THE EVENT-LOOP THREAD, synchronously inside _manager_loop's own
+        except-block — unlike watchdog.request_kill, which only flags a daemon
+        thread. So it cannot await, and anything it scheduled back onto the loop
+        would never run before the exit. The alternative to dying here is a
+        process whose pulse loop keeps writing a healthy manifest heartbeat over
+        a manager that stopped ticking.
+        """
+        logger.critical(
+            "Manager loop gave up after repeated failures and no watchdog is running "
+            "(watchdog_enabled=False); exiting %d. Last failure: %r",
+            EXIT_WATCHDOG,
+            exc,
+        )
+        faulthandler.dump_traceback(all_threads=True)
+        try:
+            manager._escalations.emit_simple(
+                "MANAGER_UNRESPONSIVE", None, manager._manager_dir, f"loop_failure: {exc!r}"
+            )
+        except Exception:
+            logger.exception("Escalation emit failed; continuing to exit")
+        try:
+            write_death_record(
+                manager._manager_dir,
+                check=WatchdogDetection.LOOP_FAILURE.value,
+                reason=f"manager loop gave up (no watchdog): {exc!r}",
+            )
+        except Exception:
+            logger.exception("Death record write failed; continuing to exit")
+        _hard_exit(EXIT_WATCHDOG)
+
     # 2/3. Watchdog + both callback seams.
     watchdog: ManagerWatchdog | None = None
     if manager._policy.watchdog_enabled:
@@ -151,6 +199,8 @@ async def serve(
             exit_fn=_hard_exit,
         )
         manager.on_loop_failure(watchdog.request_kill)
+    else:
+        manager.on_loop_failure(_loop_failure_no_watchdog)
     manager.on_shutdown_request(
         lambda directive: _record_cause("shutdown", directive)
     )
