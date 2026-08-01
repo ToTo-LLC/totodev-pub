@@ -12,6 +12,7 @@ from typing import Iterator, Sequence
 from totodev_pub.cached_file_folders import CachedFileFolders
 from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
 from totodev_pub.case_manager_support.constants import PLACEHOLDER_HEADER
+from totodev_pub.case_manager_support.exceptions import CaseLeaseHeldError
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
 
@@ -52,6 +53,23 @@ def managed_grouping_globs(policy: CaseManagerPolicy) -> list[str]:
         policy.aberrant_bucket,
         f"{policy.terminal_prefix}_*",
     ]
+
+
+def assert_case_folder_movable(case_folder: Path, case_id: str, operation: str) -> None:
+    """Refuse to relocate a case folder while its heartbeat lease is held.
+
+    Moving a folder out from under a process that believes it owns the case is a
+    split-brain: the owner's open handles follow the inode while every new
+    path-based open fails. The lease is the only thing that says "someone is
+    working this", so every relocation checks it.
+
+    ``is_heartbeat_expired`` is tri-state (``folder_backed_case.py``): ``True``
+    expired, ``False`` held, ``None`` no lease file at all. Only ``False`` blocks
+    a move — an absent lease means released or never claimed, which is exactly
+    the state a detached case is left in.
+    """
+    if FolderBackedCase.is_heartbeat_expired(case_folder) is False:
+        raise CaseLeaseHeldError(case_id=case_id, case_folder=case_folder, operation=operation)
 
 
 def read_case_id_from_folder(folder: Path) -> str | None:

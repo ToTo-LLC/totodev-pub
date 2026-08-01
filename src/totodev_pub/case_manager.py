@@ -6,9 +6,9 @@
 Host entry point (process ownership, signals, exit codes, watchdog arm/park):
     from totodev_pub.case_manager_support.case_manager_host import serve
 
-``serve(manager)`` is the blessed way to run a CaseManager as a whole process.
-See that module for the full host contract. ``CaseManager.serve()`` is a thin
-delegator only.
+``serve(manager)`` is the only way to run a CaseManager as a whole process; see
+that module for the full host contract (exit codes, signal wiring, watchdog
+orchestration).
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ from totodev_pub.case_manager_support.exceptions import (
 from totodev_pub.case_manager_support.layout import (
     CaseLocation,
     aberrant_grouping_key,
+    assert_case_folder_movable,
     folder_matches_case_tree,
     iter_all_managed_folders,
     iter_case_folders_in_grouping,
@@ -371,15 +372,6 @@ class CaseManager:
         self._publish_fleet_status_board(force=True)
         self._write_manifest(running=False, stopped=True)
 
-    async def serve(self, **kwargs: Any) -> None:
-        """Delegates to ``case_manager_support.case_manager_host.serve()`` for
-        discoverability; ``from totodev_pub.case_manager_support.case_manager_host
-        import serve`` is the blessed import path and the place to read the full
-        contract (exit codes, signal wiring, watchdog orchestration)."""
-        from totodev_pub.case_manager_support.case_manager_host import serve as host_serve
-
-        await host_serve(self, **kwargs)
-
     async def _manager_loop(self) -> None:
         """One tick = maintenance (mailbox intake first), then the pool sweep.
 
@@ -643,7 +635,6 @@ class CaseManager:
             manager_dir=self._manager_dir,
             policy=self._policy,
             request_halt=self._driver.request_halt,
-            wait_halted=lambda f: None,
             driver_remove=self._driver.remove,
         )
         if timeout is not None:
@@ -658,6 +649,7 @@ class CaseManager:
         loc = self.locate(case_id=case_id)
         if loc is None or loc.in_pool:
             raise LiveCaseNotFoundError(case_id)
+        assert_case_folder_movable(loc.case_folder, case_id, "reopen")
         ref_path = ref_path_for_case(self._policy, case_id)
         self._cache.move_file(
             ref_path,
@@ -788,16 +780,11 @@ class CaseManager:
         try:
             fresh = case.case_reclassify_to(target_cls)
         except BaseException:
-            # Best-effort re-admission so the case never falls out of management.
-            try:
-                readd = case
-                if readd.case_is_detached:
-                    readd = self._registry.rehydrate(folder)
-                self._driver.add(readd)
-            except Exception:
-                logger.exception(
-                    "reclassify_case: failed to re-admit %s after reclassify error", folder
-                )
+            # The slot is already gone, so the case would fall out of management
+            # entirely if we just propagated. Re-admit, then raise the ORIGINAL
+            # failure — a recovery that also fails is logged, never substituted,
+            # because the caller needs to know why the reclassify failed.
+            self._readmit_after_failed_reclassify(folder, case)
             raise
         self._driver.add(fresh)          # fresh slot: advanceable cases are admitted HOT
         self._driver.boost(folder)       # and fire on the next beat
@@ -980,6 +967,18 @@ class CaseManager:
         self, kind: str, case_id: str, folder: Path, detail: str | None
     ) -> None:
         self._escalations.emit_simple(kind, case_id, folder, detail)
+
+    def _readmit_after_failed_reclassify(
+        self, folder: Path, case: FolderBackedCase
+    ) -> None:
+        """Best-effort return of a case to the pool after a failed reclassify."""
+        try:
+            readd = self._registry.rehydrate(folder) if case.case_is_detached else case
+            self._driver.add(readd)
+        except Exception:
+            logger.exception(
+                "reclassify_case: failed to re-admit %s after reclassify error", folder
+            )
 
     @contextmanager
     def _isolated_tick_item(self, what: str, source: Path) -> Iterator[None]:

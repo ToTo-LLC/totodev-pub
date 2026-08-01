@@ -761,9 +761,12 @@ class FolderBackedCase(FolderBackedCaseInterface):
 
 
     def archive_grouping_label(self) -> str:
-        """Destination archive grouping when this case closes. Default: close month
-        (``YYYY-MM``). Override to key on creation date, fiscal period, tenant, etc."""
-        return _utcnow().strftime("%Y-%m")
+        """Destination archive grouping when this case closes. Default: the month the
+        case actually closed (``YYYY-MM``), read from the record's terminal stamp so
+        the label does not drift with when archiving happens to run. Falls back to now
+        for a case that has not reached terminal. Override to key on creation date,
+        fiscal period, tenant, etc."""
+        return (self.case_record().terminal or _utcnow()).strftime("%Y-%m")
 
     # ---- reclassify ("call an audible" to a different subclass) ----
 

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import shutil
 from dataclasses import dataclass
@@ -18,7 +17,11 @@ from pydantic import BaseModel
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.constants import EJECT_SUBDIR
-from totodev_pub.case_manager_support.layout import live_grouping_key, ref_path_for_case
+from totodev_pub.case_manager_support.layout import (
+    assert_case_folder_movable,
+    live_grouping_key,
+    ref_path_for_case,
+)
 
 if TYPE_CHECKING:
     from totodev_pub.cached_file_folders import CachedFileFolders
@@ -69,13 +72,11 @@ def begin_eject(
     manager_dir: Path,
     policy: "CaseManagerPolicy",
     request_halt: Callable[[Path], None],
-    wait_halted: Callable[[Path], asyncio.Future | None],
     driver_remove: Callable[[Path], "FolderBackedCase"],
 ) -> EjectTicket:
+    """Sync slice: halt, remove, detach, enqueue. The caller awaits the halt."""
     folder = case.case_folder
     request_halt(folder)
-    if wait_halted(folder) is not None:
-        pass  # caller awaits halt separately
     driver_remove(folder)
     case.case_detach()
     ticket = EjectTicket(
@@ -120,6 +121,7 @@ async def process_eject_ticket(
 
     try:
         slave = ref.slave_dir_path
+        assert_case_folder_movable(slave, case_id, "eject")
         if export_path.exists():
             shutil.rmtree(export_path)
         try:

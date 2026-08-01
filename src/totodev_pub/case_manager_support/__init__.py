@@ -7,6 +7,7 @@ from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPoli
 from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
     CacheRootStateError,
+    CaseLeaseHeldError,
     CaseManagerStopTimeoutError,
     CaseNotFoundError,
     DuplicateCaseIdError,
@@ -32,6 +33,7 @@ __all__ = [
     "CaseManagerPolicy",
     "AmbiguousExternalKeyError",
     "CacheRootStateError",
+    "CaseLeaseHeldError",
     "CaseManagerStopTimeoutError",
     "CaseNotFoundError",
     "DuplicateCaseIdError",

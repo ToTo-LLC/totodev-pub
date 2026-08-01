@@ -40,6 +40,9 @@ class RecoverReport:
     dropped_paths: list[Path] = field(default_factory=list)
     death_records_recent: int = 0
     shutdown_requests_discarded: int = 0
+    reap_readmitted: int = 0
+    reap_termination_enqueued: int = 0
+    reap_anomalies: list[str] = field(default_factory=list)
 
 
 async def recover_manager(manager: "CaseManager") -> RecoverReport:
@@ -93,5 +96,8 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     report.termination_pending = manager._count_termination_pending()
     report.eject_pending = manager._count_eject_pending()
 
-    await manager.reap()
+    reap_report = await manager.reap()
+    report.reap_readmitted = len(reap_report.readmitted)
+    report.reap_termination_enqueued = len(reap_report.termination_enqueued)
+    report.reap_anomalies = list(reap_report.anomalies)
     return report

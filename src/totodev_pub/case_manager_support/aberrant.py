@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from totodev_pub.case_manager_support.constants import PLACEHOLDER_HEADER
 from totodev_pub.case_manager_support.layout import (
     aberrant_grouping_key,
+    assert_case_folder_movable,
     live_grouping_key,
     ref_path_for_case,
 )
@@ -44,6 +45,7 @@ async def move_case_to_aberrant(
     ``upsert_file`` is the only entry-creating call the cache offers.
     """
     logger.warning("Moving case %s to aberrant: %s", case_id, reason)
+    assert_case_folder_movable(case_folder, case_id, "quarantine")
     ref_path = ref_path_for_case(policy, case_id)
     src_grouping = from_grouping or live_grouping_key(policy)
     dst_grouping = aberrant_grouping_key(policy)

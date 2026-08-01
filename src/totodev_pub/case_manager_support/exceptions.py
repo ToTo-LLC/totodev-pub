@@ -190,3 +190,21 @@ class ManagerNotRunningError(Exception):
             "Call await manager.start() first, or use get_live() and trigger the case "
             "directly to force an immediate step outside the tick queue."
         )
+
+
+class CaseLeaseHeldError(Exception):
+    """A relocation was attempted while the case's heartbeat lease was still held.
+
+    Moving a case folder out from under a live owner is a split-brain: the owner's
+    open handles follow the inode while every new path-based open fails. Wait for
+    the lease to lapse (it is time-based and always does, unless a live process is
+    actively renewing it) and retry."""
+
+    def __init__(self, *, case_id: str, case_folder: Path, operation: str) -> None:
+        self.case_id = case_id
+        self.case_folder = case_folder
+        self.operation = operation
+        super().__init__(
+            f"Refusing to {operation} case {case_id}: its heartbeat lease is still "
+            f"held at {case_folder}. Wait for the lease to lapse and retry."
+        )
