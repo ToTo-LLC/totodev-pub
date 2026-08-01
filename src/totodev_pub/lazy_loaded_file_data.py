@@ -219,6 +219,7 @@ The examples shown in this docstring are implemented as test cases in
 
 from typing import Any, Dict, Iterator, Tuple, Callable, Optional, List, Union, Generator
 import os
+import tempfile
 import time
 from functools import lru_cache
 
@@ -1394,14 +1395,21 @@ class LazyLoadedFileData:
         - JSON: Fully idempotent with consistent formatting (indent=2, sorted keys).
                 Best choice for programmatic configuration management.
         
-        - Atomic writes: By default, writes to a temporary file first, then atomically
-                        renames to target. This prevents corruption if write fails.
+        - Atomic writes: By default, writes to a hidden temporary file beside the
+                        target and renames it into place, so a concurrent reader
+                        sees the whole old file or the whole new one — never a
+                        partial write.
         
         Args:
             data: Dictionary or list of dictionaries to write
             filepath: Target file path (format inferred from extension)
-            atomic: If True (default), uses atomic write (temp file + rename)
-                   to prevent corruption on write failure
+            atomic: If True (default), writes via a temp file and an atomic
+                   rename. Turn it off only if something depends on the file
+                   keeping its inode — a hard link, an already-open descriptor,
+                   a watcher keyed on inode — because a rename replaces it.
+                   Never turn it off for speed: the cost is a reader seeing a
+                   half-written file, and this library's readers turn a parse
+                   failure into empty data rather than an error.
         
         Raises:
             ValueError: If format is unsupported (TOML, CSV, TSV) or if data structure
@@ -1462,37 +1470,53 @@ class LazyLoadedFileData:
         
         # Write to file
         if atomic:
-            # Atomic write: write to temp file, then rename
-            import tempfile
-            import time
-            
-            # Create temp file name with clear indication it's temporary and can be deleted
-            # Format: filename.DELETETHIS_TEMP_1130pm (time only, no date - these exist for fractions of a second)
-            dir_name = os.path.dirname(filepath) or '.'
-            base_name = os.path.basename(filepath)
-            timestamp = time.strftime('%I%M%p').lower()  # 12-hour format with am/pm
-            temp_name = f"{base_name}.DELETETHIS_TEMP_{timestamp}"
-            temp_path = os.path.join(dir_name, temp_name)
-            
-            try:
-                # Write to temp file
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                
-                # Atomic rename (on most OS)
-                os.replace(temp_path, filepath)
-            except Exception:
-                # Clean up temp file if it exists
-                if os.path.exists(temp_path):
-                    try:
-                        os.unlink(temp_path)
-                    except OSError:
-                        pass  # Best effort cleanup
-                raise
+            LazyLoadedFileData._write_atomically(filepath, content)
         else:
-            # Direct write (non-atomic)
+            # Direct write. Truncates in place, so a concurrent reader can see a
+            # file that is neither the old content nor the new one.
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)
+
+    @staticmethod
+    def _write_atomically(filepath: str, content: str) -> None:
+        """Write ``content`` to ``filepath`` via a temp file and an atomic rename.
+
+        Three properties, each of which failed to hold in an earlier version and
+        each of which is load-bearing:
+
+        - **The temp file is unique.** It comes from ``tempfile.mkstemp``, which
+          is collision-free by construction. A name derived from the clock is
+          not: two processes writing the same target inside the same naming
+          granule compute the *same* temp path, and then one truncates the
+          other's partial write while both race to rename it.
+        - **The temp file is hidden.** Directory scanners in this library skip
+          dotfiles specifically so an in-progress write cannot be picked up as
+          real content. A visible temp name defeats that, and any straggler left
+          by a crash then looks like a data file.
+        - **The temp file sits beside its target.** A rename across filesystems
+          is not atomic — usually not even possible — so the temp file must
+          share the target's directory.
+
+        Existing permissions are preserved: ``mkstemp`` creates 0600, and
+        silently making a previously group-readable file private is its own bug.
+        """
+        directory = os.path.dirname(os.path.abspath(filepath)) or '.'
+        prefix = f".{os.path.basename(filepath)}."
+        fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix='.tmp', dir=directory)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(content)
+            try:
+                os.chmod(temp_path, os.stat(filepath).st_mode & 0o7777)
+            except FileNotFoundError:
+                pass    # first write: keep mkstemp's default
+            os.replace(temp_path, filepath)
+        except BaseException:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass    # best effort; the rename may already have consumed it
+            raise
 
     def overwrite_source_file(self, data: Union[Dict[str, Any], List[Dict[str, Any]]] = None) -> None:
         """
