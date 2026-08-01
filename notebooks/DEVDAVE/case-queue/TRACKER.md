@@ -81,35 +81,28 @@ extraction and the §4.1.5 S-4 lease precondition reshape, so treat them as ridi
 That doc's own header says these should be resolved before promoting to `main`. Carried forward
 here so they're tracked in one place instead of two.
 
-- [ ] `OPEN` — No integration test drives 3 consecutive `_manager_loop` tick failures through a real
-      `serve()` run to assert the process actually exits with code 70. Flagged in the source doc as
-      the highest-risk gap — everything else is unit-tested in isolation only.
-- [ ] `DECIDED 2026-08-01` — **Option A.** Hoist the shutdown-mailbox check above the
-      `enable_mailbox` / `watchdog_enabled` gates so it is always live. Lands in Wave 1 as an interim
-      fix, because the branch merges at the end of Wave 1 and this is a promotion blocker; §4.0.2's
-      move of shutdown to the host supersedes it in Wave 3.
-- [ ] `DECIDED 2026-08-01` — **Implement** the `_loop_failure_no_watchdog` fail-loud fallback for
-      deployments running with `watchdog_enabled=False`. Today, with no watchdog and no host callback,
-      the loop re-raises into a dying task: logged, but the process keeps running with a dead manager.
-      Make that state impossible to miss.
-- [ ] `OPEN` — No test coverage for: `mailbox_neglect` detection, `tick_slow` alarm-only path,
-      stop-timeout → `EXIT_WATCHDOG` path. All three are implemented in `watchdog.py` but unverified.
-- [ ] `OPEN` — Operator-facing deployment doc (how to actually run this thing in prod — restart
-      policy, exit code meanings, Docker/k8s caveats already called out in code comments) is
-      unwritten. The `submit_shutdown()` docstring in `case_manager_client.py` has good raw material.
+**All five are closed.** This section gated the merge to `main`; see §7 Wave 1.
+
+- [x] Integration test drives 3 consecutive `_manager_loop` tick failures through a real `serve()`
+      run and asserts exit 70, in both watchdog modes
+      (`tests/test_case_manager_host_serve.py`).
+- [x] The shutdown mailbox is polled on every maintenance tick, above the `enable_mailbox` gate, so
+      the mailbox-off + watchdog-off combination is no longer dead. §4.0.2's move of shutdown to the
+      host supersedes this in Wave 3.
+- [x] `_loop_failure_no_watchdog` implemented: with the watchdog disabled, three consecutive loop
+      failures escalate, dump tracebacks, write a death record, and exit `EXIT_WATCHDOG`.
+- [x] Watchdog coverage for `mailbox_neglect`, the `tick_slow` alarm-only path, and stop-timeout →
+      `EXIT_WATCHDOG` (`tests/test_manager_watchdog.py`, `tests/test_case_manager_host_serve.py`).
+- [x] Operator deployment doc written: `docs/case-manager-deployment.md` — exit-code contract,
+      restart policy, grace-period nesting, watchdog thresholds, health probe, container caveats.
+      Needs a revision after Wave 3 moves shutdown into the host.
 
 ## 2. Test coverage gaps (found independently, not in finishing_watchdog.md)
 
-- [ ] `OPEN` — `aberrant.py` has **zero direct test coverage**. `move_case_to_aberrant()` is only
-      reached as a side effect deep inside adopt-failure / termination-failure paths, and none of the
-      existing adopt/termination tests exercise the failure branch. (`AberrantSidecar` needs no test —
-      it is being deleted, F6.) Both code paths inside `move_case_to_aberrant` (cache-hit vs.
-      copytree-from-disk fallback) are unverified. **Upgraded 2026-07-31:** the copytree fallback is
-      not merely unverified, it appears non-functional — see §4.1.4 F1. Write the test that proves it
-      either way *before* the §4.1 refactor moves this code.
-- [ ] `OPEN` — `purge.py` has **zero test coverage**. `run_redundant_purge` silently deletes files
-      based on retention age; nothing currently verifies it does the right thing, including in the
-      face of a mid-purge error.
+- [x] `aberrant.py` covered by `tests/test_case_manager_aberrant.py` (both branches of
+      `move_case_to_aberrant`). The orphan-rescue branch was non-functional (F1) and is fixed.
+- [x] `purge.py` covered by `tests/test_case_manager_purge.py`, including the mid-purge error path
+      and the tick isolation around it.
 - [ ] `DECIDED 2026-08-01` — **Drop `PurgeReport.stragglers`.** Declared in `purge.py`, never
       populated, never read. Same disposition and same reasoning as F6.
 - [ ] `OPEN` — `layout.py` has no direct unit test despite being the highest-fan-in module in the
@@ -326,11 +319,6 @@ and converts mechanical file operations into `CaseManager` domain concepts. Work
 In its current form it is a thin wrapper around `CachedFileFolders`; a secondary purpose is to
 localize that coupling to one place.
 
-**Provenance.** This supersedes and absorbs the four storage-facing responsibilities named in the
-2026-07-31 review — bring an inbound case into managed storage; flag which meta-status it sits in;
-find a case by `case_id` or `external_key`; validate a case exists by path regardless of status.
-Those were the manager's obligations; they are now this object's job list.
-
 ##### Responsibilities
 
 1. Manage the storage location of a case, durably.
@@ -424,7 +412,7 @@ held and `ignore_lease` is false.
 - **The store refuses; it does not defer.** Waiting out a lease is `CaseManager`'s timing protocol,
   not the store's. `CaseStore` therefore carries no "status set, move pending" limbo state, needs no
   internal reconciliation pass, and stays free of pool/scheduling vocabulary — which is what keeps it
-  a storage object. (This supersedes the earlier sketch in which deferral lived inside the store.)
+  a storage object.
 - **The store is not responsible for watching a case wind down.** It must, however, be aware that a
   multi-file copy takes real time — `eject.py:126-127` already falls back to `copytree` when
   `shutil.move` hits a cross-device `OSError`.
@@ -813,15 +801,9 @@ What remains genuinely open:
   re-drivable, and `reap()` converges any disagreement.** That is already the de facto design; making
   it explicit requires the bidirectional, all-bucket `reap()` noted in §4.1.3. This is now a stated
   precondition of §4.1.2's no-WAL decision, not merely a preference.
-- ~~**Does `reap()` become periodic?**~~ **Closed 2026-08-01 — the question rested on an error.** It
-  was argued here that startup-only convergence would let a mid-run divergence persist until restart.
-  That is wrong: a half-completed move is re-driven by **ticket replay every tick**
-  (`replay_pending` in `_maintenance_tick`), which is the mid-run convergence mechanism. `reap()` is
-  startup orphan recovery and correctly runs once (§4.1.2). Retained here only so the reasoning is not
-  re-derived.
 - **The quarantine ticket** (§4.1.2): confirm it follows the termination/eject ticket shape, and that
   recovery consults quarantine tickets before re-admitting live cases.
-- ~~**Tombstones**~~ **Resolved 2026-08-01 — emit events; do not maintain a list.** The manager does
+- **Departed cases are announced, not catalogued.** The manager does
   not become the librarian of departed cases. Case departures (terminated, quarantined, ejected) are
   **emitted as lifecycle events**; an owning application that needs history subscribes and keeps its
   own record. This is the same refusal as §4.1.2's scope decision — a durable ledger would mean
@@ -844,38 +826,74 @@ What remains genuinely open:
   lease (`case_keep_manifest.py:25`, `100-107`). Verify nothing `CaseStore` relies on inside a case
   folder is purgeable.
 
-### 4.2 Error / edge-case handling within a running pool — `OPEN`, needs an audit pass
+### 4.2 Error / edge-case handling within a running pool — audit done, fixes `OPEN`
 
-Initial per-case-step isolation already exists and looks reasonably solid: `_run_case_step` in
-`balanced_case_pool_driver.py` catches `BaseException` per in-flight task (line ~621), clears the
-slot's in-flight state, and re-raises only to the task's own awaiter — one case failing to advance
-does not crash the sweep or take down other cases. `_manager_loop` also has a coarse safety net (3
-consecutive tick failures → `on_loop_failure` callback or re-raise, `case_manager.py:390-424`).
+The Wave 1 audit pass is complete. Two of its findings were fixed in Wave 1 (`_maintenance_tick`
+per-item isolation, and the adopt-failure lease release); the rest are recorded here, ranked by blast
+radius. **None of them block the Wave 1 merge** — every one predates this branch's work — but the two
+`KILLS THE FLEET` items should lead Wave 2.
 
-That said, coverage is uneven and was not exhaustively audited — flagging specific soft spots found
-so far, and leaving room for more to turn up:
+**Fixed in Wave 1**
 
-- [ ] `OPEN` — `CaseManager._maintenance_tick()` (`case_manager.py:450-480`) has **no per-item
-      isolation** around its termination-ticket loop, eject-ticket loop, mailbox drain, or purge call.
-      A single malformed/poison termination ticket raises out of the `for ticket_file in
-      replay_pending(...)` loop and aborts the *entire* tick — meaning mailbox drain, purge, and fleet
-      board publish for that whole tick silently don't run either, and if the same bad ticket recurs
-      every tick, it can burn through the 3-consecutive-failure budget and kill the whole manager loop
-      over one non-transient bad ticket rather than just quarantining that ticket. Worth deciding: should
-      each ticket/queue in `_maintenance_tick` be wrapped so one bad item degrades gracefully (e.g. logs
-      + escalates + skips) instead of aborting the tick?
-- [ ] `OPEN` — Audit `MailboxProcessor`'s per-request-type processing (`_process_fire_intake`,
-      `_process_reclassify_intake`, `_process_adopt_intake` in `mailbox/processor.py`) for the same
-      question: does one malformed mailbox request file poison the whole intake batch, or is each
-      request isolated?
-- [ ] `OPEN` — Audit what happens when a case's `FolderBackedCase` rehydration itself raises (corrupt
-      `case_record.yaml`, missing asset, etc.) during a sweep, vs. during `fire()`, vs. during adopt —
-      confirm the failure surfaces as an escalation/aberrant-move rather than silently stalling that
-      case's slot forever.
-- [ ] `OPEN` — More generally: walk every place the pool driver or manager touches the filesystem
-      (lease files, event logs, record files) mid-sweep and ask "what happens if this file is
-      truncated / concurrently modified / deleted out from under us right now" — this hasn't had a
-      dedicated adversarial pass yet, only the failure modes anticipated by the original author.
+- [x] `_maintenance_tick()` isolates each item: termination tickets, eject tickets, the mailbox drain,
+      and purge each degrade to log + `MAINTENANCE_ITEM_FAILED` escalation instead of aborting the tick.
+- [x] Adopt's failure path released the heartbeat lease before quarantining, so the handler can
+      finish instead of raising a second, more confusing error.
+
+**KILLS THE FLEET**
+
+- [ ] `OPEN` — `_live_or_evict` (`balanced_case_pool_driver.py:773-774`) catches only
+      `FileNotFoundError`, `CaseAlreadyOpenError`, and `CaseTypeMismatchError`. A corrupt or truncated
+      `case_record.yaml` raises `ValidationError`, and an unregistered type raises
+      `UnregisteredCaseTypeError` — neither is caught. It is called mid-sweep, so the exception exits
+      `advance()` into `_manager_loop`, which is **outside** `_isolated_tick_item`. It repeats
+      deterministically every beat, so `_LOOP_FAILURE_LIMIT` is exhausted in three ticks. **One corrupt
+      record kills the whole fleet.**
+- [ ] `OPEN` — `_reconcile_terminal_in_pool()` and `_detect_escalations()` run in `_manager_loop` but
+      outside `_isolated_tick_item`. `begin_termination` does remove → detach → `write_ticket`; if the
+      ticket write raises (stale `.lock` sidecar), the case is out of the pool, detached, and
+      ticketless — stalled until restart — *and* the failure counts against the loop budget.
+
+**STALLS A CASE PERMANENTLY**
+
+- [ ] `OPEN` — A corrupt termination ticket is an infinite retry with no failure path.
+      `retry_count` lives *inside* the ticket, so an unparseable one can never reach
+      `TerminationState.FAILED` and is never unlinked. Meanwhile `begin_termination` already removed
+      and detached the case, and `ticket_exists()` returns True forever, so nothing re-enqueues it.
+      The case is stranded in the live bucket and the manager escalates about it every tick. The
+      general shape: **the counters that would eventually quarantine a bad item live in the very file
+      that failed to parse.**
+- [ ] `OPEN` — Same trap in `process_pending_ticket`: `verify_termination_peek` reads the record and
+      can raise *before* `retry_count += 1`. TOCTOU between `folder.exists()` and the read.
+- [ ] `OPEN` — `eject_from_pool()` can hang forever. The waiter future is resolved only on the success
+      path; `process_eject_ticket` returns `None` on every failure, and when the retry cap is hit the
+      ticket is moved to `failed/` and unlinked — so the future is never resolved and never will be.
+      With `timeout=None` the caller waits indefinitely.
+- [ ] `OPEN` — Orphans whose rehydration fails are never retried. `reap()` logs and escalates, but has
+      exactly one caller (`recover.py`), so nothing revisits them until a restart. Worse, a failed
+      `driver.add` leaves the case object attached, so its lease never lapses and later passes skip
+      the folder as owned.
+
+**LOSES INFORMATION / NOISE**
+
+- [ ] `OPEN` — Every YAML write is non-atomic (`open(path, 'w')`, truncate in place — no temp+rename),
+      and the reader converts *any* parse failure into an empty dict. Models with required fields turn
+      that into a `ValidationError`, which is the lucky case; a model whose fields all have defaults
+      would silently load as a valid default object. Every hot reader also bypasses the advisory lock.
+- [ ] `OPEN` — Event-journal scans race deletion in three places (`.exists()` then `iterdir()`, and
+      bare `stat()` on paths from an earlier `iterdir()`), reachable from `reap`, from
+      `verify_termination_peek`, and from the fleet board.
+- [ ] `OPEN` — `restore_pool_from_journal`'s classifier misses binding errors, so one bad folder
+      aborts recovery with no partial `RebuildReport` — the operator loses the record of what *was*
+      recovered, and every path after the bad one is silently skipped.
+- [ ] `OPEN` — `CaseManagerClient`'s manifest read is unlocked and unguarded, so a client reading
+      mid-write gets a raw pydantic error from every `only_if_fresh` API.
+
+**Framing for Wave 2.** `_isolated_tick_item` contains the *manager*, not the *case*: it converts
+"loop death" into "this case is stalled forever and escalates once per tick." That was the intended
+trade, but it is only half a solution while the retry counters live inside the files that fail to
+parse. A quarantine path keyed on something outside the corrupt artifact is the missing piece, and it
+belongs with `CaseStore`'s status model (§4.1.2).
 
 ### 4.3 Low-effort path to a running case-manager script — `OPEN`, tooling gap
 
@@ -940,12 +958,8 @@ pass proceeds; it is known to be incomplete.
 - [ ] `_log_startup_summary()` reaches into other objects' private attributes
       (`self._registry._registry`, `self._escalations._handlers`) just to log counts, rather than
       those classes exposing a public count/`__len__`.
-- [ ] **CORRECTED 2026-07-31** — `_replay_termination_pending()` / `_replay_eject_pending()` are
-      **not** dead: both are called from `recover.py:94-95` to populate `RecoverReport`. The real
-      quirk is the naming — neither *replays* anything, they only `len()` a glob of the pending dir,
-      while the actual replay happens later in `_maintenance_tick()`. Rename to
-      `_count_termination_pending()` / `_count_eject_pending()` (or fold into `recover.py`), rather
-      than delete.
+- [x] `_replay_*_pending()` only counted; neither replayed anything. Renamed to
+      `_count_termination_pending()` / `_count_eject_pending()`.
 - [ ] `eject_from_pool`'s `wait_halted=lambda f: None` passed into `begin_eject` looks vestigial —
       the actual wait happens via a separately tracked future elsewhere. No comment explains the
       redundancy; worth simplifying or documenting.
@@ -959,9 +973,9 @@ pass proceeds; it is known to be incomplete.
       wrong-but-plausible answer.
 - [ ] `iter_terminal()` sources its glob from `self._policy.terminal_prefix`; `iter_quarantine()`
       hardcodes `"quarantine_*"` inline instead of a corresponding policy field — inconsistent
-      sourcing between the two "special bucket" iterators. **Superseded by §4.1.4 F2:** nothing in the
-      codebase ever writes a `quarantine_*` bucket, so `iter_quarantine()` can only ever yield
-      nothing. Implement the `quarantined` meta-status or delete the method.
+      sourcing between the two "special bucket" iterators. Nothing writes a `quarantine_*` bucket,
+      so `iter_quarantine()` can only ever yield nothing (F2); it becomes the real API for the
+      `quarantined` status in Wave 2.
 - [ ] `locate()` / `locate_all()` are full-fleet record scans on the hot path (every `fire()`, every
       adopt, every fleet-board publish) — see §4.1.4 F3 for the measurement and §4.1.6 for the
       proposed fix. Called out here too because it is a `CaseManager` API-shape problem, not only a
@@ -1054,6 +1068,15 @@ split across waves and are marked **(split)**.
 ### Wave 1 — Correct and cover what exists
 
 No structural change. Everything here lands in the current shape of the code.
+
+**Status: landed.** §1 is closed and the branch is ready to merge. Shipped across five commits —
+deletions/naming/driver ergonomics, the aberrant orphan fix, the lease guard and archive label, the
+§1 blockers, and purge/config coverage.
+
+Defects found while doing the work, none of which were in this tracker beforehand: the aberrant
+orphan-rescue path always raised (F1); an explicitly injected `CasePoolDriver` was silently discarded
+because `CasePoolDriver.__len__` makes an empty driver falsy; and the two archive-label computations
+disagreed, so a case could land in different terminal buckets depending on which path ran (F7).
 
 **Exit criterion: §1 is fully closed and the branch merges to `main`.** Waves 2 and 3 proceed from
 `main` on fresh short branches, rather than carrying `explore/case-queue` through two large refactors.

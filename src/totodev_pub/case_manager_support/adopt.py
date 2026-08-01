@@ -174,6 +174,7 @@ async def adopt_case_folder(
     ref_path = ref_path_for_case(policy, case_id)
     grouping = live_grouping_key(policy)
 
+    admitted: FolderBackedCase | None = None
     try:
         import tempfile
         from totodev_pub.cached_file_folders_support.file_proxy_local_file import LocalFileProxy
@@ -195,8 +196,8 @@ async def adopt_case_folder(
         _transfer_into_slave(source, dest_slave)
         if read_case_id_from_folder(dest_slave) != case_id:
             raise ValueError("case_id mismatch after transfer")
-        case = registry.rehydrate(dest_slave)
-        driver_add(case)
+        admitted = registry.rehydrate(dest_slave)   # acquires the heartbeat lease
+        driver_add(admitted)
         return AdoptResult(
             status="completed",
             case_id=case_id,
@@ -206,12 +207,26 @@ async def adopt_case_folder(
         )
     except Exception as exc:
         logger.exception("Adopt failed for %s from %s", case_id, source)
+        # rehydrate() took the lease. If the failure came after that -- a rejected
+        # driver_add, say -- the case still holds it, and quarantine legitimately
+        # refuses to relocate a leased folder. Release it first so the failure
+        # path can finish instead of raising a second, more confusing error.
+        if admitted is not None and not admitted.case_is_detached:
+            try:
+                admitted.case_detach()
+            except Exception:
+                logger.exception("Adopt failure path: could not detach %s", case_id)
         aberrant_path = None
         dest_slave = cache.get_slave_dir(grouping, ref_path) if cache.find_file(ref_path, grouping) else None
         if dest_slave is not None and dest_slave.exists():
-            aberrant_path = str(
-                await move_to_aberrant(case_id, dest_slave, str(exc), from_grouping=grouping)
-            )
+            try:
+                aberrant_path = str(
+                    await move_to_aberrant(case_id, dest_slave, str(exc), from_grouping=grouping)
+                )
+            except Exception:
+                # Quarantine is best-effort; the caller still gets an "error"
+                # result naming the original failure rather than this one.
+                logger.exception("Adopt failure path: quarantine failed for %s", case_id)
         return AdoptResult(
             status="error",
             case_id=case_id,

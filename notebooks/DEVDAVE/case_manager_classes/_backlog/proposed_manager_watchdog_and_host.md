@@ -1,7 +1,9 @@
 # Proposed: Manager self-watchdog, host entry point, and the die-loudly contract
 
 - Status: **implemented 2026-07-09** — see
-  `docs/superpowers/plans/2026-07-09-manager-watchdog-and-host.md`.
+  `src/totodev_pub/case_manager_support/case_manager_host.py` and
+  `src/totodev_pub/case_manager_support/watchdog.py`; operator guidance lives in
+  `docs/case-manager-deployment.md`.
 - Proposed 2026-07-09 (v3). `serve()` takes a pre-built `CaseManager`, not
   `(cache_root, **overrides)` — see "Resolved decisions" #2 for why. All team decisions
   are recorded in "Resolved decisions" near the end; open items are in "Remaining open

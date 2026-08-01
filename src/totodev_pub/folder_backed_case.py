@@ -224,8 +224,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
         nickname: str | None = None,
         **fields,
     ) -> FolderBackedCase:
-        # Planned CaseManager (draft: notebooks/DEVDAVE/case_manager_classes/
-        # CaseManager Model.md) will also call this for fleet inception.
+        # CaseManager calls this too, for fleet inception: a case adopted into
+        # managed storage is created here first, then transferred.
         case_folder = Path(case_folder)
         book = cls._resolve_asset_book()
         asset_aliases = book.to_record()
@@ -1358,8 +1358,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
             self._record.save()
 
     # Lease TTL is a fixed crash-recovery window (constants.py). Idle holders must
-    # detach, heartbeat, or delegate to a planned CaseManager (draft: notebooks/DEVDAVE/
-    # case_manager_classes/CaseManager Model.md) for fleet-wide keepalive.
+    # detach, heartbeat, or hand the case to a CaseManager, which keeps the whole
+    # fleet's leases alive for them.
 
     def _check_active(self) -> None:
         if self.case_is_detached:

@@ -5,8 +5,8 @@ opinion about fleet scheduling. ``CasePoolDriver`` owns that: which cases advanc
 when, lease keepalive for cases due this beat, and aggregate pool events.
 
 Cases arrive already bound (live, lease-held) and leave the same way. Disk layout,
-archival, and discovery belong to a planned ``CaseManager`` (draft:
-notebooks/DEVDAVE/case_manager_classes/CaseManager Model.md).
+archival, and discovery belong to ``CaseManager`` (``totodev_pub.case_manager``),
+never to a driver.
 
 Typical lifecycle: ``start()`` → ``add(case)`` → autonomous ``advance()`` beats →
 ``TERMINATED`` event → ``remove()`` → ``stop()``.

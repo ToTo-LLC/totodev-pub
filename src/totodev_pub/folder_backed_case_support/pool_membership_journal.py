@@ -5,7 +5,8 @@
 
 A ``CasePoolDriver`` is in-memory; this jsonl records which folder paths belonged to a
 pool so membership can be rebuilt after a crash. Pure observer: subscribes to ADMITTED /
-REMOVED / EVICTED; wired at app setup (see CaseManager Model.md §5).
+REMOVED / EVICTED; wired at app setup, and by ``CaseManager.recover()`` when a
+manager owns the pool.
 
 On-disk: ``{"op": "add"|"remove", "path": <str>, "ts": <float>}`` per line. Replay uses
 ``case_type_registry.rehydrate(path)``. A torn final line is tolerated on read.
