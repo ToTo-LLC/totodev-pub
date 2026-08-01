@@ -947,47 +947,45 @@ demonstrated piecemeal across tests and the tutorials' prose.
       the README still lists every script — an example nobody runs is a claim about the API, not a
       fact about it.
 
-### 4.4 Hands-on bench-testing pass — `IN PROGRESS`, distinct from the static inspection pass in §5
+### 4.4 Hands-on bench-testing pass — **done**
 
-**First findings, from writing the §4.3 examples** — which is the bench pass in miniature, and
-already earned its keep:
+The empirical counterpart to §5's static inspection: run the thing, catalogue what breaks. Harness at
+`volatile/tmp/bench_case_manager.py` (scratch, not committed) — five scenarios, all now clean.
+Everything it found has a fix and a regression test.
 
-- [x] `stop_when_empty` exited before departures were durable. A case leaves the pool when
-      termination is *enqueued*; its folder is archived a tick or more later, by the ticket. So a
-      batch job exited with its own output still sitting in `live` behind pending tickets —
-      recoverable only by a restart that, for a finished job, never comes. `is_idle` now also
-      requires no departure in flight.
-- [x] `serve()` refused an already-recovered manager, which made the bag loader and the host
-      mutually exclusive: adopting cases before hosting *requires* a recovered manager. It now skips
-      recovery it does not need to repeat, and still refuses to host a *running* one — which was the
-      guard's real purpose.
-- [x] The watchdog-thread leak the Wave 1 plan predicted actually bit. A test that cancels its
-      `serve()` task never reaches `watchdog.stop()`, so a `manager-watchdog` daemon thread survives
-      into later modules and breaks the one test that asserts none exists. It surfaced only under
-      random ordering. Fixed at the source — tests stop a host by *asking* it to stop, not by
-      cancelling it, which also exercises the clean-exit path they were skipping.
+| Scenario | Result |
+|---|---|
+| adopt → live → terminate, 60 cases | 5 ms/case to load, 0.6s to drain |
+| SIGKILL a real host mid-run, then recover | all 25 cases accounted for and archived; **recover() takes ~29s** |
+| eject while a step is in flight | works after the fix below (1.7s — it waits the step out) |
+| reclassify while a step is in flight | correctly refused with `CaseInFlightError`, pool intact |
+| 30 choked cases through Balanced vs Seniority | 0.77s each, no divergence |
 
-The maintainer wants a dedicated round of hands-on, interactive experimentation with these classes —
-running them, poking at them, deliberately trying odd sequences — specifically because this kind of
-bench-testing tends to expose rough edges that a read-through of the source (which is what produced
-§5's checklist) doesn't surface. This is a **separate workstream from §5**: §5 is desk-review
-(reading code, cataloging quirks); this is empirical (running code, cataloging friction), and either
-can feed new items into the other.
+**Found and fixed**
 
-- [ ] `OPEN` — This workstream is naturally blocked on / motivated by §4.3: bench-testing needs
-      exactly the kind of low-effort harness described there (spin up a manager, register a couple of
-      case types, drive them, observe) — solving 4.3 first would double as the tool for this pass,
-      rather than each hand-experiment starting from scratch against raw `CaseManager.open(...)` calls.
-      Consider sequencing 4.3 before or alongside this.
-- [ ] `OPEN` — Scope not yet defined: which classes/flows get the bench-testing treatment first?
-      Candidates based on the map above: the adopt → live → terminate happy path; a forced
-      reclassify-mid-flight; an eject under contention; a deliberate crash-and-recover cycle (kill -9
-      mid-tick, restart, confirm `PoolMembershipJournal`/`recover_manager` behave); choke-limit
-      contention between `BalancedCasePoolDriver` and `SeniorityCasePoolDriver` running the same
-      workload side by side. This list itself should be treated as a starting point, not a fixed plan.
-- [ ] `OPEN` — As rough edges are found, record them back into this tracker (§5, or a new "found via
-      bench-testing" subsection) rather than only as ad hoc notes, so the desk-review and hands-on
-      findings stay in one place.
+- [x] **`eject_from_pool()` could not eject a busy case.** `begin_eject` called `request_halt()` and
+      then removed immediately, but the driver's contract says plainly: *wait for HALTED before
+      remove() if an advance may be in progress*. So ejecting a case mid-step raised
+      `CaseInFlightError` — and ejecting a *busy* case is the case an operator most often wants. The
+      manager now awaits HALTED (subscribing before requesting, since an already-idle case fires it
+      synchronously) and `begin_eject` documents that the case must arrive halted.
+- [x] **A failed `begin_eject` leaked its waiter.** The future was registered before the call, so any
+      raise left an entry in `_eject_waiters` that nothing could ever resolve.
+- [x] **A case that terminated while we waited for its halt raised a bare `KeyError`.** Now
+      `LiveCaseNotFoundError` — it left the pool on its own, which is not a failure.
+- [x] **The health probe reported a recovering manager as dead.** This is the serious one. Recovery
+      after a crash waits out the previous owner's heartbeat leases — a held lease is
+      indistinguishable from a live owner's until you watch it for longer than one heartbeat period —
+      and *nothing beats* meanwhile, because the loop has not started. The probe saw no heartbeat and
+      returned 1. A Kubernetes livenessProbe would therefore kill the process **every single time**,
+      restarting the wait from zero: a crashed fleet could never recover, and no amount of waiting
+      would fix it. The manifest now carries `recovering_at`, and the probe reports 0 for up to 120s
+      (the lease-reclaim wait is itself bounded at two TTLs), then 1 — generous, not infinite.
+
+**Recorded, not a defect**
+
+- The ~29s crash-recovery cost is correct and is a fixed cost, not proportional to fleet size. It is
+  now in the operator doc along with what it means for `failureThreshold` and restart backoff.
 
 ## 5. Architecture / ergonomics inspection pass — per-class quirk checklist
 
@@ -1284,7 +1282,9 @@ once the shape is final.
 - [x] §4.3 — bag-loading convenience (`bag_loading.py`) plus the pytest fixture factory.
 - [x] §4.3 — shape decided and built: runnable examples + README under
       `case_manager_support/examples/`, exercised by their own test module.
-- [ ] §4.4 **(split)** — full bench-testing pass on the tooled harness; findings back into §5.
+- [x] §4.4 — full bench pass on the tooled harness: five scenarios, four defects fixed (eject of a
+      busy case, a leaked eject waiter, a bare `KeyError` on a mid-halt departure, and the health
+      probe calling a recovering manager dead). Findings recorded in §4.4 itself.
 - [ ] §3 — `case-designer` skill updated for the pool-manager layer.
 - [ ] §5 — replace the `§N` comment convention with inline rationale.
 - [ ] §0 — confirm every class in the key-class list meets the finalize bar.

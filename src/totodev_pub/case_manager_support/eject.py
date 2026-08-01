@@ -65,12 +65,16 @@ def begin_eject(
     *,
     export_to_folder: Path,
     manager_dir: Path,
-    request_halt: Callable[[Path], None],
     driver_remove: Callable[[Path], "FolderBackedCase"],
 ) -> EjectTicket:
-    """Sync slice: halt, remove, detach, enqueue. The caller awaits the halt."""
+    """Sync slice: remove, detach, enqueue.
+
+    **The case must already be halted.** The driver refuses to remove one whose
+    advance is in flight, so awaiting HALTED is the caller's job — it is the only
+    part of this that can await, and doing it here would make the whole slice
+    async for one wait.
+    """
     folder = case.case_folder
-    request_halt(folder)
     driver_remove(folder)
     case.case_detach()
     ticket = EjectTicket(

@@ -45,6 +45,12 @@ class CaseManagerManifest(BaseModel, FileMappedPydanticMixin):
     paths: ManifestPaths
     heartbeat_at: Optional[str] = None
     stopped_at: Optional[str] = None
+    #: Set while recovery is running, cleared once the loop is beating. Recovery
+    #: after a crash waits out the previous owner's heartbeat lease before it can
+    #: reclaim anything, which takes tens of seconds and produces no heartbeat —
+    #: a liveness probe with nothing else to look at would read that as dead and
+    #: kill the process, every time, forever.
+    recovering_at: Optional[str] = None
     pool_index: Optional[str] = None
 
     @staticmethod

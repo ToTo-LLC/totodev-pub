@@ -50,7 +50,9 @@ class RecoverReport:
 async def recover_manager(manager: "CaseManager") -> RecoverReport:
     report = RecoverReport()
     manager._ensure_namespace()
-    manager._write_manifest()
+    # Announce the state before the slow part: reclaiming leases from a crashed
+    # owner takes tens of seconds and emits no heartbeat.
+    manager._write_manifest(recovering=True)
 
     report.death_records_recent = log_recent_death_records(manager._manager_dir)
     report.shutdown_requests_discarded = discard_stale_requests(

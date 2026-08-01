@@ -139,13 +139,35 @@ set. Consequence for CI: a coverage run does not exercise the real watchdog.
 
 | Code | Meaning |
 |---|---|
-| 0 | heartbeat fresh |
-| 1 | heartbeat stale — page someone |
+| 0 | heartbeat fresh, **or** recovery in progress within its grace window |
+| 1 | heartbeat stale, or recovery overran its grace window — page someone |
 | 2 | `stopped_at` set — deliberately stopped, expected during decommission |
 | 3 | no or unreadable manifest |
 
 1 and 2 are distinct on purpose: a probe that conflates them pages people for
-scale-downs. Use exit 1 as the liveness signal.
+scale-downs.
+
+### Restarting after a crash takes ~30 seconds, and that is correct
+
+A manager that was SIGKILLed leaves its cases' heartbeat leases held. The
+replacement cannot simply take them: a held lease is indistinguishable from a
+*live* owner's until you watch it for longer than one heartbeat period. So
+recovery observes, waits for the leases to lapse, and only then reclaims —
+measured at **~29s for 25 cases**, bounded at two lease TTLs. It is a fixed cost,
+not proportional to fleet size.
+
+**Nothing beats during that window**, because the manager loop has not started.
+The probe therefore reports **0 — recovering**, from a `recovering_at` stamp the
+manifest carries, for up to 120s. This matters more than it looks: a liveness
+probe that read recovery as death would kill the process every single time,
+restarting the wait from zero, and a crashed fleet would never come back at all.
+
+Consequences for orchestrators:
+
+- Set `failureThreshold` × `periodSeconds` comfortably above 120s, or rely on the
+  probe's own grace window and leave the threshold small.
+- **Back off on exit 70.** A crash-loop that restarts faster than a lease TTL
+  spends every cycle waiting on leases and never reaches steady state. Use exit 1 as the liveness signal.
 
 The probe reads the manifest file directly and never constructs a client, so it
 stays useful when the manager itself is wedged. It catches what no in-process

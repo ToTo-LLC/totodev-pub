@@ -807,15 +807,31 @@ class CaseManager:
         timeout: float | None = None,
     ) -> EjectResult:
         case = self.get_live(case_id)
+        # The driver refuses to remove a case mid-step, and says so: wait for
+        # HALTED before remove() if an advance may be in progress. Skipping the
+        # wait made eject fail outright on a *busy* case — which is exactly the
+        # case an operator most often wants out.
+        await self._halt_and_settle(case.case_folder, case_id=case_id, timeout=timeout)
+
         fut: asyncio.Future[EjectResult] = asyncio.get_running_loop().create_future()
         self._eject_waiters[case_id] = fut
-        begin_eject(
-            case,
-            export_to_folder=export_to_folder,
-            manager_dir=self._manager_dir,
-            request_halt=self._driver.request_halt,
-            driver_remove=self._driver.remove,
-        )
+        try:
+            begin_eject(
+                case,
+                export_to_folder=export_to_folder,
+                manager_dir=self._manager_dir,
+                driver_remove=self._driver.remove,
+            )
+        except KeyError:
+            # The case left the pool while we waited for it to halt — it reached
+            # a terminal state, or something else removed it. Either way there is
+            # nothing left to eject, and that is not the same as a failure.
+            self._eject_waiters.pop(case_id, None)
+            raise LiveCaseNotFoundError(case_id) from None
+        except BaseException:
+            # Never leave a waiter nothing can resolve.
+            self._eject_waiters.pop(case_id, None)
+            raise
         if timeout is not None:
             try:
                 return await asyncio.wait_for(fut, timeout=timeout)
@@ -823,6 +839,45 @@ class CaseManager:
                 stuck = self._collect_stuck_triggers()
                 raise EjectTimeoutError(case_id=case_id, stuck=stuck)
         return await fut
+
+    async def _halt_and_settle(
+        self, case_folder: Path, *, case_id: str, timeout: float | None
+    ) -> None:
+        """Stop scheduling a case and wait until it is genuinely idle.
+
+        ``request_halt()`` returns immediately; ``HALTED`` fires once the case is
+        neither in flight nor scheduled. A case that has already halted will not
+        fire it again, so that is checked first rather than waited for.
+        """
+        folder = case_folder.resolve()
+        if any(c.case_folder.resolve() == folder for c in self._driver.halted_cases()):
+            return
+
+        settled: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def on_halted(event: CasePoolEvent) -> None:
+            if not settled.done() and event.case.case_folder.resolve() == folder:
+                settled.set_result(None)
+
+        # Subscribe before requesting: an already-idle case fires HALTED
+        # synchronously inside request_halt(), and we must not miss it.
+        handle = self._driver.case_event_subscribe(CasePoolEventNames.HALTED, on_halted)
+        try:
+            self._driver.request_halt(case_folder)
+            if timeout is None:
+                await settled
+            else:
+                try:
+                    await asyncio.wait_for(settled, timeout=timeout)
+                except asyncio.TimeoutError:
+                    raise EjectTimeoutError(
+                        case_id=case_id, stuck=self._collect_stuck_triggers()
+                    ) from None
+        finally:
+            try:
+                self._driver.case_event_unsubscribe(handle)
+            except KeyError:
+                pass
 
     async def reopen_case(self, case_id: str) -> None:
         """Return a departed case to the live pool.
@@ -1239,7 +1294,9 @@ class CaseManager:
         (mgr_dir / policy.shutdown_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         ensure_board_file(mgr_dir, enabled=policy.enable_fleet_status_board)
 
-    def _write_manifest(self, *, running: bool = False, stopped: bool = False) -> None:
+    def _write_manifest(
+        self, *, running: bool = False, stopped: bool = False, recovering: bool = False
+    ) -> None:
         rel = lambda p: str(Path(p).relative_to(self._cache_root))
         paths = ManifestPaths(
             fire_mailbox_intake=rel(
@@ -1268,6 +1325,7 @@ class CaseManager:
             paths=paths,
             heartbeat_at=CaseManagerManifest.utc_now_iso() if running else None,
             stopped_at=CaseManagerManifest.utc_now_iso() if stopped else None,
+            recovering_at=CaseManagerManifest.utc_now_iso() if recovering else None,
             pool_index=self._policy.journal_path if self._policy.journal_attach_steady_state else None,
         )
         manifest.save(str(self._manager_dir / MANIFEST_FILENAME), retain_lock=False)
