@@ -871,20 +871,23 @@ radius. **None of them block the Wave 1 merge** — every one predates this bran
       hitting the retry cap retired the ticket to `failed/` with nothing left that could ever resolve
       it, so a caller passing `timeout=None` waited indefinitely. It now raises
       `EjectAbandonedError`, and an `EJECT_FAILED` notice is emitted alongside.
-- [ ] `OPEN` — A corrupt termination ticket is an infinite retry with no failure path.
-      `retry_count` lives *inside* the ticket, so an unparseable one can never reach
-      `TerminationState.FAILED` and is never unlinked. Meanwhile `begin_termination` already removed
-      and detached the case, and `ticket_exists()` returns True forever, so nothing re-enqueues it.
-      The case is stranded in the live bucket and the manager escalates about it every tick. The
-      general shape: **the counters that would eventually quarantine a bad item live in the very file
-      that failed to parse.** The quarantine ticket introduced in Wave 2 has the same shape and the
-      same exposure.
-- [ ] `OPEN` — Same trap in `process_pending_ticket`: `verify_termination_peek` reads the record and
-      can raise *before* `retry_count += 1`. TOCTOU between `folder.exists()` and the read.
-- [ ] `OPEN` — Orphans whose rehydration fails are never retried. `readmit_orphans()` logs and
-      escalates, but has exactly one caller (`recover.py`), so nothing revisits them until a restart.
-      Worse, a failed `driver.add` leaves the case object attached, so its lease never lapses and
-      later passes skip the folder as owned.
+- [x] An unparseable ticket is no longer an infinite retry. `retry_count` lives inside the ticket, so
+      one that will not parse can never record that it was tried — and the case it describes stays
+      removed from the pool, detached, and un-enqueueable while the manager notices about it every
+      tick. `TicketAttemptLedger` counts attempts **outside** the file; on exhaustion the ticket is
+      retired to `failed/` and the case is quarantined, recoverable via `reopen_case()`. The
+      `case_id` comes from the filename, which is the one field a corrupt ticket cannot take with it.
+      Applies to all three ticket kinds.
+- [x] Same trap via `verify_termination_peek` raising *before* `retry_count += 1` — closed by the
+      same mechanism, since the ledger counts the whole item rather than the parse.
+- [x] A failed `driver.add` during orphan re-admission released the lease `rehydrate()` took.
+      Holding it made the orphan read as *owned* to every later pass, including the next restart's,
+      so a case that failed to re-admit once was never looked at again.
+- [ ] `OPEN` (design, not defect) — Orphans whose rehydration fails are still only retried on
+      restart. `readmit_orphans()` has one caller by design (§4.1.2: mid-run divergence is ticket
+      replay's job), so this is a deliberate boundary rather than an oversight — but with the lease
+      leak fixed, a restart genuinely does revisit them. Revisit only if operators find the restart
+      cadence too coarse.
 
 **LOSES INFORMATION / NOISE**
 
@@ -901,16 +904,19 @@ radius. **None of them block the Wave 1 merge** — every one predates this bran
 - [ ] `OPEN` — `CaseManagerClient`'s manifest read is unlocked and unguarded, so a client reading
       mid-write gets a raw pydantic error from every `only_if_fresh` API.
 
-**Where this stands after Wave 2.** `_isolated_tick_item` contains the *manager*, not the *case*: it
-converts "loop death" into "this case is stalled forever and notices once per tick." That was the
-intended trade, and it is now applied everywhere a per-case failure can reach the loop.
+**Where this stands.** `_isolated_tick_item` contains the *manager*, not the *case*: it converts
+"loop death" into "this case is stalled and notices once per tick." That was the intended trade, and
+it is now applied everywhere a per-case failure can reach the loop.
 
-The remaining permanent-stall family all share one shape — **the retry counters that would eventually
-give up on a bad item live inside the very file that failed to parse.** `CaseStore` supplies the
-missing ingredient (a status keyed outside the corrupt artifact) but Wave 2 did not spend it: the
-tickets still carry their own counters. The fix is now cheap and self-contained — count attempts
-somewhere the ticket cannot corrupt, and quarantine on exhaustion — and it is the first thing worth
-picking up next.
+The other half — **the retry counter that would eventually give up on a bad item living inside the
+very file that failed to parse** — is closed. Attempts are counted in `TicketAttemptLedger`, in
+memory and keyed by path, which is enough on purpose: the failure is deterministic so the threshold
+is reached within a few ticks of one process run, and the *action* on exhaustion is durable. A
+durable counter would be another file that can itself corrupt, which is the trap being escaped.
+
+What remains in this section is the `LOSES INFORMATION / NOISE` group — non-atomic YAML writes,
+event-journal scans racing deletion, and the client's unguarded manifest read. None of them strand a
+case; they degrade diagnosis.
 
 ### 4.3 Low-effort path to a running case-manager script — `OPEN`, tooling gap
 

@@ -37,6 +37,7 @@ class CaseNoticeKind(str, enum.Enum):
     EJECT_FAILED = "EJECT_FAILED"
     MANAGER_UNRESPONSIVE = "MANAGER_UNRESPONSIVE"
     MAINTENANCE_ITEM_FAILED = "MAINTENANCE_ITEM_FAILED"
+    TICKET_ABANDONED = "TICKET_ABANDONED"
 
     # Lifecycle: a case has left the pool. Normal events, not problems.
     CASE_TERMINATED = "CASE_TERMINATED"

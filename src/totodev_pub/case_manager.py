@@ -19,7 +19,7 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Iterator, Sequence, TYPE_CHECKING
 
 from totodev_pub.case_manager_support.adopt import AdoptResult, adopt_case_folder
 from totodev_pub.case_manager_support.case_manager_config import CaseManagerConfig
@@ -87,6 +87,7 @@ from totodev_pub.case_manager_support.readmit import OrphanReadmitReport, readmi
 from totodev_pub.case_manager_support.recover import RecoverReport, recover_manager
 from totodev_pub.case_manager_support.shutdown import ShutdownDirective
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
+from totodev_pub.case_manager_support.ticket_attempts import TicketAttemptLedger
 from totodev_pub.case_manager_support.termination import (
     TerminationTicket,
     begin_termination,
@@ -160,6 +161,8 @@ class CaseManager:
             driver, config.driver, default=self._build_default_driver
         )
         self._notices = NoticeRegistry()
+        # Attempts at tickets that cannot record their own. See ticket_attempts.
+        self._ticket_attempts = TicketAttemptLedger()
         self._mailbox = MailboxProcessor(self)
         self._running = False
         self._stopping = False
@@ -478,35 +481,21 @@ class CaseManager:
         loop = asyncio.get_running_loop()
         for ticket_file in replay_pending(self._manager_dir):
             with self._isolated_tick_item("termination ticket", ticket_file):
-                ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
-                await process_pending_ticket(
-                    ticket,
-                    ticket_file,
-                    store=self._store,
-                    policy=self._policy,
-                    manager_dir=self._manager_dir,
-                    quarantine=self._quarantine,
-                    emit_notice=self._emit_notice,
+                await self._drive_ticket(
+                    "termination", ticket_file, self._advance_termination_ticket
                 )
         for ticket_file in pending_quarantine_tickets(self._manager_dir):
             with self._isolated_tick_item("quarantine ticket", ticket_file):
-                q_ticket = QuarantineTicket.load(str(ticket_file), acquire_lock=False)
-                landed = await process_quarantine_ticket(
-                    q_ticket,
-                    ticket_file,
-                    store=self._store,
-                    manager_dir=self._manager_dir,
-                    max_retries=self._policy.termination_max_retries,
+                await self._drive_ticket(
+                    "quarantine", ticket_file, self._advance_quarantine_ticket
                 )
-                if landed is not None:
-                    self._emit_notice(
-                        "CASE_QUARANTINED", q_ticket.case_id, landed, q_ticket.reason
-                    )
         eject_pending = eject_dir(self._manager_dir) / "pending"
         if eject_pending.exists():
             for ticket_file in sorted(eject_pending.glob("*.yaml")):
                 with self._isolated_tick_item("eject ticket", ticket_file):
-                    await self._advance_eject_ticket(ticket_file)
+                    await self._drive_ticket(
+                        "eject", ticket_file, self._advance_eject_ticket
+                    )
         with self._isolated_tick_item("mailbox drain", self._manager_dir):
             await self._mailbox.maintenance_tick()
         if self._policy.redundant_purge_terminal_after_secs is not None or (
@@ -520,6 +509,102 @@ class CaseManager:
         with self._isolated_tick_item("condition detection", self._manager_dir):
             self._detect_escalations()
         self._last_tick_completed = time.monotonic()
+
+    async def _drive_ticket(
+        self, what: str, ticket_file: Path, advance: Callable[[Path], Awaitable[None]]
+    ) -> None:
+        """Run one ticket, counting attempts somewhere the ticket cannot corrupt.
+
+        A ticket's own ``retry_count`` is the right place to count — right up
+        until the ticket is the thing that is broken. One that will not parse can
+        never record that it was tried, so without an outside count it is retried
+        every tick forever while the case it describes sits removed from the
+        pool, detached, and un-enqueueable.
+
+        Below the threshold this re-raises, so the enclosing isolation logs and
+        notices exactly as before and the next tick tries again — a transient
+        failure must not burn through the budget on its first occurrence. At the
+        threshold the ticket is retired.
+        """
+        try:
+            await advance(ticket_file)
+        except Exception:
+            if self._ticket_attempts.record_failure(ticket_file) < (
+                self._policy.termination_max_retries
+            ):
+                raise
+            await self._retire_unprocessable_ticket(what, ticket_file)
+        else:
+            self._ticket_attempts.forget(ticket_file)
+
+    async def _retire_unprocessable_ticket(self, what: str, ticket_file: Path) -> None:
+        """Give up on a ticket, and on driving the case it describes.
+
+        The case is quarantined rather than repaired: the manager could not read
+        what it was supposed to do, so guessing would mean inventing a departure
+        the operator never asked for. Quarantine is the established posture for
+        exactly this — stop interacting, record why, leave it recoverable via
+        ``reopen_case()``.
+
+        The ``case_id`` comes from the *filename*, which is the one field a
+        corrupt ticket cannot take with it.
+        """
+        case_id = ticket_file.stem
+        self._ticket_attempts.forget(ticket_file)
+        logger.error(
+            "Abandoning unprocessable %s ticket for case %s after %d attempts",
+            what,
+            case_id,
+            self._policy.termination_max_retries,
+        )
+        failed_dir = ticket_file.parent.parent / "failed"
+        try:
+            failed_dir.mkdir(parents=True, exist_ok=True)
+            ticket_file.replace(failed_dir / ticket_file.name)
+        except OSError:
+            logger.exception("Could not retire %s to %s; unlinking", ticket_file, failed_dir)
+            ticket_file.unlink(missing_ok=True)
+
+        self._notices.emit_simple(
+            "TICKET_ABANDONED", case_id, ticket_file, f"{what} ticket is unprocessable"
+        )
+        # The waiter map is populated only by eject, so this settles an eject
+        # caller who would otherwise wait on a ticket that no longer exists.
+        waiter = self._eject_waiters.pop(case_id, None)
+        if waiter is not None and not waiter.done():
+            waiter.set_exception(
+                EjectAbandonedError(case_id=case_id, reason="eject ticket is unprocessable")
+            )
+
+        folder = await self._store.resolve_path(case_id)
+        if folder is not None:
+            await self._quarantine(
+                case_id, folder, f"{what} ticket could not be processed"
+            )
+
+    async def _advance_termination_ticket(self, ticket_file: Path) -> None:
+        ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
+        await process_pending_ticket(
+            ticket,
+            ticket_file,
+            store=self._store,
+            policy=self._policy,
+            manager_dir=self._manager_dir,
+            quarantine=self._quarantine,
+            emit_notice=self._emit_notice,
+        )
+
+    async def _advance_quarantine_ticket(self, ticket_file: Path) -> None:
+        ticket = QuarantineTicket.load(str(ticket_file), acquire_lock=False)
+        landed = await process_quarantine_ticket(
+            ticket,
+            ticket_file,
+            store=self._store,
+            manager_dir=self._manager_dir,
+            max_retries=self._policy.termination_max_retries,
+        )
+        if landed is not None:
+            self._emit_notice("CASE_QUARANTINED", ticket.case_id, landed, ticket.reason)
 
     async def _advance_eject_ticket(self, ticket_file: Path) -> None:
         """Drive one eject ticket and settle its waiter either way.

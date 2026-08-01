@@ -21,6 +21,7 @@ from case_manager_test_utils import (
 )
 from totodev_pub.case_manager_support.case_store import LIVE, TERMINATED
 from totodev_pub.case_manager_support.quarantine import quarantine_case
+from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.pytest_tools import very_lazy_test
 
@@ -151,6 +152,40 @@ async def test_an_unrehydratable_orphan_escalates(tmp_path, monkeypatch):
     assert report.readmitted == []
     assert report.anomalies == [case_id]
     assert [n.kind.value for n in notices] == ["READMIT_ANOMALY"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_readmit_releases_the_lease_it_took(tmp_path, monkeypatch):
+    """rehydrate() takes the lease before driver.add() gets a say.
+
+    Holding it after a failure makes the orphan look *owned* to every later pass,
+    including the next restart's — so a case that failed to re-admit once would
+    never be looked at again.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+    case.case_detach()
+
+    manager2 = provision_manager(tmp_path)
+
+    def rejecting_add(admitted):
+        raise RuntimeError("driver said no")
+
+    monkeypatch.setattr(manager2._driver, "add", rejecting_add)
+    report = await manager2.readmit_orphans()
+    assert report.anomalies == [case_id]
+
+    folder = manager2._store.find(case_id).case_folder
+    assert FolderBackedCase.is_heartbeat_expired(folder) is not False, (
+        "the lease must be released, or the orphan reads as owned from here on"
+    )
+
+    manager3 = provision_manager(tmp_path)
+    assert (await manager3.readmit_orphans()).readmitted == [case_id], "still reachable"
 
 
 @pytest.mark.asyncio

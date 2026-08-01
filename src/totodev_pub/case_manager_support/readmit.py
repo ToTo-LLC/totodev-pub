@@ -94,10 +94,21 @@ def readmit_orphans(
             continue        # another owner is actively working it
         if has_departure_ticket(case_id):
             continue        # already on its way out; re-admitting would undo that
+        case = None
         try:
-            driver.add(registry.rehydrate(current.case_folder))
+            case = registry.rehydrate(current.case_folder)   # takes the lease
+            driver.add(case)
             report.readmitted.append(case_id)
         except Exception as exc:
+            # Release the lease rehydrate took. Leaving it held would make the
+            # orphan look *owned* to every later pass — including the next
+            # restart's — so a case that failed to re-admit once would never be
+            # looked at again.
+            if case is not None and not case.case_is_detached:
+                try:
+                    case.case_detach()
+                except Exception:
+                    logger.exception("Could not release the lease on orphan %s", case_id)
             report.anomalies.append(case_id)
             logger.warning("Orphan re-admit failed for %s: %s", case_id, exc)
             if emit_anomaly:
