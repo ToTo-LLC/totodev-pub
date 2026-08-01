@@ -81,7 +81,8 @@ extraction and the §4.1.5 S-4 lease precondition reshape, so treat them as ridi
 That doc's own header says these should be resolved before promoting to `main`. Carried forward
 here so they're tracked in one place instead of two.
 
-**All five are closed.** This section gated the merge to `main`; see §7 Wave 1.
+**All five are closed.** This section is the merge gate for `main`; clearing it makes the branch
+mergeable, which is separate from deciding to merge. See §7 Wave 1.
 
 - [x] Integration test drives 3 consecutive `_manager_loop` tick failures through a real `serve()`
       run and asserts exit 70, in both watchdog modes
@@ -1069,7 +1070,8 @@ split across waves and are marked **(split)**.
 
 No structural change. Everything here lands in the current shape of the code.
 
-**Status: landed.** §1 is closed and the branch is ready to merge. Shipped across five commits —
+**Status: landed.** §1 is closed and the branch is mergeable on demand; the merge itself is held
+until the design settles. Shipped across five commits —
 deletions/naming/driver ergonomics, the aberrant orphan fix, the lease guard and archive label, the
 §1 blockers, and purge/config coverage.
 
@@ -1078,10 +1080,13 @@ orphan-rescue path always raised (F1); an explicitly injected `CasePoolDriver` w
 because `CasePoolDriver.__len__` makes an empty driver falsy; and the two archive-label computations
 disagreed, so a case could land in different terminal buckets depending on which path ran (F7).
 
-**Exit criterion: §1 is fully closed and the branch merges to `main`.** Waves 2 and 3 proceed from
-`main` on fresh short branches, rather than carrying `explore/case-queue` through two large refactors.
-Every §1 promotion blocker therefore has to land here, including the two whose permanent fix arrives
-in Wave 3.
+**Exit criterion: §1 is fully closed — done.** That makes the branch *mergeable*; it does not merge
+it. The merge into `main` is deliberately held until the maintainer is satisfied with the design, so
+readiness and landing are separate decisions. Every §1 promotion blocker still had to land here,
+including the two whose permanent fix arrives in Wave 3, because the branch has to be mergeable on
+demand.
+
+**Waves 2 and 3 therefore branch from `explore/case-queue`, not from `main`.**
 
 **Defect fixes**
 
