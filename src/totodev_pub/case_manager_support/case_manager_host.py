@@ -111,9 +111,13 @@ async def serve(
     directly with ``EXIT_RESTART_REQUESTED`` for every mailbox-requested
     shutdown, and the watchdog exits with ``EXIT_WATCHDOG`` on any detection.
 
-    ``manager`` must be freshly constructed — not yet recovered or started;
-    serve() owns that sequencing itself. ``stop_grace_secs`` is host wiring,
-    not deployment policy: Docker's ``stop_grace_period`` must exceed it.
+    ``manager`` must not already be running — ``serve()`` owns ``start()`` and
+    the stop sequencing, and a second owner would race both. Recovery it will do
+    for you, or skip if the caller has already done it: adopting cases *before*
+    hosting requires a recovered manager (see ``bag_loading.load_case_bag``), so
+    "already recovered" is a legitimate state to arrive in rather than an error.
+    ``stop_grace_secs`` is host wiring, not deployment policy: Docker's
+    ``stop_grace_period`` must exceed it.
 
     ``adapter`` is the request transport, if there is one. A manager with no
     adapter is driven entirely through its own methods — which is the normal
@@ -135,10 +139,10 @@ async def serve(
     contract: three consecutive loop failures still exit ``EXIT_WATCHDOG``,
     just without the pre-death diagnosis a detected wedge would get.
     """
-    if manager.is_recovered or manager.is_running:
+    if manager.is_running:
         raise ValueError(
-            "serve() requires a freshly constructed CaseManager (not recovered "
-            "or started); it owns the recover()/start() sequencing itself."
+            "serve() cannot host an already-running CaseManager; it owns start() "
+            "and the stop sequencing, and a second owner would race both."
         )
     if stop_when is not None and stop_when_empty:
         raise ValueError("stop_when and stop_when_empty are mutually exclusive")
@@ -160,7 +164,10 @@ async def serve(
     #    then the adapter settles requests that were in flight when the process
     #    died — a dead-lettered fire has to name a case the manager has already
     #    accounted for.
-    await manager.recover()
+    if manager.is_recovered:
+        logger.info("Manager was already recovered; serve() is not repeating it.")
+    else:
+        await manager.recover()
     if adapter is not None:
         adapter.recover()
         adapter.attach()

@@ -2,7 +2,7 @@
 
 import pytest
 
-from case_manager_test_utils import attach_adapter, transport_for, TicketCase, adopt_into_live, provision_manager, seed_detached_case
+from case_manager_test_utils import TerminalCase, attach_adapter, transport_for, TicketCase, adopt_into_live, provision_manager, seed_detached_case
 
 
 @pytest.mark.asyncio
@@ -51,3 +51,27 @@ async def test_pending_intake_is_the_adapters_half_of_idle(tmp_path):
 
     assert adapter.is_idle is False, "the adapter sees the backlog"
     assert manager.is_idle is True, "the fleet has nothing pooled, and says only that"
+
+
+@pytest.mark.asyncio
+async def test_a_departure_in_flight_is_not_idle(tmp_path):
+    """A case leaves the pool when termination is *enqueued*, not when it lands.
+
+    Exiting the moment the pool empties would leave a batch job's own output
+    sitting in `live` with pending tickets — recoverable only by a restart that,
+    for a finished job, never comes.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TerminalCase, staging)
+    case = await adopt_into_live(manager, staging)
+    await manager._driver.fire(case.case_folder, "finish")
+
+    manager._reconcile_terminal_in_pool()
+    assert len(manager._driver) == 0, "the case has left the pool"
+    assert manager.is_idle is False, "but its archive move has not happened yet"
+
+    await manager._maintenance_tick()
+
+    assert manager.is_idle is True, "and now it has"

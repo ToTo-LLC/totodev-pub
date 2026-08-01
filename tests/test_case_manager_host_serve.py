@@ -1,6 +1,7 @@
 # Part of the totodev_pub library.
 
 import asyncio
+import logging
 import os
 import signal
 import threading
@@ -89,11 +90,35 @@ def _stopped_at(manager):
 
 
 @pytest.mark.asyncio
-async def test_serve_rejects_prelifecycled_manager(tmp_path):
+async def test_serve_rejects_an_already_running_manager(tmp_path):
+    """Two owners of start()/stop() would race each other."""
     manager = provision_manager(tmp_path)
     await manager.recover()
-    with pytest.raises(ValueError):
-        await serve(manager)
+    await manager.start()
+    try:
+        with pytest.raises(ValueError, match="already-running"):
+            await serve(manager)
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_serve_accepts_an_already_recovered_manager(tmp_path, caplog):
+    """Adopting cases *before* hosting requires a recovered manager.
+
+    The bag loader has to recover in order to adopt, so refusing a recovered
+    manager made the loader and the host mutually exclusive. serve() now skips
+    the recovery it does not need to repeat.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    with caplog.at_level(logging.INFO):
+        task = asyncio.ensure_future(serve(manager, stop_when=lambda: manager.is_running))
+        await asyncio.wait_for(task, timeout=15.0)
+
+    assert not manager.is_running
+    assert any("already recovered" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio

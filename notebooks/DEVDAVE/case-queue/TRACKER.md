@@ -930,21 +930,42 @@ manager, it doesn't start one). Today, getting a manager running requires hand-a
 `CaseManager.open(...)` + registering types + calling `case_manager_host.serve(...)`, currently only
 demonstrated piecemeal across tests and the tutorials' prose.
 
-- [ ] `OPEN` — **Bag-loading construction convenience.** The common shape "I have a folder of case
-      folders; run them" currently requires provision + register types + an `adopt_case()` loop, and
-      `open()` refuses a non-empty root outright (`case_manager.py:232-240`). A single entry point
-      that provisions a fresh managed root and bulk-adopts a source folder — plus the matching pytest
-      fixture — removes that ceremony without a second storage model (§4.0.3). Note that `adopt`
-      *moves* rather than copies (`adopt.py:126-137`), so the convenience should copy the source bag
-      first and leave the caller's folder untouched, which also makes repeated runs repeatable.
-- [ ] `OPEN` — Decide the shape of this: a runnable example script under
-      `case_manager_support/examples/` (mirroring the `cached_file_folders_support/examples/`
-      convention)? A generator/skill akin to `case-designer` but for the manager side ("scaffold a
-      runnable manager script for these case types")? A `totodev-manager-*` CLI subcommand that
-      provisions + serves from a small config file? Needs a decision on the right level of
-      abstraction before building it.
+- [x] **Bag-loading construction convenience** — `case_manager_support/bag_loading.py`.
+      `load_case_bag()` provisions a root, copies each case in, and adopts it; `case_folders_in()`
+      is the (deliberately shallow) discovery rule; `make_case_bag_fixture()` is the pytest factory,
+      which stops every manager it created at teardown and gives each load its own root. The bag is
+      **copied, never consumed** — adopt moves, and running a case mutates it, so adopting the
+      caller's folders directly would destroy the input on first use and make a second run
+      meaningless.
+- [x] **Shape decided `2026-08-01`: runnable examples + a README**, mirroring the
+      `cached_file_folders_support/examples/` convention. Neither a CLI nor a generator: both add
+      public surface to teach a three-line idea, and a config-driven CLI would additionally need case
+      types importable by dotted path. Built: `example_01_minimal_host` (no adapter — the supported
+      embedded shape), `example_02_bag_runner` (batch, `stop_when_empty`), `example_03_request_serving_host`
+      (adapter + client round trip), a shared `example_cases.py`, and `README-case_manager.md`.
+      **The examples are executed by `tests/test_case_manager_examples.py`**, including a check that
+      the README still lists every script — an example nobody runs is a claim about the API, not a
+      fact about it.
 
-### 4.4 Hands-on bench-testing pass — `OPEN`, distinct from the static inspection pass in §5
+### 4.4 Hands-on bench-testing pass — `IN PROGRESS`, distinct from the static inspection pass in §5
+
+**First findings, from writing the §4.3 examples** — which is the bench pass in miniature, and
+already earned its keep:
+
+- [x] `stop_when_empty` exited before departures were durable. A case leaves the pool when
+      termination is *enqueued*; its folder is archived a tick or more later, by the ticket. So a
+      batch job exited with its own output still sitting in `live` behind pending tickets —
+      recoverable only by a restart that, for a finished job, never comes. `is_idle` now also
+      requires no departure in flight.
+- [x] `serve()` refused an already-recovered manager, which made the bag loader and the host
+      mutually exclusive: adopting cases before hosting *requires* a recovered manager. It now skips
+      recovery it does not need to repeat, and still refuses to host a *running* one — which was the
+      guard's real purpose.
+- [x] The watchdog-thread leak the Wave 1 plan predicted actually bit. A test that cancels its
+      `serve()` task never reaches `watchdog.stop()`, so a `manager-watchdog` daemon thread survives
+      into later modules and breaks the one test that asserts none exists. It surfaced only under
+      random ordering. Fixed at the source — tests stop a host by *asking* it to stop, not by
+      cancelling it, which also exercises the clean-exit path they were skipping.
 
 The maintainer wants a dedicated round of hands-on, interactive experimentation with these classes —
 running them, poking at them, deliberately trying odd sequences — specifically because this kind of
@@ -1260,8 +1281,9 @@ once the shape is final.
 
 **Remaining**
 
-- [ ] §4.3 — bag-loading construction convenience plus pytest fixture.
-- [ ] §4.3 — runnable manager example / generator / CLI: decide shape and build.
+- [x] §4.3 — bag-loading convenience (`bag_loading.py`) plus the pytest fixture factory.
+- [x] §4.3 — shape decided and built: runnable examples + README under
+      `case_manager_support/examples/`, exercised by their own test module.
 - [ ] §4.4 **(split)** — full bench-testing pass on the tooled harness; findings back into §5.
 - [ ] §3 — `case-designer` skill updated for the pool-manager layer.
 - [ ] §5 — replace the `§N` comment convention with inline rationale.

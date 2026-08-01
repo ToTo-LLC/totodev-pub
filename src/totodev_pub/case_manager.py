@@ -307,13 +307,26 @@ class CaseManager:
 
     @property
     def is_idle(self) -> bool:
-        """No pooled cases — the fleet has nothing left to drive.
+        """No pooled cases, and no departure still in flight.
 
-        This is only *half* of "is the whole system idle". A signaling adapter
-        may be holding requests that have not reached the pool yet, and the
-        manager can no longer see them. The host composes the two; a caller
-        asking this directly is asking about the fleet alone."""
-        return len(self._driver) == 0
+        The second half is not pedantry. A case leaves the pool when termination
+        is *enqueued*, but its folder is archived a tick or more later, by the
+        ticket. A job that exited the moment the pool emptied would leave its
+        own output sitting in `live` with pending tickets — recoverable only by
+        a restart that may never come, since the job is done.
+
+        This is still only *half* of "is the whole system idle": a signaling
+        adapter may hold requests that have not reached the pool yet, and the
+        manager can no longer see them. The host composes the two."""
+        return len(self._driver) == 0 and not self._departures_in_flight()
+
+    def _departures_in_flight(self) -> bool:
+        """True while any case is on its way out of managed storage."""
+        return bool(
+            replay_pending(self._manager_dir)
+            or pending_quarantine_tickets(self._manager_dir)
+            or self._count_eject_pending()
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
