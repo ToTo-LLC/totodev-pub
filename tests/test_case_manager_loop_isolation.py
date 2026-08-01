@@ -99,14 +99,14 @@ async def test_terminal_reconcile_isolates_one_failing_case(tmp_path, monkeypatc
 
     monkeypatch.setattr(case_manager_module, "begin_termination", flaky_begin_termination)
 
-    escalations = []
-    manager.on_escalation(escalations.append)
+    notices = []
+    manager.on_notice(notices.append)
 
     count = manager._reconcile_terminal_in_pool()
 
     assert calls == [c.case_id for c in cases], "the second case is still visited"
     assert count == 1, "only the healthy case was enqueued"
-    assert [e.kind.value for e in escalations] == ["MAINTENANCE_ITEM_FAILED"]
+    assert [n.kind.value for n in notices] == ["MAINTENANCE_ITEM_FAILED"]
 
     for case in cases:
         if not case.case_is_detached:
@@ -124,11 +124,11 @@ async def test_escalation_detection_failure_does_not_abort_the_tick(tmp_path, mo
 
     monkeypatch.setattr(manager, "_detect_escalations", boom)
 
-    escalations = []
-    manager.on_escalation(escalations.append)
+    notices = []
+    manager.on_notice(notices.append)
 
     await manager._maintenance_tick()
 
     assert manager._last_tick_completed is not None, "the tick still completed"
-    assert [e.kind.value for e in escalations] == ["MAINTENANCE_ITEM_FAILED"]
-    assert "escalation detection" in escalations[0].detail["message"]
+    assert [n.kind.value for n in notices] == ["MAINTENANCE_ITEM_FAILED"]
+    assert "condition detection" in notices[0].detail["message"]

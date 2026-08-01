@@ -141,7 +141,7 @@ async def test_an_unrehydratable_orphan_escalates(tmp_path, monkeypatch):
 
     manager2 = provision_manager(tmp_path)
     notices = []
-    manager2.on_escalation(notices.append)
+    manager2.on_notice(notices.append)
     def unreadable(folder):
         raise ValueError("record is unreadable")
 
@@ -171,7 +171,7 @@ async def test_a_pooled_case_the_store_no_longer_calls_live_is_reported(tmp_path
     await manager._store.set_status(case_id, TERMINATED, partition="2026-08")
 
     notices = []
-    manager.on_escalation(notices.append)
+    manager.on_notice(notices.append)
     report = await manager.readmit_orphans()
 
     assert report.stale_pool_entries == [case_id]

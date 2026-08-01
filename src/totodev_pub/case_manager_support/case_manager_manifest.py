@@ -15,20 +15,23 @@ from totodev_pub.case_manager_support.constants import MANIFEST_PROTOCOL_VERSION
 
 
 class ManifestPaths(BaseModel):
+    """Where a client submits work and reads results. Protocol dirs only.
+
+    Storage bucket layout is deliberately absent: it belongs to the case store,
+    and publishing it here would invite out-of-process code to path-arithmetic
+    its way into managed storage instead of asking the manager.
+    """
+
     fire_mailbox_intake: str
     adopt_mailbox_intake: str
+    reclassify_mailbox_intake: str
+    shutdown_mailbox_intake: str
     results: str
     adopt_drop: str
     termination_pending: str
     eject_pending: str
     staging: str
     fleet_status_board: Optional[str] = None
-    # Optional for manifest back-compat: absent in manifests written before the
-    # reclassify mailbox existed.
-    reclassify_mailbox_intake: Optional[str] = None
-    # Optional for manifest back-compat: absent in manifests written before the
-    # shutdown mailbox existed.
-    shutdown_mailbox_intake: Optional[str] = None
 
 
 class CaseManagerManifest(BaseModel, FileMappedPydanticMixin):
@@ -37,8 +40,6 @@ class CaseManagerManifest(BaseModel, FileMappedPydanticMixin):
     protocol_version: int = MANIFEST_PROTOCOL_VERSION
     cache_root: str
     manager_namespace: str
-    live_bucket: str
-    terminal_prefix: str
     manifest_stale_secs: int = 30
     client_read_only_ok: bool = True
     paths: ManifestPaths

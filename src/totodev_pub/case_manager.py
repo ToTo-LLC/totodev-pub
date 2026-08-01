@@ -50,7 +50,7 @@ from totodev_pub.case_manager_support.eject import (
     eject_ticket_path,
     process_eject_ticket,
 )
-from totodev_pub.case_manager_support.escalation import CaseEscalation, EscalationRegistry
+from totodev_pub.case_manager_support.notice import CaseNotice, NoticeRegistry
 from totodev_pub.case_manager_support.fleet_status import (
     FleetStatusBoardWriter,
     ensure_board_file,
@@ -159,7 +159,7 @@ class CaseManager:
         self._driver = _first_supplied(
             driver, config.driver, default=self._build_default_driver
         )
-        self._escalations = EscalationRegistry()
+        self._notices = NoticeRegistry()
         self._mailbox = MailboxProcessor(self)
         self._running = False
         self._stopping = False
@@ -517,7 +517,7 @@ class CaseManager:
                     None, lambda: run_redundant_purge(self._store, self._policy)
                 )
         self._publish_fleet_status_board()
-        with self._isolated_tick_item("escalation detection", self._manager_dir):
+        with self._isolated_tick_item("condition detection", self._manager_dir):
             self._detect_escalations()
         self._last_tick_completed = time.monotonic()
 
@@ -539,7 +539,7 @@ class CaseManager:
                 manager_dir=self._manager_dir,
             )
         except EjectAbandonedError as exc:
-            self._escalations.emit_simple(
+            self._notices.emit_simple(
                 "EJECT_FAILED", ticket.case_id, Path(ticket.case_folder), exc.reason
             )
             fut = self._eject_waiters.pop(ticket.case_id, None)
@@ -649,7 +649,7 @@ class CaseManager:
             driver=self._driver,
             registry=self._registry,
             has_departure_ticket=self._has_departure_ticket,
-            emit_anomaly=lambda cid, folder, msg: self._escalations.emit_simple(
+            emit_anomaly=lambda cid, folder, msg: self._notices.emit_simple(
                 "READMIT_ANOMALY", cid, folder, msg
             ),
         )
@@ -694,11 +694,11 @@ class CaseManager:
             expected_case_id=expected_case_id,
         )
         if result.status == "rejected":
-            self._escalations.emit_simple(
+            self._notices.emit_simple(
                 "ADOPT_REJECTED", result.case_id or None, Path(source_folder), result.rejection_reason
             )
         elif result.status == "error":
-            self._escalations.emit_simple(
+            self._notices.emit_simple(
                 "ADOPT_FAILED", result.case_id, Path(source_folder), result.rejection_reason
             )
         self._publish_adopt_result(result)
@@ -953,11 +953,11 @@ class CaseManager:
         for entry in self._store.iter_by_status(status):
             yield FolderBackedCaseReader(entry.case_folder)
 
-    def on_escalation(self, callback: Callable[[CaseEscalation], None]) -> int:
-        return self._escalations.register(callback)
+    def on_notice(self, callback: Callable[[CaseNotice], None]) -> int:
+        return self._notices.register(callback)
 
-    def off_escalation(self, handle: int) -> None:
-        self._escalations.unregister(handle)
+    def off_notice(self, handle: int) -> None:
+        self._notices.unregister(handle)
 
     def on_loop_failure(self, callback: Callable[[BaseException], None]) -> None:
         """Register the single host callback invoked when the manager loop gives
@@ -1036,7 +1036,7 @@ class CaseManager:
     def _emit_notice(
         self, kind: str, case_id: str, folder: Path | None, detail: str | None = None
     ) -> None:
-        self._escalations.emit_simple(kind, case_id, folder, detail)
+        self._notices.emit_simple(kind, case_id, folder, detail)
 
     def _readmit_after_failed_reclassify(
         self, folder: Path, case: FolderBackedCase
@@ -1059,7 +1059,7 @@ class CaseManager:
             raise
         except Exception as exc:
             logger.exception("Maintenance tick: %s failed (%s); skipping", what, source)
-            self._escalations.emit_simple(
+            self._notices.emit_simple(
                 "MAINTENANCE_ITEM_FAILED", None, source, f"{what}: {exc!r}"
             )
 
@@ -1150,8 +1150,6 @@ class CaseManager:
         manifest = CaseManagerManifest(
             cache_root=str(self._cache_root),
             manager_namespace=self._policy.manager_namespace,
-            live_bucket=self._policy.live_bucket,
-            terminal_prefix=self._policy.terminal_prefix,
             manifest_stale_secs=self._policy.manifest_stale_secs,
             paths=paths,
             heartbeat_at=CaseManagerManifest.utc_now_iso() if running else None,
@@ -1168,7 +1166,7 @@ class CaseManager:
             self._config.policy_path,
             driver_name,
             len(self._registry),
-            len(self._escalations),
+            len(self._notices),
         )
 
     def _load_adopt_result(self, correlation_id: str | None) -> AdoptResult | None:
@@ -1209,7 +1207,7 @@ class CaseManager:
         if self._policy.escalation_fail_threshold is not None:
             for case in self._driver:
                 if case.case_transition_fail_count >= self._policy.escalation_fail_threshold:
-                    self._escalations.emit_simple(
+                    self._notices.emit_simple(
                         "REPEATED_FAILURE",
                         case.case_id,
                         case.case_folder,
@@ -1221,12 +1219,12 @@ class CaseManager:
                     not case.case_is_terminal
                     and case.case_dwell_secs >= self._policy.escalation_stall_secs
                 ):
-                    self._escalations.emit_simple(
+                    self._notices.emit_simple(
                         "STALLED", case.case_id, case.case_folder, case_state=case.case_state
                     )
         if self._policy.escalation_blocked:
             for case in self._driver.blocked_cases():
-                self._escalations.emit_simple(
+                self._notices.emit_simple(
                     "AUTO_BLOCKED", case.case_id, case.case_folder, case_state=case.case_state
                 )
 

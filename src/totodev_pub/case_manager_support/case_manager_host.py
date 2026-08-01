@@ -171,11 +171,11 @@ async def serve(
         )
         faulthandler.dump_traceback(all_threads=True)
         try:
-            manager._escalations.emit_simple(
+            manager._notices.emit_simple(
                 "MANAGER_UNRESPONSIVE", None, manager._manager_dir, f"loop_failure: {exc!r}"
             )
         except Exception:
-            logger.exception("Escalation emit failed; continuing to exit")
+            logger.exception("Notice emit failed; continuing to exit")
         try:
             write_death_record(
                 manager._manager_dir,

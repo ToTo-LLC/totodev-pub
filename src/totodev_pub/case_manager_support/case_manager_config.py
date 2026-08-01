@@ -36,4 +36,4 @@ class CaseManagerConfig:
     driver_kwargs: dict[str, Any] = field(default_factory=dict)
     registry: "CaseTypeRegistry | None" = None
     register_types: Sequence[type["FolderBackedCase"]] = ()
-    escalation_handlers: list[Callable[..., None]] = field(default_factory=list)
+    notice_handlers: list[Callable[..., None]] = field(default_factory=list)

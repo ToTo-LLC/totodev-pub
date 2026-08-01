@@ -11,9 +11,9 @@ from totodev_pub.case_manager_support.case_store import (
     CaseEntry,
     LocalCaseStore,
 )
-from totodev_pub.case_manager_support.escalation import (
-    CaseEscalation,
-    CaseEscalationKind,
+from totodev_pub.case_manager_support.notice import (
+    CaseNotice,
+    CaseNoticeKind,
 )
 from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
@@ -54,8 +54,8 @@ __all__ = [
     "TERMINATED",
     # Policy and notices
     "CaseManagerPolicy",
-    "CaseEscalation",
-    "CaseEscalationKind",
+    "CaseNotice",
+    "CaseNoticeKind",
     # Exceptions
     "AmbiguousExternalKeyError",
     "CacheRootStateError",

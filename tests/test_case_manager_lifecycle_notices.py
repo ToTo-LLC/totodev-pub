@@ -19,7 +19,7 @@ from case_manager_test_utils import (
     provision_manager,
     seed_detached_case,
 )
-from totodev_pub.case_manager_support.escalation import CaseEscalationKind
+from totodev_pub.case_manager_support.notice import CaseNoticeKind
 from totodev_pub.case_manager_support.termination import termination_dir
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
@@ -40,11 +40,11 @@ def _kinds(notices):
 
 def test_lifecycle_kinds_are_distinguishable_from_problems():
     """Subscribers filter on this; a paging handler wants the problems only."""
-    assert CaseEscalationKind.CASE_TERMINATED.is_lifecycle
-    assert CaseEscalationKind.CASE_QUARANTINED.is_lifecycle
-    assert CaseEscalationKind.CASE_EJECTED.is_lifecycle
-    assert not CaseEscalationKind.MANAGER_UNRESPONSIVE.is_lifecycle
-    assert not CaseEscalationKind.READMIT_ANOMALY.is_lifecycle
+    assert CaseNoticeKind.CASE_TERMINATED.is_lifecycle
+    assert CaseNoticeKind.CASE_QUARANTINED.is_lifecycle
+    assert CaseNoticeKind.CASE_EJECTED.is_lifecycle
+    assert not CaseNoticeKind.MANAGER_UNRESPONSIVE.is_lifecycle
+    assert not CaseNoticeKind.READMIT_ANOMALY.is_lifecycle
 
 
 @pytest.mark.asyncio
@@ -58,11 +58,11 @@ async def test_termination_announces_the_departure(tmp_path):
     await manager._driver.fire(case.case_folder, "finish")
 
     notices = []
-    manager.on_escalation(notices.append)
+    manager.on_notice(notices.append)
     manager._reconcile_terminal_in_pool()
     await manager._maintenance_tick()
 
-    departures = [n for n in notices if n.kind is CaseEscalationKind.CASE_TERMINATED]
+    departures = [n for n in notices if n.kind is CaseNoticeKind.CASE_TERMINATED]
     assert len(departures) == 1
     assert departures[0].case_id == case_id
     assert departures[0].case_folder is not None
@@ -78,10 +78,10 @@ async def test_quarantine_announces_the_departure(tmp_path):
     case.case_detach()
 
     notices = []
-    manager.on_escalation(notices.append)
+    manager.on_notice(notices.append)
     await manager._quarantine(case.case_id, case.case_folder, "unreadable record")
 
-    assert CaseEscalationKind.CASE_QUARANTINED in _kinds(notices)
+    assert CaseNoticeKind.CASE_QUARANTINED in _kinds(notices)
 
 
 @pytest.mark.asyncio
@@ -94,7 +94,7 @@ async def test_eject_announces_the_departure(tmp_path):
     await manager.start()
 
     notices = []
-    manager.on_escalation(notices.append)
+    manager.on_notice(notices.append)
     try:
         await manager.eject_from_pool(
             case.case_id, export_to_folder=tmp_path / "exported", timeout=5.0
@@ -102,7 +102,7 @@ async def test_eject_announces_the_departure(tmp_path):
     finally:
         await manager.stop()
 
-    assert CaseEscalationKind.CASE_EJECTED in _kinds(notices)
+    assert CaseNoticeKind.CASE_EJECTED in _kinds(notices)
 
 
 @pytest.mark.asyncio

@@ -295,7 +295,7 @@ class ManagerWatchdog:
                     f"the {DEFAULT_LEASE_TTL_SECS:.0f}s TTL. Alarm only — never a kill."
                 )
                 logger.warning("Watchdog: %s", detail)
-                self._emit_escalation(f"tick_slow: {detail}", prefer_threadsafe=True)
+                self._emit_notice(f"tick_slow: {detail}", prefer_threadsafe=True)
 
     def _oldest_intake_age(self) -> float | None:
         mailbox = self._manager._mailbox
@@ -326,7 +326,7 @@ class ManagerWatchdog:
         #    callback that never runs before os._exit, so PULSE_STUCK dispatches
         #    directly on this thread (documented: MANAGER_UNRESPONSIVE may
         #    arrive off-loop).
-        self._emit_escalation(
+        self._emit_notice(
             f"{detection.value}: {detail}",
             prefer_threadsafe=detection is not WatchdogDetection.PULSE_STUCK,
         )
@@ -373,9 +373,9 @@ class ManagerWatchdog:
         self._parked.set()
         self._exit_fn(self._exit_code)
 
-    def _emit_escalation(self, detail: str, *, prefer_threadsafe: bool) -> None:
+    def _emit_notice(self, detail: str, *, prefer_threadsafe: bool) -> None:
         def _do() -> None:
-            self._manager._escalations.emit_simple(
+            self._manager._notices.emit_simple(
                 "MANAGER_UNRESPONSIVE", None, None, detail
             )
 

@@ -53,16 +53,16 @@ def test_wiring_fields_default_to_empty(tmp_path):
     assert config.driver_kwargs == {}
     assert config.registry is None
     assert config.register_types == ()
-    assert config.escalation_handlers == []
+    assert config.notice_handlers == []
 
 
 def test_mutable_defaults_are_not_shared_between_instances(tmp_path):
     first = _minimal(tmp_path)
     second = _minimal(tmp_path)
     first.driver_kwargs["policy"] = TierPolicy()
-    first.escalation_handlers.append(lambda e: None)
+    first.notice_handlers.append(lambda e: None)
     assert second.driver_kwargs == {}
-    assert second.escalation_handlers == []
+    assert second.notice_handlers == []
 
 
 def test_attach_populates_the_config_from_policy_and_wiring(tmp_path):

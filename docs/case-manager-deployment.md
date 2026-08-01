@@ -137,7 +137,7 @@ detection and the reason. `recover()` logs any from the last 24 hours at startup
 so a restart loop announces itself. Same-minute records overwrite, which
 deliberately collapses a sub-minute crash loop to one file per minute.
 
-**Notices** — register with `manager.on_escalation(...)` for in-process
+**Notices** — register with `manager.on_notice(...)` for in-process
 notification. One channel carries two families, told apart by
 `kind.is_lifecycle`:
 

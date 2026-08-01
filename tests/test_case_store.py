@@ -58,6 +58,39 @@ async def _seed_live(store: LocalCaseStore, tmp_path: Path, case_id: str = "c-1"
     return await store.absorb_orphan(case_id, source, status=LIVE)
 
 
+# ----------------------------------------------------------------- the boundary
+
+
+def test_no_storage_mechanics_leak_out_of_the_store():
+    """The rule that makes this a boundary rather than a pass-through.
+
+    A concrete wrapper makes it very easy to let cache mechanics creep back into
+    public methods, producing a chokepoint that is not an abstraction. This is
+    the check that would otherwise have to be remembered on every change.
+    """
+    import totodev_pub.case_manager_support as support_pkg
+
+    package_dir = Path(support_pkg.__file__).parent
+    forbidden = ("CachedFileFolders", "ref_path", "grouping_key", "slave_dir", "PLACEHOLDER")
+    # These two *declare* the layout facts — the persisted policy and its
+    # defaults — which is different from using them. The store is the only
+    # module allowed to act on them.
+    allowed = {"case_store.py", "constants.py", "case_manager_policy.py"}
+
+    offenders: dict[str, list[str]] = {}
+    sources = [Path(support_pkg.__file__).parents[1] / "case_manager.py"]
+    sources += [p for p in package_dir.rglob("*.py") if p.name not in allowed]
+    for path in sources:
+        hits = [term for term in forbidden if term in path.read_text(encoding="utf-8")]
+        if hits:
+            offenders[path.name] = hits
+
+    assert offenders == {}, (
+        "storage mechanics escaped the CaseStore boundary: "
+        f"{offenders}. Express it in case_id / status / Path instead."
+    )
+
+
 # ---------------------------------------------------------------- provisioning
 
 

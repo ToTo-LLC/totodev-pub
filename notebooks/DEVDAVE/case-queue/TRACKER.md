@@ -54,25 +54,27 @@ several of them are allowed to assume.
   isolation audited (§4.2).
 - `ManagerWatchdog` (`case_manager_support/watchdog.py`) — wedge detection + kill ladder. Functionally
   complete; blocked on the promotion-blocker test gaps in §1 (the exit-70 integration test above all).
-- `CaseManagerPolicy` (`case_manager_support/case_manager_policy.py`) — the single source of truth for
-  layout/addressing. Its Tier-1 layout fields are candidates to move into `CaseStore` construction
-  (§4.1.2); it may also shed its mailbox/transport fields if §4.0.2's protocol extraction goes
-  forward.
+- `LocalCaseStore` (`case_manager_support/case_store.py`) — the storage boundary: location and
+  pool-activity-status owned together, addressed by `case_id`. Deliberately concrete, with no ABC
+  until a second implementation actually exists. Its vocabulary rule is enforced by a
+  source-inspection test rather than convention.
+- `CaseManagerPolicy` (`case_manager_support/case_manager_policy.py`) — the persisted deployment
+  record. It still *declares* the Tier-1 layout facts, but only `LocalCaseStore` acts on them now; it
+  may shed its mailbox/transport fields if §4.0.2's protocol extraction goes forward.
 - `CaseManagerConfig` (`case_manager_support/case_manager_config.py`) — process-local wiring
-  (driver/registry/cache overrides). No dedicated test yet (§2); its `cache_override` field goes away
-  when the constructor takes a `CaseStore` (§4.1.2).
+  (driver/registry/notice handlers). Covered by `tests/test_case_manager_config.py`.
 - `FleetStatusBoardWriter` / `FleetStatusBoardWatcher` (`fleet_status.py` / `fleet_status_watcher.py`)
   — fleet snapshot writer + client-side watcher. No open quirks beyond the private-symbol imports
   noted in the original mapping; lowest-risk pair in this list.
-- `EscalationRegistry` (`escalation.py`) — in-process pub/sub for escalations. No open items beyond
-  what's already covered by its existing test file.
+- `NoticeRegistry` (`notice.py`) — in-process pub/sub carrying both problem and lifecycle kinds, told
+  apart by `kind.is_lifecycle`. Delivery is at-most-once by design and says so.
 
-Everything else in `case_manager_support/` (`adopt.py`, `termination.py`, `aberrant.py`, `eject.py`,
-`reap.py`, `purge.py`, `recover.py`, `shutdown.py`, `staging.py`, `layout.py`,
+Everything else in `case_manager_support/` (`adopt.py`, `termination.py`, `quarantine.py`,
+`eject.py`, `readmit.py`, `purge.py`, `recover.py`, `shutdown.py`, `staging.py`, `layout.py`,
 `case_manager_host.serve()`) is function-based pipeline code rather than a class with its own
-lifecycle — tracked by module in §2/§3/§5 rather than listed here, but `layout.py` and the four
-move-shaped pipelines (`adopt`/`termination`/`aberrant`/`eject`) are the ones the §4.1.2 `CaseStore`
-extraction and the §4.1.5 S-4 lease precondition reshape, so treat them as riding on those.
+lifecycle — tracked by module in §2/§3/§5 rather than listed here. The four move-shaped pipelines
+(`adopt`/`termination`/`quarantine`/`eject`) now relocate cases only through `LocalCaseStore`, which
+is where the §4.1.5 S-4 lease precondition is enforced.
 
 ---
 
@@ -100,16 +102,16 @@ mergeable, which is separate from deciding to merge. See §7 Wave 1.
 
 ## 2. Test coverage gaps (found independently, not in finishing_watchdog.md)
 
-- [x] `aberrant.py` covered by `tests/test_case_manager_aberrant.py` (both branches of
-      `move_case_to_aberrant`). The orphan-rescue branch was non-functional (F1) and is fixed.
+- [x] Quarantine covered by `tests/test_case_manager_quarantine.py` — immediate move, deferred move,
+      the ticket surviving repeated attempts without spending a retry, the reason landing on the
+      case's own journal, and orphan absorption.
 - [x] `purge.py` covered by `tests/test_case_manager_purge.py`, including the mid-purge error path
       and the tick isolation around it.
-- [ ] `DECIDED 2026-08-01` — **Drop `PurgeReport.stragglers`.** Declared in `purge.py`, never
-      populated, never read. Same disposition and same reasoning as F6.
-- [ ] `OPEN` — `layout.py` has no direct unit test despite being the highest-fan-in module in the
-      support package (9+ importers). Only exercised transitively through everything else.
-- [ ] `OPEN` — `case_manager_config.py` (`CaseManagerConfig`) has no test that references it by name;
-      only indirect coverage via `test_case_manager_provision_attach_open.py`.
+- [x] `PurgeReport.stragglers` dropped (Wave 1).
+- [x] The highest-fan-in storage code has direct unit tests: `tests/test_case_store.py` (23), which
+      is what `layout.py` never had. `layout.py` itself is now four small functions, all covered
+      through `tests/test_case_manager_lease_guard.py` and the store suite.
+- [x] `case_manager_config.py` covered by `tests/test_case_manager_config.py`.
 
 ## 3. Documentation / wiring staleness
 
@@ -616,10 +618,16 @@ surface. Within this work, do §4.2's per-item isolation fix and S-4's
 lease precondition first — both are small, independent, and give the moved code a stable failure
 contract before it moves.
 
-#### 4.1.3 Grounding: what the meta-status vocabulary actually is today — `OPEN`
+#### 4.1.3 Grounding: the meta-status vocabulary before `CaseStore` — historical
 
-There is no meta-status enum anywhere in the code. Status is expressed by **three unrelated
-mechanisms**, and which one carries it varies per status:
+**This section describes the state Wave 2 replaced.** Pool-activity-status is now a named vocabulary
+owned by `CaseStore`, projected onto bucket membership, with `quarantined` a real status and
+in-transition carried by tickets that no longer double as receipts. The table is kept because it is
+the evidence for why the boundary was worth building — it is what "three unrelated mechanisms" looked
+like in code.
+
+There was no meta-status enum anywhere. Status was expressed by **three unrelated mechanisms**, and
+which one carried it varied per status:
 
 | Meta-status | Mechanism today | Written by | Findable by `locate()`? |
 |---|---|---|---|
@@ -656,7 +664,11 @@ Three structural observations fall out of that table:
   ledger, but they are per-operation, never swept (F4), and consulted by no read API. Decide whether
   the manager owes a durable "this case used to be here, and left this way" answer.
 
-#### 4.1.4 Defects confirmed while grounding this — `OPEN` (feed §5/§2)
+#### 4.1.4 Defects confirmed while grounding this — **all closed**
+
+F1, F6, and F8 closed in Wave 1; F2, F3, F4, F5, and F7 closed by the `CaseStore` extraction. The
+descriptions below are kept as the grounding record — they are why the boundary exists, and several
+of them were only findable by mapping the storage access the way this section did.
 
 - **F1 — `move_case_to_aberrant`'s orphan fallback cannot work.** When no cache index row exists
   (`aberrant.py:54` `find_file` → `None`), the else-branch writes a placeholder by raw path arithmetic
@@ -785,47 +797,47 @@ operation would move a case folder while the lease is held, raise** instead of m
 
 **S-5 — `quarantined` is a status; `aberrant` is a reason.** See §4.0.4 for the derivation.
 
-#### 4.1.6 Still open — `DECISION NEEDED`
+#### 4.1.6 Resolutions — settled by the `CaseStore` extraction
 
 Two items that stood here — *where pool-activity-status durably lives* and *a `case_id`-keyed index* —
-are **closed by §4.1.2**. Status is projected onto location and `CaseStore` owns both, so there is no
-separate durable status store to design; and the index is responsibility 2/7 of that object. The
-sidecar-vs-journal question evaporated with the deferral model: because `set_status` refuses rather
-than defers, status and location never legally disagree, so nothing needs to carry a status that
-location cannot express. The *storage-access chokepoint* item is likewise subsumed by §4.1.2.
+are closed by §4.1.2. Status is projected onto location and `CaseStore` owns both, so there is no
+separate durable status store to design. The sidecar-vs-journal question evaporated with the deferral
+model: because `set_status` refuses rather than defers, status and location never legally disagree, so
+nothing needs to carry a status that location cannot express.
 
-What remains genuinely open:
-
-- **Convergence over atomicity.** Rather than demanding crash-atomicity from each pipeline — which
-  `move_file` does not provide across the surrounding ticket unlink, and which `adopt`'s per-child
-  `shutil.move` loop plainly does not — make the contract: **every relocation is idempotent and
-  re-drivable, and `reap()` converges any disagreement.** That is already the de facto design; making
-  it explicit requires the bidirectional, all-bucket `reap()` noted in §4.1.3. This is now a stated
-  precondition of §4.1.2's no-WAL decision, not merely a preference.
-- **The quarantine ticket** (§4.1.2): confirm it follows the termination/eject ticket shape, and that
-  recovery consults quarantine tickets before re-admitting live cases.
-- **Departed cases are announced, not catalogued.** The manager does
-  not become the librarian of departed cases. Case departures (terminated, quarantined, ejected) are
-  **emitted as lifecycle events**; an owning application that needs history subscribes and keeps its
-  own record. This is the same refusal as §4.1.2's scope decision — a durable ledger would mean
-  retention policy, sweeping, and a query API, all of which are new manager responsibilities.
-  - **Channel — `DECISION NEEDED` (small).** Do not build a second registry. `EscalationRegistry` is
-    already kind-tagged pub/sub (`emit_simple("ADOPT_REJECTED", ...)`, `"REAP_ANOMALY"`, …), so widen
-    it to carry lifecycle kinds alongside problem kinds and let subscribers filter. That is less
-    machinery than a parallel channel, at the cost of renaming the public
-    `on_escalation` / `off_escalation` surface, since "escalation" would no longer describe a normal
-    termination. A pre-release rename is acceptable.
+- **Convergence over atomicity — `IMPLEMENTED`, not yet written down.** Rather than demanding
+  crash-atomicity from each pipeline — which the cache's move does not provide across the surrounding
+  ticket unlink, and which `adopt`'s per-child `shutil.move` loop plainly does not — the contract is:
+  **every relocation is idempotent and re-drivable, and startup readmission converges any
+  disagreement.** `set_status` returns the existing folder when a case is already at the requested
+  status; `create_location` returns an existing folder rather than failing; `absorb_orphan` tolerates
+  source == destination. All three have tests. What is still missing is a single place that *states*
+  the contract — that belongs with the Wave 3 documentation pass, not scattered across docstrings.
+- **The quarantine ticket — `DONE`.** It follows the termination/eject shape, and both the eject and
+  quarantine tickets are consulted before re-admitting. Two properties worth remembering: a held
+  lease does not spend a retry (waiting is the designed behavior and can outlive many ticks), and
+  enough *genuine* failures retire the ticket to `failed/` so a case that can never be relocated stops
+  consuming a tick forever.
+- **Departed cases are announced, not catalogued — `DONE`.** The manager does not become the
+  librarian of departed cases. Departures emit lifecycle notices; an application that needs history
+  subscribes and keeps its own record. This is the same refusal as §4.1.2's scope decision — a durable
+  ledger would mean retention policy, sweeping, and a query API, all new manager responsibilities.
+  - **Channel — `DECIDED 2026-08-01`.** One registry, widened to carry lifecycle kinds alongside
+    problem kinds, with `kind.is_lifecycle` as the discriminator subscribers filter on. The public
+    surface is renamed to match what it now publishes: `on_notice` / `off_notice`,
+    `CaseEscalation` → `CaseNotice`, `CaseEscalationKind` → `CaseNoticeKind`,
+    `EscalationRegistry` → `NoticeRegistry`, `escalation.py` → `notice.py`. `REAP_ANOMALY` became
+    `READMIT_ANOMALY` with the rename of the pass that emits it.
   - **Delivery is at-most-once.** In-process pub/sub does not survive a crash: if a case departs and
-    the process dies before a subscriber persists, the event is lost. Acceptable — this is operator
-    convenience, not correctness — but say so rather than implying an audit log.
-  - **This fully resolves F4.** `done/` is load-bearing today only because `ticket_exists()` uses it
-    for termination idempotency. Once `CaseStore` status is authoritative, that check consults the
-    store instead — a case already in `terminated` status needs no ticket to prove it — so `done/`
-    becomes purely informational and can be TTL'd or dropped outright.
-- **`CaseKeepManifest` interaction.** No longer needed for a status sidecar, but still worth
-  confirming: `purge()` deletes every file matching no keep rule, skipping only `_keep.txt` and the
-  lease (`case_keep_manifest.py:25`, `100-107`). Verify nothing `CaseStore` relies on inside a case
-  folder is purgeable.
+    the process dies before a subscriber persists, the notice is lost. Acceptable — operator
+    convenience, not correctness — and stated on the module and in the operator doc rather than left
+    to be discovered.
+  - **This fully resolved F4.** `done/` was load-bearing only because `ticket_exists()` used it for
+    termination idempotency. Stored status is authoritative now, so `done/` is deleted outright rather
+    than TTL'd: a case already at `terminated` needs no receipt to prove it.
+- **`CaseKeepManifest` interaction — `OPEN` (small).** The store reads exactly one thing inside a case
+  folder — `case_record.yaml`, and only on the reverse-address path — and `purge()` retains the
+  record. That is the reasoning; it deserves a direct test rather than resting on the argument.
 
 ### 4.2 Error / edge-case handling within a running pool — audit done, fixes `OPEN`
 
@@ -855,23 +867,24 @@ radius. **None of them block the Wave 1 merge** — every one predates this bran
 
 **STALLS A CASE PERMANENTLY**
 
+- [x] `eject_from_pool()` could hang forever — fixed in Wave 2. The waiter resolved only on success;
+      hitting the retry cap retired the ticket to `failed/` with nothing left that could ever resolve
+      it, so a caller passing `timeout=None` waited indefinitely. It now raises
+      `EjectAbandonedError`, and an `EJECT_FAILED` notice is emitted alongside.
 - [ ] `OPEN` — A corrupt termination ticket is an infinite retry with no failure path.
       `retry_count` lives *inside* the ticket, so an unparseable one can never reach
       `TerminationState.FAILED` and is never unlinked. Meanwhile `begin_termination` already removed
       and detached the case, and `ticket_exists()` returns True forever, so nothing re-enqueues it.
       The case is stranded in the live bucket and the manager escalates about it every tick. The
       general shape: **the counters that would eventually quarantine a bad item live in the very file
-      that failed to parse.**
+      that failed to parse.** The quarantine ticket introduced in Wave 2 has the same shape and the
+      same exposure.
 - [ ] `OPEN` — Same trap in `process_pending_ticket`: `verify_termination_peek` reads the record and
       can raise *before* `retry_count += 1`. TOCTOU between `folder.exists()` and the read.
-- [ ] `OPEN` — `eject_from_pool()` can hang forever. The waiter future is resolved only on the success
-      path; `process_eject_ticket` returns `None` on every failure, and when the retry cap is hit the
-      ticket is moved to `failed/` and unlinked — so the future is never resolved and never will be.
-      With `timeout=None` the caller waits indefinitely.
-- [ ] `OPEN` — Orphans whose rehydration fails are never retried. `reap()` logs and escalates, but has
-      exactly one caller (`recover.py`), so nothing revisits them until a restart. Worse, a failed
-      `driver.add` leaves the case object attached, so its lease never lapses and later passes skip
-      the folder as owned.
+- [ ] `OPEN` — Orphans whose rehydration fails are never retried. `readmit_orphans()` logs and
+      escalates, but has exactly one caller (`recover.py`), so nothing revisits them until a restart.
+      Worse, a failed `driver.add` leaves the case object attached, so its lease never lapses and
+      later passes skip the folder as owned.
 
 **LOSES INFORMATION / NOISE**
 
@@ -888,11 +901,16 @@ radius. **None of them block the Wave 1 merge** — every one predates this bran
 - [ ] `OPEN` — `CaseManagerClient`'s manifest read is unlocked and unguarded, so a client reading
       mid-write gets a raw pydantic error from every `only_if_fresh` API.
 
-**Framing for Wave 2.** `_isolated_tick_item` contains the *manager*, not the *case*: it converts
-"loop death" into "this case is stalled forever and escalates once per tick." That was the intended
-trade, but it is only half a solution while the retry counters live inside the files that fail to
-parse. A quarantine path keyed on something outside the corrupt artifact is the missing piece, and it
-belongs with `CaseStore`'s status model (§4.1.2).
+**Where this stands after Wave 2.** `_isolated_tick_item` contains the *manager*, not the *case*: it
+converts "loop death" into "this case is stalled forever and notices once per tick." That was the
+intended trade, and it is now applied everywhere a per-case failure can reach the loop.
+
+The remaining permanent-stall family all share one shape — **the retry counters that would eventually
+give up on a bad item live inside the very file that failed to parse.** `CaseStore` supplies the
+missing ingredient (a status keyed outside the corrupt artifact) but Wave 2 did not spend it: the
+tickets still carry their own counters. The fix is now cheap and self-contained — count attempts
+somewhere the ticket cannot corrupt, and quarantine on exhaustion — and it is the first thing worth
+picking up next.
 
 ### 4.3 Low-effort path to a running case-manager script — `OPEN`, tooling gap
 
@@ -951,78 +969,53 @@ the "round of inspection to improve ergonomics and architecture" pass. Expect th
 pass proceeds; it is known to be incomplete.
 
 ### `CaseManager` / `CaseManagerClient`
-- [ ] `IncompatibleReclassError` is imported from two different paths across `case_manager.py` (via
-      `totodev_pub.folder_backed_case` re-export) and `case_manager_client.py` (direct from
-      `folder_backed_case_support.exceptions`) with no apparent reason for the difference.
-- [ ] `_log_startup_summary()` reaches into other objects' private attributes
-      (`self._registry._registry`, `self._escalations._handlers`) just to log counts, rather than
-      those classes exposing a public count/`__len__`.
+- [x] `IncompatibleReclassError` imported from one path (Wave 1).
+- [x] `_log_startup_summary()` uses public `__len__` on both collaborators (Wave 1).
 - [x] `_replay_*_pending()` only counted; neither replayed anything. Renamed to
       `_count_termination_pending()` / `_count_eject_pending()`.
-- [ ] `eject_from_pool`'s `wait_halted=lambda f: None` passed into `begin_eject` looks vestigial —
-      the actual wait happens via a separately tracked future elsewhere. No comment explains the
-      redundancy; worth simplifying or documenting.
+- [x] `begin_eject`'s vestigial `wait_halted` branch removed (Wave 1).
 - [ ] `reclassify_case`'s failure-path re-admission logic (nested try/except that re-raises the
       *original* exception regardless of whether the recovery attempt itself also failed) is dense
       and easy to misread — candidate for a readability pass.
-- [ ] `CaseLocation.in_pool` is silently meaningless when produced by a `CaseManagerClient`'s own
-      (unsynced) manager instance — `_preflight_reclassify` works around this with a different check,
-      but `CaseLocation` itself carries no marker distinguishing a trustworthy `in_pool` value from an
-      untrustworthy one. A caller of `client.locate()` who naively trusts `.in_pool` gets a
-      wrong-but-plausible answer.
-- [ ] `iter_terminal()` sources its glob from `self._policy.terminal_prefix`; `iter_quarantine()`
-      hardcodes `"quarantine_*"` inline instead of a corresponding policy field — inconsistent
-      sourcing between the two "special bucket" iterators. Nothing writes a `quarantine_*` bucket,
-      so `iter_quarantine()` can only ever yield nothing (F2); it becomes the real API for the
-      `quarantined` status in Wave 2.
-- [ ] `locate()` / `locate_all()` are full-fleet record scans on the hot path (every `fire()`, every
-      adopt, every fleet-board publish) — see §4.1.4 F3 for the measurement and §4.1.6 for the
-      proposed fix. Called out here too because it is a `CaseManager` API-shape problem, not only a
-      storage-abstraction problem.
-- [ ] `import shutil` at `case_manager.py:19` is unused — the only `shutil` reference in the file.
-- [ ] `_ensure_namespace_dirs()` creates a *storage* bucket (`mgr_dir.parent / policy.live_bucket`,
-      `case_manager.py:1038-1039`) from inside the routine that owns the *protocol* namespace — see
-      §4.1.4 F5.
-- [ ] `termination/done/` and `eject/done/` are never swept, and `done/` presence is load-bearing for
-      `ticket_exists()` idempotency — see §4.1.4 F4.
-- [ ] `CaseManager.serve()` is a full public instance method whose own docstring says not to call it
-      directly (the "blessed way" is the module-level `case_manager_host.serve()` import) — consider
-      whether it should be removed, renamed to signal discouragement more strongly, or left as-is.
+- [ ] `OPEN` — `CaseLocation.in_pool` is still silently meaningless when produced by a
+      `CaseManagerClient`'s own (unsynced) manager instance. `_preflight_reclassify` works around it
+      by checking `status` instead, and the dataclass now documents `in_pool` as point-in-time, but
+      nothing distinguishes a *trustworthy* `in_pool` from an untrustworthy one. A caller of
+      `client.locate()` who naively trusts it still gets a wrong-but-plausible answer.
+- [x] Both bucket iterators ask the store for a status now — no globs, no inconsistent sourcing, and
+      `iter_quarantine()` returns real cases (F2). `iter_terminal(partition=…)` narrows to one
+      archive partition.
+- [x] `locate()` is one index lookup for a live case, in both addressing directions (F3).
+      `locate_all(external_key=…)` is still a scan and says so in its docstring — external keys are
+      not indexed, and that is the honest statement rather than a silent cost.
+- [x] Unused `import shutil` removed (Wave 1).
+- [x] `_ensure_namespace_dirs()` creates only the manager namespace (F5).
+- [x] `done/` is gone from termination and eject; stored status carries idempotency (F4).
+- [x] `CaseManager.serve()` removed (Wave 1) — a public method whose own docstring said not to call
+      it. `case_manager_host.serve()` is the one way in.
 - [ ] The `§N` comment convention (`§1`, `§2`, `§6`, `§8`, `§11`...) throughout both files references
       an external design doc not present anywhere in the repo — a reader loses the "why" behind
       several behaviors without it. Either locate/attach the referenced doc or replace with inline
       rationale.
 
 ### Pool drivers (`case_pool_driver.py`, `balanced_case_pool_driver.py`, `seniority_case_pool_driver.py`)
-- [ ] `SeniorityCasePoolDriver._make_slot` manually re-lists all 16 `_Slot` fields to build a
-      `_SenioritySlot` — any future field added to `_Slot` in the base class silently won't propagate
-      here; nothing enforces sync. Candidate for `dataclasses.replace`-based construction instead.
-- [ ] `SeniorityCasePoolDriver` imports `_Slot`/`_TierPolicy` (underscore-prefixed,
-      module-private-by-convention) directly from `balanced_case_pool_driver` — a same-package-style
-      coupling across files worth naming explicitly (protected/internal API?) if it's going to stay.
-- [ ] Duplicated `isinstance(slot, _SenioritySlot)` defensive guards in two hook overrides
-      (`_slot_prelaunch`, `_slot_post_step`), seemingly always-true given the only slot-construction
-      path, with no comment on why the check exists.
-- [ ] `_order_chokeables`'s seniority-preserving behavior (return the list unchanged) depends on an
-      implicit, un-enforced invariant chain (sweep visit order == dict insertion order == queue
-      order) rather than any structural guarantee. Consider asserting the invariant or documenting it
-      where the chain could break.
-- [ ] `SeniorityCasePoolDriver.peek()`'s `queue_position` is computed via
-      `list(self._by_folder.keys()).index(...)` — O(N) per call, inconsistent with the O(1) spirit of
-      the rest of `peek()`/`CasePeek`.
-- [ ] Seniority ordering is documented to govern contested *scheduling* capacity but does **not**
-      extend to shutdown-drain ordering (`stop()`/`settle()` aren't overridden) — this scope boundary
-      isn't called out in the class's own docstring; a reader could reasonably assume it applies to
-      drain too.
-- [ ] `LeaseReclaimTimings.deadline_margin_secs` (`pool_membership_journal.py`) is declared but never
-      referenced anywhere — looks like a parameter that was never wired into the actual deadline
-      logic. Wire it up or remove it.
+- [x] `SeniorityCasePoolDriver._make_slot` builds from `dataclasses.fields(base)` (Wave 1), so a new
+      base-class field propagates automatically. `dataclasses.replace` does not work here — it
+      reconstructs `type(base)` and cannot widen a `_Slot` into a `_SenioritySlot`.
+- [x] The cross-file `_Slot` / `_TierPolicy` coupling named explicitly (Wave 1).
+- [x] Duplicated always-true `isinstance(slot, _SenioritySlot)` guards in `_slot_prelaunch` /
+      `_slot_post_step` removed (Wave 1).
+- [x] `_order_chokeables` asserts its queue-order invariant instead of relying on an implicit chain
+      (Wave 1).
+- [x] `peek()`'s `queue_position` no longer materializes the key list (Wave 1). Still O(N) in the
+      worst case — an allocation-free early exit, not an index.
+- [x] The seniority scope boundary — contested scheduling capacity, *not* shutdown drain — stated in
+      the class docstring (Wave 1).
+- [x] `LeaseReclaimTimings.deadline_margin_secs` removed (Wave 1) — declared, never referenced.
 
 ### `case_manager_support/*`
-- [ ] `constants.py` declares `TERMINATION_SUBDIR`/`EJECT_SUBDIR`/`RESULTS_SUBDIR`/
-      `ABERRANT_META_SUBDIR` (itself dead once F6 lands), but `termination.py`/`eject.py`/`aberrant.py` all hardcode their own
-      subdir name strings inline instead of importing these constants — values agree today, but it's
-      a drift risk. Wire the actual usages to the constants.
+- [x] The subdir constants are wired to their actual usages (Wave 1); `ABERRANT_META_SUBDIR` is gone
+      with F6 and `QUARANTINE_SUBDIR` joined them in Wave 2.
 - [ ] `mailbox/__init__.py` is a single empty comment line — the sibling `processor.py` defines a
       large public surface (`MailboxProcessor`, 4 request/result types, `RequestHandle`) that nothing
       re-exports at the `mailbox` package level; every caller reaches into `mailbox.processor`
@@ -1033,16 +1026,10 @@ pass proceeds; it is known to be incomplete.
       if a future result type's YAML happens to contain one of those substrings. Candidate fix: a
       `kind:` field on every result type (mirroring what `ShutdownAck`/`ReclassifyResult` already
       do).
-- [ ] `recover.py` imports `escalation.CaseEscalationKind` but it appears unused in the function
-      body — check for a dead import.
-- [ ] `eject.py`'s `begin_eject` calls `request_halt`/`wait_halted` but discards the result
-      (`if ... is not None: pass`) with a comment saying "caller awaits halt separately" — a confusing
-      dead branch even though it's by design. Consider simplifying the signature so it doesn't look
-      like an unfinished implementation.
-- [ ] `termination.py`'s `process_pending_ticket` is async-shaped (lives in an async pipeline) but has
-      no actual `await` in its body — not wrong, just inconsistent with its neighbors; either make it
-      a plain sync function called via `run_in_executor` (as it already is) with a non-async signature,
-      or note why it's async-shaped anyway.
+- [x] `recover.py`'s dead notice-kind import removed (Wave 1).
+- [x] `eject.py`'s vestigial `wait_halted` branch removed (Wave 1).
+- [x] `termination.py`'s `process_pending_ticket` genuinely awaits now — path resolution, the status
+      change, and the quarantine fallback are all async through the store.
 
 ---
 
@@ -1160,38 +1147,81 @@ demand.
 - [ ] §4.4 **(split)** — rough bench pass against hand-assembled `CaseManager.open(...)`, before any
       structural work. Findings feed §5. The tooled pass is Wave 3.
 
-### Wave 2 — Extract `CaseStore`
+### Wave 2 — Extract `CaseStore` — **complete**
 
-Inward structural change. No public API change.
+Inward structural change; the public method surface is unchanged in shape, though several signatures
+and vocabulary names changed with it (an unreleased library, so a clean break rather than aliases).
 
-- [ ] §4.1.2 — build `CaseStore` (concrete class, no ABC) and the boundary vocabulary rule.
-- [ ] §4.1.2 — `CaseManager` constructor takes a `CaseStore`; drop `CachedFileFolders` from
-      `case_manager.py` and `cache_override` from `CaseManagerConfig`; `open()` / `attach()` become
-      conveniences.
-- [ ] §4.1.2 — `provision_local_case_store(root_dir)`, idempotent with validation.
-- [ ] §4.1.2 — startup live scan builds the working set from the store's index (one scan, not two).
-- [ ] §4.1.2 — `set_status(case_id, status, ignore_lease=False)`: async, refuses on held lease,
-      consolidates S-4 **(split)**.
-- [ ] §4.1.2 — addressing protocol: `case_id` ↔ path both directions, async path resolution,
-      point-in-time iterators, stale-path rule.
-- [ ] §4.1.2 — reap collapse to the single re-admit rule, plus the pool-holds-non-live assertion;
-      removes the duplicate archive-label computation **(split, completes F7)**.
-- [ ] §4.1.2 — rename `reap()` → `readmit_orphans()` / `OrphanReadmitReport` (name pending).
-- [ ] §4.0.4 — aberrant as stop-driving + deferred lease-gated relocation.
-- [ ] §4.1.6 — quarantine ticket, following the termination/eject shape; recovery consults it before
-      re-admitting.
-- [ ] §4.1.6 — state the convergence contract (idempotent, re-drivable, ticket-replayed).
-- [ ] §4.1.6 — emit case-departure lifecycle events (widen `EscalationRegistry` to kind-tagged
-      lifecycle + problem events; rename the `on_escalation` surface accordingly).
-- [ ] §4.1.6 / F4 — move `ticket_exists()` idempotency onto store status, then TTL or drop `done/`.
-- [ ] §4.1.6 — confirm nothing `CaseStore` relies on inside a case folder is purgeable.
-- [ ] F2 — `iter_quarantine()` becomes the real API for the `quarantined` status.
-- [ ] F3 — `locate()` / `locate_all()` served by the index.
-- [ ] F5 — `_ensure_namespace_dirs()` stops creating a storage bucket.
-- [ ] §5 — `CaseLocation` documented as a point-in-time snapshot (`in_pool` and `case_folder`).
-- [ ] §5 — `iter_terminal()` / `iter_quarantine()` glob sourcing.
-- [ ] §2 — `CaseStore` unit tests, satisfying the `layout.py` coverage gap.
-- [ ] §0 — `CaseManagerPolicy` Tier-1 layout fields move into `CaseStore` construction.
+**Landed at the head of the wave** — §4.1.2 sequences these first so the code being moved has a
+stable failure contract before it moves.
+
+- [x] §4.2 — `_live_or_evict` evicts on any rehydration failure.
+- [x] §4.2 — `_reconcile_terminal_in_pool` isolates per case; `_detect_escalations` is an isolated
+      tick item.
+
+**The boundary**
+
+- [x] §4.1.2 — `LocalCaseStore` (concrete class, no ABC) in `case_manager_support/case_store.py`.
+      The vocabulary rule is enforced by a source-inspection test, not just stated: no
+      `CachedFileFolders`, `ref_path`, `grouping_key`, slave dir, or placeholder appears anywhere in
+      the package outside the store, its constants, and the persisted policy that declares them.
+- [x] §4.1.2 — `CaseManager(config, store=…)`; `CachedFileFolders` and `cache_override` are gone from
+      `case_manager.py`. `open()` / `attach()` / `provision()` survive as conveniences.
+- [x] §4.1.2 — `CaseManager.provision_local_case_store(root_dir)` delegating to
+      `LocalCaseStore.provision()`, idempotent with validation.
+- [x] §4.1.2 — recovery takes its working set from `store.iter_by_status(LIVE)` — one scan, not two.
+- [x] §4.1.2 — `set_status(case_id, status, *, partition=None, force_despite_lease=False)`: async,
+      refuses on a held lease, idempotent, off-loop. It is the single enforcement point for S-4.
+- [x] §4.1.2 — addressing: `find()` / `resolve_path()` / `case_id_at()`, point-in-time `CaseEntry`,
+      snapshot iterators, stale-path rule stated on the dataclass.
+- [x] §4.1.2 — orphan-recovery collapse to the single re-admit rule, plus the pool-holds-non-live
+      assertion. Deletes the second archive-label computation **(completes F7)**.
+- [x] §4.1.2 — `reap()` → `readmit_orphans()`, `ReapReport` → `OrphanReadmitReport`,
+      `reap.py` → `readmit.py`.
+- [x] §4.0.4 — quarantine is stop-driving now, reason on the case's own journal, relocation deferred
+      until the lease lapses. `aberrant.py` → `quarantine.py`.
+- [x] §4.1.6 — quarantine ticket following the termination/eject shape; recovery consults it (with
+      the eject ticket) before re-admitting. Waiting out a lease never spends a retry.
+- [x] §4.1.6 — lifecycle notices for departures: `CASE_TERMINATED`, `CASE_QUARANTINED`,
+      `CASE_EJECTED`, filterable via `kind.is_lifecycle`. Surface renamed to
+      `on_notice` / `off_notice`; `CaseEscalation*` → `CaseNotice*`; `escalation.py` → `notice.py`.
+      At-most-once delivery is documented on the module and in the operator doc.
+- [x] §4.1.6 / F4 — `done/` is gone from termination and eject. Stored status is the receipt, so no
+      per-case file accumulates and nothing needs sweeping.
+- [x] F2 — `iter_quarantine()` reads the `quarantined` status and is the real API;
+      `iter_aberrant()` is gone.
+- [x] F3 — `locate()` is one index lookup for a live case, both directions. `locate_all()` is still a
+      full scan and now says so — external keys are not indexed.
+- [x] F5 — `_ensure_namespace_dirs()` creates only the manager namespace.
+- [x] §5 — `CaseLocation` carries `status` instead of `grouping_key` and documents both mutable
+      fields as point-in-time.
+- [x] §2 — `case_store` unit tests (23), plus quarantine, orphan-readmit, lifecycle-notice, and
+      loop-isolation suites.
+- [x] §0 — no module outside the store touches a bucket name, ref template, or grouping pattern. The
+      client manifest no longer publishes `live_bucket` / `terminal_prefix` either: publishing the
+      layout invites out-of-process path arithmetic into managed storage.
+
+**Fixed in passing** (found while moving the code; each has a regression test)
+
+- [x] `eject_from_pool()` could hang forever — the waiter resolved only on success, and hitting the
+      retry cap retired the ticket with nothing left to resolve it. It now fails with
+      `EjectAbandonedError`.
+- [x] Export moved the case folder away and then asked the cache to delete an entry whose storage
+      was gone. The resulting error was swallowed by the retry path, so the operation "worked" only
+      by accident on a later tick.
+- [x] Orphan recovery skipped cases with **no** lease file — the state a cleanly released case is
+      left in, and precisely the orphans it exists to rescue. It now applies the same tri-state rule
+      as every relocation: only a *held* lease blocks.
+
+**Deferred out of Wave 2, with reasons**
+
+- [ ] §4.1.6 — convergence contract (idempotent, re-drivable, ticket-replayed) is now true of every
+      relocation and is asserted by tests, but is not yet written down as a contract in one place.
+      Belongs with the Wave 3 documentation pass.
+- [ ] §4.1.6 — confirm nothing `CaseStore` relies on inside a case folder is purgeable. The store
+      reads only `case_record.yaml` (via `read_case_id_from_folder`, and only on the reverse-address
+      path); `CaseKeepManifest.purge()` retains the record. Worth a direct test rather than the
+      reasoning alone.
 
 ### Wave 3 — Extract the protocols, then make it runnable and documented
 

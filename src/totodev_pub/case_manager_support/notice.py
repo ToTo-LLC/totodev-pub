@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-class CaseEscalationKind(str, enum.Enum):
+class CaseNoticeKind(str, enum.Enum):
     # Problems.
     REPEATED_FAILURE = "REPEATED_FAILURE"
     STALLED = "STALLED"
@@ -54,16 +54,16 @@ class CaseEscalationKind(str, enum.Enum):
 
 _LIFECYCLE_KINDS = frozenset(
     {
-        CaseEscalationKind.CASE_TERMINATED,
-        CaseEscalationKind.CASE_QUARANTINED,
-        CaseEscalationKind.CASE_EJECTED,
+        CaseNoticeKind.CASE_TERMINATED,
+        CaseNoticeKind.CASE_QUARANTINED,
+        CaseNoticeKind.CASE_EJECTED,
     }
 )
 
 
 @dataclass(frozen=True)
-class CaseEscalation:
-    kind: CaseEscalationKind
+class CaseNotice:
+    kind: CaseNoticeKind
     case_id: str | None
     case_folder: Path | None
     case_state: str | None
@@ -73,16 +73,16 @@ class CaseEscalation:
     )
 
 
-class EscalationRegistry:
+class NoticeRegistry:
     def __init__(self) -> None:
-        self._handlers: dict[int, Callable[[CaseEscalation], None]] = {}
+        self._handlers: dict[int, Callable[[CaseNotice], None]] = {}
         self._next_id = 0
 
     def __len__(self) -> int:
-        """Number of registered escalation handlers."""
+        """Number of registered notice handlers."""
         return len(self._handlers)
 
-    def register(self, callback: Callable[[CaseEscalation], None]) -> int:
+    def register(self, callback: Callable[[CaseNotice], None]) -> int:
         handle = self._next_id
         self._next_id += 1
         self._handlers[handle] = callback
@@ -91,16 +91,16 @@ class EscalationRegistry:
     def unregister(self, handle: int) -> None:
         self._handlers.pop(handle, None)
 
-    def emit(self, escalation: CaseEscalation) -> None:
+    def emit(self, notice: CaseNotice) -> None:
         for callback in list(self._handlers.values()):
             try:
-                callback(escalation)
+                callback(notice)
             except Exception:
                 pass  # handlers must not block; swallow to continue
 
     def emit_simple(
         self,
-        kind: CaseEscalationKind | str,
+        kind: CaseNoticeKind | str,
         case_id: str | None,
         case_folder: Path | None,
         detail: str | None = None,
@@ -108,9 +108,9 @@ class EscalationRegistry:
         case_state: str | None = None,
     ) -> None:
         if isinstance(kind, str):
-            kind = CaseEscalationKind(kind)
+            kind = CaseNoticeKind(kind)
         self.emit(
-            CaseEscalation(
+            CaseNotice(
                 kind=kind,
                 case_id=case_id,
                 case_folder=case_folder,
