@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""In-cache staging folder allocation and GC (§5.1)."""
+"""Scratch space for cases on their way in, and the lazy GC that reclaims it."""
 
 from __future__ import annotations
 
@@ -31,7 +31,10 @@ def sweep_staging(
     exclude: Path | None = None,
     clock: float | None = None,
 ) -> int:
-    """Lazy GC per §5.1 table. Returns count removed."""
+    """Reclaim abandoned staging folders. Returns the count removed.
+
+    Lazy rather than scheduled: staging is only swept when something new is
+    allocated, so an idle manager does no work here at all."""
     now = clock if clock is not None else time.time()
     removed = 0
     if not staging.exists():

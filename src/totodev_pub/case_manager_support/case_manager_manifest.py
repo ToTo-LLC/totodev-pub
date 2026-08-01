@@ -35,7 +35,11 @@ class ManifestPaths(BaseModel):
 
 
 class CaseManagerManifest(BaseModel, FileMappedPydanticMixin):
-    """Machine-written runtime projection for clients (§12)."""
+    """Machine-written runtime projection for clients.
+
+    Everything an out-of-process client needs to find its way around, so that a
+    client never has to know the layout conventions — only where the manifest
+    is."""
 
     protocol_version: int = MANIFEST_PROTOCOL_VERSION
     cache_root: str

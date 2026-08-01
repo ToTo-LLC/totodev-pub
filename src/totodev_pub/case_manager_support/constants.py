@@ -8,7 +8,7 @@ from __future__ import annotations
 POLICY_SCHEMA_VERSION = 1
 MANIFEST_PROTOCOL_VERSION = 1
 
-# §2 liveness pulse: cadence of the manager's sibling pulse coroutine — the
+# Liveness pulse: cadence of the manager's sibling pulse coroutine — the
 # watchdog's kill-authorized signal. A blocked/starved event loop silences the
 # pulse within one interval.
 PULSE_INTERVAL_SECS = 0.5

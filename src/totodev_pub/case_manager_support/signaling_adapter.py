@@ -120,6 +120,10 @@ class SignalingAdapter:
         )
 
     async def maintenance_tick(self) -> None:
+        """Drain every request intake once. Registered on the manager's tick.
+
+        Fire first, because attaching a fire before the sweep is what lets it be
+        stepped in this same tick rather than the next one."""
         self._transport.ensure_dirs()
         await self._drain_fire()
         await self._drain_reclassify()

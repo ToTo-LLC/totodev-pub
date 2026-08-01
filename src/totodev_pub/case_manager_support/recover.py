@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Startup recovery sequence (§5.6)."""
+"""Startup recovery: what the fleet finds on disk before it starts driving."""
 
 from __future__ import annotations
 

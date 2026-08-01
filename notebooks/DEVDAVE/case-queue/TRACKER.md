@@ -115,7 +115,7 @@ mergeable, which is separate from deciding to merge. See §7 Wave 1.
 
 ## 3. Documentation / wiring staleness
 
-- [ ] `OPEN` — The `case-designer` skill (`.claude/skills/case-designer/`) has essentially no
+- [x] `OPEN` — The `case-designer` skill (`.claude/skills/case-designer/`) has essentially no
       knowledge that this pool-manager layer exists. It mentions "CaseManager" casually 4 times
       (never linked to a file, per its own reference-boundary rule) and never mentions
       `CaseManagerClient`, `CasePoolDriver`/`Balanced`/`Seniority`, `PoolMembershipJournal`,
@@ -123,29 +123,29 @@ mergeable, which is separate from deciding to merge. See §7 Wave 1.
       this skill gets no guidance on choke interaction with fleet scheduling, or how the result
       actually gets run. (See also §6.3 below — this overlaps with the "low-effort manager script"
       gap.)
-- [ ] `OPEN` — `folder_backed_case_support/__init__.py`'s `__all__` doesn't export `CasePoolDriver`,
+- [x] `OPEN` — `folder_backed_case_support/__init__.py`'s `__all__` doesn't export `CasePoolDriver`,
       `BalancedCasePoolDriver`, `SeniorityCasePoolDriver`, or `PoolMembershipJournal`, despite living
       in that exact package, whose own docstring says "import the common names from here."
-- [ ] `OPEN` — Several comments still say **"Planned CaseManager (draft:
+- [x] `OPEN` — Several comments still say **"Planned CaseManager (draft:
       notebooks/DEVDAVE/case_manager_classes/CaseManager Model.md)"** — written before `CaseManager`
       existed, never updated once it shipped, and the referenced file doesn't exist at that path.
       Locations: `folder_backed_case.py` (x2), `folder_backed_case_support/case_type_registry.py`,
       `folder_backed_case_support/case_pool_driver.py`.
-- [ ] `OPEN` — Tutorials 2 & 3 (`notebooks/DEVDAVE/case_manager_classes/`) cite the mailbox-removal
+- [x] `OPEN` — Tutorials 2 & 3 (`notebooks/DEVDAVE/case_manager_classes/`) cite the mailbox-removal
       backlog doc at a stale path (`src/totodev_pub/_backlog/...`, which doesn't exist — real path is
       `notebooks/DEVDAVE/case_manager_classes/_backlog/...`).
-- [ ] `OPEN` — `proposed_manager_watchdog_and_host.md`'s "implemented" note points at
+- [x] `OPEN` — `proposed_manager_watchdog_and_host.md`'s "implemented" note points at
       `docs/superpowers/plans/2026-07-09-manager-watchdog-and-host.md`, which doesn't exist anywhere
       in the repo — dangling link.
-- [ ] `OPEN` — Same proposal's "Code placement" section says `case_manager_host.py` is top-level
+- [x] `OPEN` — Same proposal's "Code placement" section says `case_manager_host.py` is top-level
       (`src/totodev_pub/`); it actually shipped inside `case_manager_support/`. Its own
       `finishing_watchdog.md` "what shipped" table repeats the wrong path too.
-- [ ] `OPEN` — Two exceptions (`CacheRootStateError`, `PolicyMismatchError`) are defined in
+- [x] `OPEN` — Two exceptions (`CacheRootStateError`, `PolicyMismatchError`) are defined in
       `case_manager_support/exceptions.py` but not re-exported in that package's `__init__.py`,
       unlike every other exception there. Confirm intentional or fix.
-- [ ] `OPEN` — Stray `fleet_watcher.cpython-311.pyc` with no corresponding source file (module was
+- [x] `OPEN` — Stray `fleet_watcher.cpython-311.pyc` with no corresponding source file (module was
       renamed to `fleet_status_watcher.py`; old bytecode never cleaned up). Harmless, quick sweep.
-- [ ] `OPEN` — `_backlog/README-_backlog.md` convention (move resolved proposals to an
+- [x] `OPEN` — `_backlog/README-_backlog.md` convention (move resolved proposals to an
       `implemented/`/`withdrawn/` subfolder) has never actually been followed — no such subfolders
       exist, including for the proposal marked "implemented." Either follow the convention now or
       update the README to describe how status is actually tracked (i.e. this tracker).
@@ -891,10 +891,16 @@ radius. **None of them block the Wave 1 merge** — every one predates this bran
 
 **LOSES INFORMATION / NOISE**
 
-- [ ] `OPEN` — Every YAML write is non-atomic (`open(path, 'w')`, truncate in place — no temp+rename),
-      and the reader converts *any* parse failure into an empty dict. Models with required fields turn
-      that into a `ValidationError`, which is the lucky case; a model whose fields all have defaults
-      would silently load as a valid default object. Every hot reader also bypasses the advisory lock.
+- [x] **Every YAML write is atomic now.** `FileMappedPydanticMixin._write_to_file` writes to a hidden
+      temp file *beside* the target and `os.replace()`s it into position, so a reader gets the whole
+      old file or the whole new one. This was the root cause under the poison-ticket family: a torn
+      read parses as `None`, the reader turns that into an empty dict, and a model whose fields all
+      have defaults **silently loads as a valid default object** — nothing raises, and the caller acts
+      on data that was never written. Measured before the fix: a concurrent reader saw **222 torn
+      reads** across 40 rewrites of a 400 KB file, every one of them the silent variety.
+      Deliberately no `fsync`: atomicity comes from the rename, and durability-across-power-loss
+      would be paid on every sub-second heartbeat. Still open, separately: hot readers bypass the
+      advisory lock (which the atomic write makes far less consequential).
 - [ ] `OPEN` — Event-journal scans race deletion in three places (`.exists()` then `iterdir()`, and
       bare `stat()` on paths from an earlier `iterdir()`), reachable from `reap`, from
       `verify_termination_peek`, and from the fleet board.
@@ -1018,10 +1024,10 @@ pass proceeds; it is known to be incomplete.
 - [x] `done/` is gone from termination and eject; stored status carries idempotency (F4).
 - [x] `CaseManager.serve()` removed (Wave 1) — a public method whose own docstring said not to call
       it. `case_manager_host.serve()` is the one way in.
-- [ ] The `§N` comment convention (`§1`, `§2`, `§6`, `§8`, `§11`...) throughout both files references
-      an external design doc not present anywhere in the repo — a reader loses the "why" behind
-      several behaviors without it. Either locate/attach the referenced doc or replace with inline
-      rationale.
+- [x] The `§N` references to the (absent) CaseManager design doc are replaced with inline rationale —
+      the "why" now travels with the code. The remaining `§N` references in `fleet_status*.py` name
+      their document ("Fleet Status Board Spec"), which is a different situation; that spec lives in
+      `volatile/tmp/` and is not committed, so it is resolvable only for the maintainer.
 
 ### Pool drivers (`case_pool_driver.py`, `balanced_case_pool_driver.py`, `seniority_case_pool_driver.py`)
 - [x] `SeniorityCasePoolDriver._make_slot` builds from `dataclasses.fields(base)` (Wave 1), so a new
@@ -1093,76 +1099,76 @@ demand.
 
 **Defect fixes**
 
-- [ ] F6 — delete `AberrantSidecar`, `aberrant_meta_dir()`, the `"aberrant"` entry in
+- [x] F6 — delete `AberrantSidecar`, `aberrant_meta_dir()`, the `"aberrant"` entry in
       `_ensure_namespace_dirs`, and the now-dead `ABERRANT_META_SUBDIR` constant.
-- [ ] F1 — `move_case_to_aberrant()` orphan fallback (raises `ValueError` today).
-- [ ] F7 **(split)** — fix `archive_grouping_label()`'s docstring-vs-implementation mismatch and
+- [x] F1 — `move_case_to_aberrant()` orphan fallback (raises `ValueError` today).
+- [x] F7 **(split)** — fix `archive_grouping_label()`'s docstring-vs-implementation mismatch and
       settle `terminal_at` as the label source. The duplicate computation is removed in Wave 2.
-- [ ] F8 — surface `ReapReport` at `recover.py:97`, or state that escalations are the channel.
-- [ ] S-4 **(split)** — add the missing lease-before-move checks to `aberrant`, `eject` export, and
+- [x] F8 — surface `ReapReport` at `recover.py:97`, or state that escalations are the channel.
+- [x] S-4 **(split)** — add the missing lease-before-move checks to `aberrant`, `eject` export, and
       `reopen_case`; settle the `is_heartbeat_expired()` tri-state rule. Consolidation into
       `CaseStore.set_status()` is Wave 2; the tests written here carry over unchanged.
-- [ ] §4.2 — per-item isolation in `_maintenance_tick()` (termination loop, eject loop, purge).
-- [ ] §4.2 — audit rehydration-raises during sweep / `fire()` / adopt.
-- [ ] §4.2 — adversarial filesystem pass (truncated / concurrently modified / deleted mid-sweep).
+- [x] §4.2 — per-item isolation in `_maintenance_tick()` (termination loop, eject loop, purge).
+- [x] §4.2 — audit rehydration-raises during sweep / `fire()` / adopt.
+- [x] §4.2 — adversarial filesystem pass (truncated / concurrently modified / deleted mid-sweep).
 
 **Promotion blockers with an interim fix here** (permanent fix in Wave 3)
 
-- [ ] §1 — hoist the shutdown-mailbox check above the `enable_mailbox` / `watchdog_enabled` gates
+- [x] §1 — hoist the shutdown-mailbox check above the `enable_mailbox` / `watchdog_enabled` gates
       (option A). Superseded when shutdown moves to the host.
-- [ ] §1 **(split)** — `mailbox_neglect` coverage, written against current ownership. Wave 3 updates
+- [x] §1 **(split)** — `mailbox_neglect` coverage, written against current ownership. Wave 3 updates
       it when the adapter takes over.
 
 **Small resolved items to land**
 
-- [ ] §1 — implement the `_loop_failure_no_watchdog` fail-loud fallback.
-- [ ] §2 — drop `PurgeReport.stragglers`.
+- [x] §1 — implement the `_loop_failure_no_watchdog` fail-loud fallback.
+- [x] §2 — drop `PurgeReport.stragglers`.
 
 **Test coverage**
 
-- [ ] §1 — exit-70 integration test (3 consecutive `_manager_loop` tick failures through a real
+- [x] §1 — exit-70 integration test (3 consecutive `_manager_loop` tick failures through a real
       `serve()` run).
-- [ ] §1 — watchdog coverage for `tick_slow` alarm-only and stop-timeout → `EXIT_WATCHDOG`.
-- [ ] §2 — `aberrant.py` direct coverage (both branches), ahead of F1.
-- [ ] §2 — `purge.py` coverage, including mid-purge error.
-- [ ] §2 — `CaseManagerConfig` test.
+- [x] §1 — watchdog coverage for `tick_slow` alarm-only and stop-timeout → `EXIT_WATCHDOG`.
+- [x] §2 — `aberrant.py` direct coverage (both branches), ahead of F1.
+- [x] §2 — `purge.py` coverage, including mid-purge error.
+- [x] §2 — `CaseManagerConfig` test.
 
 **Independent ergonomics — pool drivers** (nothing in Waves 2–3 touches these)
 
-- [ ] §5 — `SeniorityCasePoolDriver._make_slot` field duplication.
-- [ ] §5 — `_Slot`/`_TierPolicy` cross-file private import.
-- [ ] §5 — redundant `isinstance(slot, _SenioritySlot)` guards.
-- [ ] §5 — `_order_chokeables` implicit invariant chain.
-- [ ] §5 — `peek()`'s O(N) `queue_position`.
-- [ ] §5 — seniority shutdown-drain scope boundary in the class docstring.
-- [ ] §5 — `LeaseReclaimTimings.deadline_margin_secs` dead field.
+- [x] §5 — `SeniorityCasePoolDriver._make_slot` field duplication.
+- [x] §5 — `_Slot`/`_TierPolicy` cross-file private import.
+- [x] §5 — redundant `isinstance(slot, _SenioritySlot)` guards.
+- [x] §5 — `_order_chokeables` implicit invariant chain.
+- [x] §5 — `peek()`'s O(N) `queue_position`.
+- [x] §5 — seniority shutdown-drain scope boundary in the class docstring.
+- [x] §5 — `LeaseReclaimTimings.deadline_margin_secs` dead field.
 
 **Independent ergonomics — manager and support**
 
-- [ ] §5 — `IncompatibleReclassError` imported via two paths.
-- [ ] §5 — `_log_startup_summary()` reaching into `_registry._registry` / `_escalations._handlers`.
-- [ ] §5 — rename `_replay_termination_pending` / `_replay_eject_pending` to counting names.
-- [ ] §5 — `eject.begin_eject`'s vestigial `wait_halted` branch.
-- [ ] §5 — `reclassify_case` failure-path readability.
-- [ ] §5 — `CaseManager.serve()` docstring / naming.
-- [ ] §5 — unused `import shutil` (`case_manager.py:19`).
-- [ ] §5 — `recover.py` dead `CaseEscalationKind` import.
-- [ ] §5 — `termination.process_pending_ticket` async-shaped signature.
-- [ ] §5 — wire `TERMINATION_SUBDIR` / `EJECT_SUBDIR` / `RESULTS_SUBDIR` to their usages.
+- [x] §5 — `IncompatibleReclassError` imported via two paths.
+- [x] §5 — `_log_startup_summary()` reaching into `_registry._registry` / `_escalations._handlers`.
+- [x] §5 — rename `_replay_termination_pending` / `_replay_eject_pending` to counting names.
+- [x] §5 — `eject.begin_eject`'s vestigial `wait_halted` branch.
+- [x] §5 — `reclassify_case` failure-path readability.
+- [x] §5 — `CaseManager.serve()` docstring / naming.
+- [x] §5 — unused `import shutil` (`case_manager.py:19`).
+- [x] §5 — `recover.py` dead `CaseEscalationKind` import.
+- [x] §5 — `termination.process_pending_ticket` async-shaped signature.
+- [x] §5 — wire `TERMINATION_SUBDIR` / `EJECT_SUBDIR` / `RESULTS_SUBDIR` to their usages.
 
 **Mechanical hygiene**
 
-- [ ] §3 — `folder_backed_case_support/__init__.py` `__all__` exports.
-- [ ] §3 — re-export `CacheRootStateError` / `PolicyMismatchError`.
-- [ ] §3 — stale `"Planned CaseManager (draft: ...)"` comments (4 locations).
-- [ ] §3 — tutorials 2 & 3 stale backlog path.
-- [ ] §3 — `proposed_manager_watchdog_and_host.md` dangling link and wrong code-placement path.
-- [ ] §3 — remove stray `fleet_watcher.cpython-311.pyc`.
-- [ ] §3 — `_backlog/README` convention: follow it or update it.
+- [x] §3 — `folder_backed_case_support/__init__.py` `__all__` exports.
+- [x] §3 — re-export `CacheRootStateError` / `PolicyMismatchError`.
+- [x] §3 — stale `"Planned CaseManager (draft: ...)"` comments (4 locations).
+- [x] §3 — tutorials 2 & 3 stale backlog path.
+- [x] §3 — `proposed_manager_watchdog_and_host.md` dangling link and wrong code-placement path.
+- [x] §3 — remove stray `fleet_watcher.cpython-311.pyc`.
+- [x] §3 — `_backlog/README` convention: follow it or update it.
 
 **De-risk**
 
-- [ ] §4.4 **(split)** — rough bench pass against hand-assembled `CaseManager.open(...)`, before any
+- [x] §4.4 **(split)** — rough bench pass against hand-assembled `CaseManager.open(...)`, before any
       structural work. Findings feed §5. The tooled pass is Wave 3.
 
 ### Wave 2 — Extract `CaseStore` — **complete**
@@ -1285,6 +1291,16 @@ once the shape is final.
 - [x] §4.4 — full bench pass on the tooled harness: five scenarios, four defects fixed (eject of a
       busy case, a leaked eject waiter, a bare `KeyError` on a mid-halt departure, and the health
       probe calling a recovering manager dead). Findings recorded in §4.4 itself.
-- [ ] §3 — `case-designer` skill updated for the pool-manager layer.
-- [ ] §5 — replace the `§N` comment convention with inline rationale.
-- [ ] §0 — confirm every class in the key-class list meets the finalize bar.
+- [x] §3 — `case-designer` gained Step 7b plus `references/running_under_a_manager.md`: what the FSM
+      declaration already decides once a manager owns the case (auto vs manual edges, chokes,
+      terminal-means-archivable, blocking hooks), and what happens to a case without it asking (the
+      lease, the purge, quarantine, the archive label). Kept to the case author's view — hosting is
+      the examples README's job, and duplicating it would give the skill two things to keep true.
+- [x] §5 — `§N` comment convention replaced with inline rationale.
+- [x] §0 — finalize bar confirmed by reading the public surface of every key class rather than by
+      assertion. One real gap: `CaseManager` had **16 undocumented public methods**, including all
+      four constructors — a "settled public API" that never says what `open` / `provision` /
+      `attach` / `open_testing` differ on is not settled in any useful sense. All now documented,
+      along with the lifecycle trio's ordering contracts and the two `LocalCaseStore` /
+      `SignalingAdapter` gaps. `MailboxTransport`'s remaining undocumented members are path
+      accessors whose names are the documentation (`fire_intake()`, `results_dir()`).

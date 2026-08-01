@@ -1,7 +1,10 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Wire-safe projection of AdvanceResult for mailbox results (§10.5)."""
+"""Wire-safe projection of AdvanceResult for mailbox results.
+
+AdvanceResult carries live exception objects; a result file cannot. This is the
+flattened form that survives a round trip through YAML."""
 
 from __future__ import annotations
 

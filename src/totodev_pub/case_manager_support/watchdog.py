@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""ManagerWatchdog (§3) — a daemon thread inside the manager process.
+"""ManagerWatchdog — a daemon thread inside the manager process.
 
 A plain threading.Thread is immune to event-loop blockage, which is the entire
 trick. The watchdog never repairs — it detects, diagnoses, and dies; the unit
@@ -258,7 +258,8 @@ class ManagerWatchdog:
             )
             return
 
-        # 3. Loop-task death (backstop for a task killed despite §1 hardening).
+        # 3. Loop-task death — the backstop for a task killed despite the
+        #    loop's own consecutive-failure hardening.
         task = m._run_task
         if task is not None and task.done() and not task.cancelled():
             try:

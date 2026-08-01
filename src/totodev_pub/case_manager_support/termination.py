@@ -1,7 +1,11 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Termination queue: sync slice + async archive worker (§5.4)."""
+"""Termination: a synchronous hand-off, then an archive move that can be replayed.
+
+Split because the two halves have different failure modes. Removing a terminal
+case from the pool must not fail, and must happen while the case object is still
+in hand; relocating its folder is slow, can fail, and has to survive a crash."""
 
 from __future__ import annotations
 
@@ -70,7 +74,11 @@ def ticket_exists(manager_dir: Path, case_id: str) -> bool:
 
 
 def verify_termination_peek(folder: Path) -> tuple[bool, str | None]:
-    """Manager-owned peek checks (§5.12) without rehydrate."""
+    """Confirm a case really is finished, without rehydrating it.
+
+    Reading the record is cheap and takes no lease; rehydrating to ask the same
+    question would acquire one, which is the opposite of what a case on its way
+    out needs."""
     reader = FolderBackedCaseReader(folder)
     if not reader.case_is_terminal:
         return False, "record is not terminal"

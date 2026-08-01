@@ -1,7 +1,11 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Adopt workflow: validate, transfer, verify, admit (§5.2)."""
+"""Adopt workflow: validate, transfer, verify, admit.
+
+The order matters. Validation happens against the *source* so a bad folder is
+rejected before anything is moved, and verification happens after the transfer
+because a move that half-succeeded must not be admitted as a live case."""
 
 from __future__ import annotations
 

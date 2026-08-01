@@ -1,7 +1,10 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Redundant ephemeral purge on terminal_* and aberrant folders (§5.9)."""
+"""Redundant ephemeral purge over cases the pool has finished with.
+
+A case's own keep manifest is authoritative about what survives; this is the
+manager's backstop for cases whose owning process never got to run it."""
 
 from __future__ import annotations
 

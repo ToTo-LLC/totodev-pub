@@ -304,6 +304,10 @@ class LocalCaseStore:
         return None if entry is None else entry.case_folder
 
     def contains(self, case_id: str) -> bool:
+        """Whether the store holds this case at *any* status.
+
+        The duplicate check adopt needs: a case_id already archived is still
+        taken, and admitting a second one would give two cases one identity."""
         return self.find(case_id) is not None
 
     def case_id_at(self, path: Path) -> str | None:
@@ -341,6 +345,11 @@ class LocalCaseStore:
         return status in WRITABLE_STATUSES
 
     def status_of(self, case_id: str) -> str | None:
+        """This case's pool-activity-status, or None if the store has no entry.
+
+        Remember the fail-safe rule: only ``live`` means the pool is driving it.
+        Anything else — including a value this version does not recognize —
+        means it is not."""
         entry = self.find(case_id)
         return None if entry is None else entry.status
 

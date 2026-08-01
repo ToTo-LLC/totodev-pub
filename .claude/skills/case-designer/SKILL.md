@@ -333,6 +333,22 @@ assets get an `AssetSpec` plus a pydantic class — with bodies still stubbed vi
 `_not_implemented`, never implemented. Adding a state or trigger can break the
 FSM, so **re-run the Step 6 bind check** after folding anything in.
 
+## Step 7b — If a CaseManager will run it
+
+Most cases end up driven by a fleet coordinator rather than by hand. That does
+not change how the type is designed, but a few declarations already made decide
+how it behaves once a manager owns it — whether it self-completes or waits, what
+it competes with for concurrency, what survives the post-terminal purge, and
+where it gets archived.
+
+Read `references/running_under_a_manager.md` and raise only the questions that
+plausibly apply to *this* case, one at a time, exactly as in Step 7. The most
+common real finding is a case whose path to terminal contains a manual (`==`)
+edge nobody intends to fire, which in production looks like a case that sits in
+the pool forever.
+
+Skip this step entirely if the developer has said the case is driven directly.
+
 ## Step 8 — FSM lint + coverage checklist
 
 Before the checklist, run the finished declaration through the chain-DSL CLI

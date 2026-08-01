@@ -1,7 +1,10 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Stateless companion for web workers (§11)."""
+"""Read-only introspection and request submission for out-of-process callers.
+
+Stateless by design: every call reads current state rather than caching it, so a
+long-lived worker never serves a stale answer."""
 
 from __future__ import annotations
 

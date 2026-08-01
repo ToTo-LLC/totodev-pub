@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Shutdown-request protocol (§6) — shared by the host (cooperative pickup), the
+"""Shutdown-request protocol — shared by the host (cooperative pickup), the
 watchdog (wedged pickup), and CaseManagerClient.submit_shutdown(). One parser,
 one precedence rule, zero drift.
 
@@ -146,7 +146,7 @@ def write_shutdown_ack(results_dir: Path, directive: ShutdownDirective) -> None:
 
 
 def discard_stale_requests(intake: Path) -> int:
-    """Startup hygiene (§6): a request still in intake/ at recover() belongs to
+    """Startup hygiene: a request still in intake/ at recover() belongs to
     a previous process and must be logged and discarded, never honored —
     otherwise one stale request induces a restart-immediately loop."""
     if not intake.exists():

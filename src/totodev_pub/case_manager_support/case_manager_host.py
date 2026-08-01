@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""case_manager_host — the blessed host entry point (§4).
+"""case_manager_host — the blessed host entry point.
 
 CaseManager coordinates a fleet; this module runs a process. Everything that
 knows it owns a whole process (signals, exit codes, the watchdog's arm/park
@@ -176,7 +176,7 @@ async def serve(
     action = _tracer_downgrade(manager._policy)
 
     def _shutdown_from_watchdog(directive: ShutdownDirective) -> None:
-        # Watchdog-thread pickup path (§6): hand off to the loop; if the loop
+        # Watchdog-thread pickup path: hand off to the loop; if the loop
         # is too wedged to run the cooperative path, exit directly with the
         # *requested* code rather than whatever the wedge detection would pick.
         try:
@@ -310,7 +310,7 @@ async def serve(
             watchdog.stop()  # join the thread; serve() may run inside a larger program
         return  # exit 0 — deliberate, external (or self-completed), and final.
 
-    # Mailbox-requested shutdown (§6): a recovery lever, never exit 0.
+    # Mailbox-requested shutdown: a recovery lever, never exit 0.
     directive: ShutdownDirective = cause["directive"]
     if directive.graceful:
         # Ack before the drain so poll_result/wait_result resolve normally.

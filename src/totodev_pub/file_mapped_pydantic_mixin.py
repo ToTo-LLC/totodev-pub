@@ -309,6 +309,7 @@ This module is particularly well-suited for:
 """
 
 import os
+import tempfile
 import time
 import portalocker
 import json
@@ -368,6 +369,54 @@ def _import_toml():
             return toml.loads, toml.dumps
         except ImportError:
             raise ImportError("No TOML library found. Install 'tomli' and 'tomli-w' (Python 3.11+) or 'toml'")
+
+def _atomic_write(target_path: str, payload, *, binary: bool) -> None:
+    """Write ``payload`` to ``target_path`` so a reader never sees it half-written.
+
+    Truncating in place opens a window in which the file on disk is neither the
+    old content nor the new one, and every reader in this library turns a parse
+    failure into an empty dict — which a model with required fields then reports
+    as a validation error, and a model whose fields all have defaults silently
+    accepts as a valid default object. The second outcome is the dangerous one.
+    That window is not hypothetical for files rewritten on a sub-second cadence,
+    like the manager manifest's heartbeat, read concurrently by out-of-process
+    clients and by a watchdog thread.
+
+    Write-then-rename closes it: ``os.replace`` is atomic within a filesystem, so
+    a reader gets the whole old file or the whole new one. Two details make that
+    true in practice rather than in principle:
+
+    - The temp file is created **in the target's own directory**, because a
+      rename across filesystems is not atomic (and usually not even possible).
+    - Its name is a **dotfile**, because directory scanners in this codebase skip
+      hidden entries specifically so they cannot pick up a partial write.
+
+    Deliberately no ``fsync``. Atomicity — no torn read — comes from the rename
+    alone; fsync buys *durability across power loss*, at a cost this would pay on
+    every heartbeat. If a future caller needs that guarantee it should be opt-in
+    at that call site, not the default for every small file the library writes.
+    """
+    directory = os.path.dirname(os.path.abspath(target_path)) or "."
+    prefix = f".{os.path.basename(target_path)}."
+    fd, tmp_path = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb" if binary else "w",
+                       **({} if binary else {"encoding": _DEFAULT_ENCODING})) as handle:
+            handle.write(payload)
+        # mkstemp creates 0600; keep whatever the file already had, so replacing
+        # a group-readable file does not quietly make it private.
+        try:
+            os.chmod(tmp_path, os.stat(target_path).st_mode & 0o7777)
+        except FileNotFoundError:
+            pass
+        os.replace(tmp_path, target_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
 
 def _convert_enums_to_strings(data):
     """
@@ -941,21 +990,19 @@ class FileMappedPydanticMixin:
         """
         # Use provided path or fall back to existing path, converting Path to string if needed
         target_path = str(file_path) if file_path is not None else self._file_path
-        
+
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
-        
+
         handlers = FileMappedPydanticMixin._get_format_handlers(file_format)
-        
+
         # Convert enums to strings for serialization
         serializable_data = _convert_enums_to_strings(data)
-        
+
+        payload = handlers['dump'](serializable_data)
         if handlers['binary']:
-            with open(target_path, 'wb') as f:
-                f.write(handlers['dump'](serializable_data).encode(_DEFAULT_ENCODING))
-        else:
-            with open(target_path, 'w', encoding=_DEFAULT_ENCODING) as f:
-                f.write(handlers['dump'](serializable_data))
+            payload = payload.encode(_DEFAULT_ENCODING)
+        _atomic_write(target_path, payload, binary=handlers['binary'])
     
     def _update_state_after_save(self, file_path: Optional[str] = None) -> None:
         """

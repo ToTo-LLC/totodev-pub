@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""CaseManager — fleet coordinator for folder-backed cases (§1).
+"""CaseManager — fleet coordinator for folder-backed cases.
 
 Host entry point (process ownership, signals, exit codes, watchdog arm/park):
     from totodev_pub.case_manager_support.case_manager_host import serve
@@ -115,8 +115,9 @@ logger = logging.getLogger(__name__)
 _TIER1_KWARGS = frozenset(CaseManagerPolicy.tier1_field_names())
 _TIER2_KWARGS = frozenset(CaseManagerPolicy.tier2_field_names())
 
-# §1 loop hardening: consecutive failed loop iterations before the manager
-# gives up retrying and hands the failure to the host (or re-raises).
+# Consecutive failed loop iterations before the manager gives up retrying and
+# hands the failure to the host (or re-raises). A loop that fails the same way
+# every tick is wedged, not unlucky.
 _LOOP_FAILURE_LIMIT = 3
 
 
@@ -171,7 +172,8 @@ class CaseManager:
         self._loop_failure_cb: Callable[[BaseException], None] | None = None
         self._terminated_handle: Any = None
         self._eject_waiters: dict[str, asyncio.Future[EjectResult]] = {}
-        # §2 liveness stamps (read by the watchdog thread; write-only here).
+        # Liveness stamps. Written only here, read from the watchdog thread —
+        # which is why they are plain floats and never a compound object.
         self._last_pulse: float | None = None
         self._last_tick_started: float | None = None
         self._last_tick_completed: float | None = None
@@ -199,6 +201,12 @@ class CaseManager:
         policy: CaseManagerPolicy | None = None,
         **overrides: Any,
     ) -> Path:
+        """Create a managed filespace at ``cache_root`` and persist its policy.
+
+        Idempotent against an identical policy and refuses a conflicting one, so
+        running it twice is safe and running it *differently* is loud. Returns
+        the root; use ``attach()`` to get a manager over it.
+        """
         root = Path(cache_root).resolve()
         cls._validate_fresh_root_for_provision(root)
 
@@ -238,6 +246,13 @@ class CaseManager:
 
     @classmethod
     def attach(cls, cache_root: str | Path, **wiring: Any) -> "CaseManager":
+        """Build a manager over an **already provisioned** root.
+
+        The persisted policy wins: a Tier-1 override that disagrees with what is
+        on disk raises rather than being silently applied, because layout facts
+        the storage was built with cannot be changed by a later caller. Tier-2
+        tunables may be overridden in memory.
+        """
         root = Path(cache_root).resolve()
         policy_path = cls._find_policy_path(root)
         if policy_path is None:
@@ -272,6 +287,13 @@ class CaseManager:
 
     @classmethod
     def open(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
+        """Attach if the root is provisioned, provision it first if it is empty.
+
+        The ordinary entry point. A root that exists, is *not* empty, and has no
+        policy file raises ``CacheRootStateError`` rather than being adopted —
+        provisioning over someone else's directory is not a mistake worth making
+        convenient.
+        """
         root = Path(cache_root).resolve()
         policy_path = cls._find_policy_path(root)
         if policy_path is not None:
@@ -283,6 +305,12 @@ class CaseManager:
 
     @classmethod
     def open_testing(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
+        """``open()`` with the two policies that make tests slow or surprising off.
+
+        Scans the adopt-drop folder at startup (so a test can stage cases before
+        recovery) and disables the redundant purge (so a far-future clock in one
+        test cannot delete another's fixtures).
+        """
         return cls.open(
             cache_root,
             startup_adopt_scan=True,
@@ -333,12 +361,24 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     async def recover(self) -> RecoverReport:
+        """Reconcile storage and rebuild the pool. Required before ``start()``.
+
+        Where a crash is repaired: leases are waited out, orphans re-admitted,
+        tickets counted. It can take tens of seconds after a hard kill, by
+        design — see ``case_manager_support.readmit``.
+        """
         report = await recover_manager(self)
         self._recovered = True
         self.last_recover_report = report
         return report
 
     async def start(self) -> None:
+        """Begin the maintenance/sweep loop and the liveness pulse.
+
+        Idempotent, and refuses a manager that has not recovered — starting one
+        that has not reconciled with disk would schedule an empty pool over a
+        filespace full of work.
+        """
         if self._running:
             return
         if not self._recovered:
@@ -368,6 +408,12 @@ class CaseManager:
         self._pulse_task = asyncio.create_task(self._pulse_loop())
 
     async def stop(self, *, timeout: float | None = None) -> None:
+        """Stop the loop and let in-flight steps settle.
+
+        With ``timeout`` set, a settle that overruns raises
+        ``CaseManagerStopTimeoutError`` carrying the triggers still running —
+        which is the diagnosis, not just the failure.
+        """
         self._stopping = True
         self._running = False
         if self._pulse_task is not None:
@@ -754,6 +800,7 @@ class CaseManager:
         )
 
     async def run_redundant_purge(self) -> PurgeReport:
+        """Run the ephemeral purge now instead of waiting for its tick."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, lambda: run_redundant_purge(self._store, self._policy)
@@ -797,6 +844,11 @@ class CaseManager:
         return result
 
     def allocate_staging_folder(self) -> Path:
+        """An empty scratch folder inside managed space, for building a case to adopt.
+
+        Sweeps abandoned staging folders as a side effect, so it is also the
+        thing that keeps that space from growing.
+        """
         return allocate_staging_folder(self._manager_dir, self._policy)
 
     async def eject_from_pool(
@@ -806,6 +858,12 @@ class CaseManager:
         export_to_folder: Path,
         timeout: float | None = None,
     ) -> EjectResult:
+        """Export a case out of managed storage entirely, and wait for it.
+
+        Halts the case first and waits for it to settle, so ejecting one that is
+        mid-step works rather than raising. ``timeout`` bounds each phase; on
+        expiry ``EjectTimeoutError`` names the triggers still running.
+        """
         case = self.get_live(case_id)
         # The driver refuses to remove a case mid-step, and says so: wait for
         # HALTED before remove() if an advance may be in progress. Skipping the
@@ -893,6 +951,12 @@ class CaseManager:
         self._driver.add(self._registry.rehydrate(folder))
 
     def get_live(self, case_id: str) -> FolderBackedCase:
+        """The live case object itself, for out-of-band work.
+
+        Returns the *managed* instance, so anything done with it happens outside
+        the pool's scheduling and bookkeeping. Prefer ``fire()`` unless that is
+        specifically what you want.
+        """
         for case in self._driver:
             if case.case_id == case_id:
                 return case
@@ -1090,6 +1154,12 @@ class CaseManager:
         external_key: str | None = None,
         case_folder: Path | None = None,
     ) -> FolderBackedCaseReader:
+        """A read-only view of one case, addressed any of three ways.
+
+        Takes no lease and never rehydrates, so it is safe against a case
+        another process is driving. ``external_key`` raises if it is ambiguous;
+        the other two address exactly one case by construction.
+        """
         if external_key is not None:
             hits = self.locate_all(external_key=external_key)
             if not hits:
@@ -1105,9 +1175,14 @@ class CaseManager:
         return FolderBackedCaseReader(loc.case_folder)
 
     def readers_by_external_key(self, external_key: str) -> list[FolderBackedCaseReader]:
+        """Every case carrying ``external_key`` — the ambiguity-tolerant ``reader()``."""
         return [FolderBackedCaseReader(loc.case_folder) for loc in self.locate_all(external_key=external_key)]
 
     def iter_live_pool(self) -> Iterator[FolderBackedCaseReader]:
+        """Readers over the cases the pool is actively driving right now.
+
+        Narrower than ``iter_live_bucket()``, which is every case at live
+        *status* whether or not this process holds it."""
         for case in self._driver:
             yield FolderBackedCaseReader(case.case_folder)
 
@@ -1130,9 +1205,17 @@ class CaseManager:
             yield FolderBackedCaseReader(entry.case_folder)
 
     def on_notice(self, callback: Callable[[CaseNotice], None]) -> int:
+        """Subscribe to manager notices. Returns a handle for ``off_notice()``.
+
+        One channel carries problems and case-departure lifecycle facts alike;
+        filter on ``notice.kind.is_lifecycle``. Handlers must not block — they
+        run on the manager's own loop — and an exception in one is swallowed so
+        it cannot take the manager down.
+        """
         return self._notices.register(callback)
 
     def off_notice(self, handle: int) -> None:
+        """Unsubscribe. Unknown handles are ignored."""
         self._notices.unregister(handle)
 
     def on_loop_failure(self, callback: Callable[[BaseException], None]) -> None:

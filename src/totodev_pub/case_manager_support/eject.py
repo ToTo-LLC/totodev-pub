@@ -1,7 +1,10 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Eject from pool: export detached folder out of managed filespace (§5.11)."""
+"""Eject from pool: export a case out of managed filespace entirely.
+
+The one departure whose destination is a path rather than a status. An ejected
+case has left the store, and afterwards the manager reports it as absent."""
 
 from __future__ import annotations
 
