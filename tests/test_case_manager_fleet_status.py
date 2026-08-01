@@ -298,7 +298,7 @@ async def test_terminal_case_retained_then_expired(tmp_path):
         # After the termination pipeline moves the folder, the row re-resolves.
         def folder_reresolved():
             loc = manager.locate(case_id=case.case_id)
-            if loc is None or not loc.grouping_key[0].startswith("terminal_"):
+            if loc is None or loc.status != "terminated":
                 return False
             rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
             row = rows.get(case.case_id)

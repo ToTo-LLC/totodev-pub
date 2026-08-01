@@ -5,47 +5,43 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
+from totodev_pub.case_manager_support.case_store import TERMINATED
 from totodev_pub.case_manager_support.constants import TERMINATION_SUBDIR
-from totodev_pub.case_manager_support.layout import (
-    live_grouping_key,
-    read_case_id_from_folder,
-    ref_path_for_case,
-    terminal_grouping_key,
-    write_placeholder_file,
-)
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
-from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
 
 if TYPE_CHECKING:
-    from totodev_pub.cached_file_folders import CachedFileFolders
     from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
+    from totodev_pub.case_manager_support.case_store import LocalCaseStore
 
 logger = logging.getLogger(__name__)
 
 
 class TerminationState(str, Enum):
+    """States a ticket can be *found* in. There is no terminal success state —
+    a completed termination has no ticket, only a case at ``terminated``."""
+
     PENDING = "pending"
-    VERIFIED = "verified"
     MOVING = "moving"
-    COMPLETED = "completed"
     FAILED = "failed"
 
 
 class TerminationTicket(BaseModel, FileMappedPydanticMixin):
     case_id: str
     case_folder: str
-    destination_grouping_key: str
+    # The archive partition the case is bound for, decided once at enqueue time
+    # from the case's own archive label. Deciding it again at move time would let
+    # a restart across a month boundary file the same case under two labels.
+    destination_partition: str
     enqueued_at: str
     state: TerminationState = TerminationState.PENDING
     retry_count: int = 0
@@ -61,15 +57,16 @@ def ticket_path(manager_dir: Path, case_id: str, *, subdir: str = "pending") -> 
 
 
 def ticket_exists(manager_dir: Path, case_id: str) -> bool:
-    for sub in ("pending", "failed", "done"):
-        if ticket_path(manager_dir, case_id, subdir=sub).exists():
-            return True
-    return False
+    """True while a termination is in flight or has been given up on.
 
-
-def destination_key_for_case(case: FolderBackedCase, policy: "CaseManagerPolicy") -> str:
-    label = case.archive_grouping_label()
-    return f"{policy.terminal_prefix}_{label}"
+    There is no ``done/`` to consult: a completed termination is proved by the
+    case's stored status, not by a receipt file. Keeping receipts as the
+    idempotency guard meant one file per terminated case forever, with nothing
+    to sweep them."""
+    return any(
+        ticket_path(manager_dir, case_id, subdir=sub).exists()
+        for sub in ("pending", "failed")
+    )
 
 
 def verify_termination_peek(folder: Path) -> tuple[bool, str | None]:
@@ -82,17 +79,6 @@ def verify_termination_peek(folder: Path) -> tuple[bool, str | None]:
     if reader.case_lease_secs_left is not None and reader.case_lease_secs_left > 0:
         return False, "active lease present"
     return True, None
-
-
-def destination_key_from_record(folder: Path, policy: "CaseManagerPolicy") -> str | None:
-    reader = FolderBackedCaseReader(folder)
-    if not reader.case_is_terminal:
-        return None
-    terminal = reader.case_terminal_at
-    if terminal is None:
-        return None
-    label = terminal.strftime("%Y-%m")
-    return f"{policy.terminal_prefix}_{label}"
 
 
 def write_ticket(ticket: TerminationTicket, path: Path) -> None:
@@ -111,36 +97,14 @@ def begin_termination(
     case_id = case.case_id
     if ticket_exists(manager_dir, case_id):
         return False
-    dest_key = destination_key_for_case(case, policy)
+    partition = case.archive_grouping_label()
     folder = case.case_folder
     driver_remove(folder)
     case.case_detach()
     ticket = TerminationTicket(
         case_id=case_id,
         case_folder=str(folder),
-        destination_grouping_key=dest_key,
-        enqueued_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    )
-    write_ticket(ticket, ticket_path(manager_dir, case_id))
-    return True
-
-
-def enqueue_termination_from_disk(
-    case_folder: Path,
-    *,
-    manager_dir: Path,
-    policy: "CaseManagerPolicy",
-) -> bool:
-    case_id = read_case_id_from_folder(case_folder)
-    if case_id is None or ticket_exists(manager_dir, case_id):
-        return False
-    dest_key = destination_key_from_record(case_folder, policy)
-    if dest_key is None:
-        return False
-    ticket = TerminationTicket(
-        case_id=case_id,
-        case_folder=str(case_folder),
-        destination_grouping_key=dest_key,
+        destination_partition=partition,
         enqueued_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     write_ticket(ticket, ticket_path(manager_dir, case_id))
@@ -151,28 +115,26 @@ async def process_pending_ticket(
     ticket: TerminationTicket,
     ticket_file: Path,
     *,
-    cache: "CachedFileFolders",
+    store: "LocalCaseStore",
     policy: "CaseManagerPolicy",
     manager_dir: Path,
-    move_to_aberrant: Callable[..., Awaitable[Path]],
-    emit_escalation: Callable[..., None] | None = None,
+    quarantine: Callable[..., Awaitable[Path | None]],
+    emit_notice: Callable[..., None] | None = None,
 ) -> None:
-    """Advance one termination ticket: verify, then relocate the case.
+    """Advance one termination ticket: verify, then archive the case.
 
-    The relocation itself is filesystem work, so it is offloaded to a thread; the
-    aberrant fallback is awaited because registering a rescued case is an async
-    cache operation.
+    Re-drivable by construction: a ticket that dies mid-move is replayed next
+    tick, and the store's status change is idempotent, so the second attempt
+    either finishes the move or finds it already done.
     """
     case_id = ticket.case_id
-    ref_path = ref_path_for_case(policy, case_id)
-    src_grouping = live_grouping_key(policy)
-    dst_grouping = (ticket.destination_grouping_key,)
 
     folder = Path(ticket.case_folder)
     if not folder.exists():
-        ref = cache.find_file(ref_path, src_grouping)
-        if ref is not None:
-            folder = ref.slave_dir_path
+        # Addressing rule: a path recorded before a move is stale afterwards.
+        resolved = await store.resolve_path(case_id)
+        if resolved is not None:
+            folder = resolved
 
     ok, reason = verify_termination_peek(folder)
     if not ok:
@@ -182,9 +144,9 @@ async def process_pending_ticket(
             ticket.state = TerminationState.FAILED
             write_ticket(ticket, termination_dir(manager_dir) / "failed" / f"{case_id}.yaml")
             ticket_file.unlink(missing_ok=True)
-            await move_to_aberrant(case_id, folder, reason or "verification failed")
-            if emit_escalation:
-                emit_escalation("TERMINATION_VERIFICATION_FAILED", case_id, folder, reason)
+            await quarantine(case_id, folder, reason or "verification failed")
+            if emit_notice:
+                emit_notice("TERMINATION_VERIFICATION_FAILED", case_id, folder, reason)
         else:
             write_ticket(ticket, ticket_file)
         return
@@ -192,19 +154,12 @@ async def process_pending_ticket(
     ticket.state = TerminationState.MOVING
     write_ticket(ticket, ticket_file)
     try:
-        await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: cache.move_file(
-                ref_path,
-                ref_path,
-                grouping_key=src_grouping,
-                new_grouping_key=dst_grouping,
-            ),
+        archived = await store.set_status(
+            case_id, TERMINATED, partition=ticket.destination_partition
         )
-        ticket.state = TerminationState.COMPLETED
-        done_path = termination_dir(manager_dir) / "done" / f"{case_id}.yaml"
-        write_ticket(ticket, done_path)
         ticket_file.unlink(missing_ok=True)
+        if emit_notice:
+            emit_notice("CASE_TERMINATED", case_id, archived, ticket.destination_partition)
     except Exception as exc:
         ticket.retry_count += 1
         ticket.last_error = str(exc)
@@ -213,9 +168,9 @@ async def process_pending_ticket(
             ticket.state = TerminationState.FAILED
             write_ticket(ticket, termination_dir(manager_dir) / "failed" / f"{case_id}.yaml")
             ticket_file.unlink(missing_ok=True)
-            await move_to_aberrant(case_id, folder, str(exc))
-            if emit_escalation:
-                emit_escalation("TERMINATION_VERIFICATION_FAILED", case_id, folder, str(exc))
+            await quarantine(case_id, folder, str(exc))
+            if emit_notice:
+                emit_notice("TERMINATION_VERIFICATION_FAILED", case_id, folder, str(exc))
         else:
             ticket.state = TerminationState.PENDING
             write_ticket(ticket, ticket_file)

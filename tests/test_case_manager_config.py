@@ -54,7 +54,6 @@ def test_wiring_fields_default_to_empty(tmp_path):
     assert config.registry is None
     assert config.register_types == ()
     assert config.escalation_handlers == []
-    assert config.cache_override is None
 
 
 def test_mutable_defaults_are_not_shared_between_instances(tmp_path):

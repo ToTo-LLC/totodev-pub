@@ -3,10 +3,10 @@
 
 """A case archives by the month it closed, not the month it was archived.
 
-Two code paths compute a terminal case's destination bucket: the normal path via
-``archive_grouping_label()`` on the live case, and the disk path via
-``destination_key_from_record()`` when only the folder is available. They must
-agree, or the same case lands in different buckets depending on which path ran.
+There is exactly one computation of a terminal case's archive partition, decided
+once at enqueue time from the case's own label. These tests pin both halves of
+that: the label follows the close, and the ticket carries the decision so a
+restart across a month boundary cannot file the same case twice.
 """
 
 import datetime
@@ -19,9 +19,10 @@ from case_manager_test_utils import (
     provision_manager,
     seed_detached_case,
 )
+from totodev_pub.case_manager_support.case_store import TERMINATED
 from totodev_pub.case_manager_support.termination import (
-    destination_key_for_case,
-    destination_key_from_record,
+    TerminationTicket,
+    replay_pending,
 )
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
@@ -65,17 +66,32 @@ async def test_archive_label_follows_the_close_month_not_the_clock(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_both_destination_paths_agree(tmp_path, monkeypatch):
+async def test_the_partition_is_decided_once_and_carried_on_the_ticket(tmp_path, monkeypatch):
+    """The ticket records the destination, so a later replay cannot re-decide it.
+
+    Deciding again at move time would let a restart across a month boundary file
+    the same case under a different label than the one it was enqueued for.
+    """
     manager = provision_manager(tmp_path)
     await manager.recover()
     case = await _closed_case(manager, tmp_path, "inbound2")
+    case_id = case.case_id
 
     terminal_at = FolderBackedCaseReader(case.case_folder).case_terminal_at
-    much_later = terminal_at + datetime.timedelta(days=400)
-    monkeypatch.setattr(
-        "totodev_pub.folder_backed_case._utcnow", lambda: much_later
-    )
+    expected = terminal_at.strftime("%Y-%m")
 
-    from_case = destination_key_for_case(case, manager._policy)
-    from_disk = destination_key_from_record(case.case_folder, manager._policy)
-    assert from_case == from_disk
+    manager._reconcile_terminal_in_pool()
+    pending = replay_pending(manager._manager_dir)
+    assert len(pending) == 1
+    ticket = TerminationTicket.load(str(pending[0]), acquire_lock=False)
+    assert ticket.destination_partition == expected
+
+    # A restart a year later must still archive it where the ticket says.
+    monkeypatch.setattr(
+        "totodev_pub.folder_backed_case._utcnow",
+        lambda: terminal_at + datetime.timedelta(days=400),
+    )
+    await manager._maintenance_tick()
+
+    entry = manager._store.find(case_id)
+    assert (entry.status, entry.partition) == (TERMINATED, expected)

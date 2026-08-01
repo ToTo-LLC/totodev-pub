@@ -153,6 +153,21 @@ class EjectTimeoutError(Exception):
         super().__init__(f"eject_from_pool timed out for case_id {case_id!r}.")
 
 
+class EjectAbandonedError(Exception):
+    """Eject exhausted its retries; the ticket was retired to ``failed/``.
+
+    Raised so that a caller blocked in ``eject_from_pool()`` learns the export is
+    never going to happen. Without it a give-up leaves the waiter pending with
+    nothing left to resolve it, and a caller that passed no timeout waits forever."""
+
+    def __init__(self, *, case_id: str, reason: str):
+        self.case_id = case_id
+        self.reason = reason
+        super().__init__(
+            f"Eject of case {case_id!r} was abandoned after repeated failures: {reason}"
+        )
+
+
 class InvalidAddressingError(Exception):
     """Lookup or fire request must specify exactly one identifier."""
 
@@ -190,6 +205,30 @@ class ManagerNotRunningError(Exception):
             "Call await manager.start() first, or use get_live() and trigger the case "
             "directly to force an immediate step outside the tick queue."
         )
+
+
+class CaseNotInStoreError(CaseNotFoundError):
+    """The case store holds no entry for this case_id, at any status."""
+
+    def __init__(self, case_id: str):
+        super().__init__(case_id, scope="case store")
+        self.case_id = case_id
+
+
+class UnknownCaseStatusError(Exception):
+    """A status was supplied that the store cannot project onto storage.
+
+    Pool-activity-status is an open vocabulary on the *read* side — anything the
+    store reports other than ``live`` means "not driven", including a value this
+    version does not recognize. Writing is narrower: ``set_status`` can only move
+    a case somewhere it knows how to address."""
+
+    def __init__(self, status: str, *, known: tuple[str, ...]):
+        super().__init__(
+            f"Cannot store status {status!r}; this store can write {known!r}."
+        )
+        self.status = status
+        self.known = known
 
 
 class CaseLeaseHeldError(Exception):

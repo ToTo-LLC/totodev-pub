@@ -17,20 +17,15 @@ from pydantic import BaseModel, Field
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.exceptions import DuplicateCaseIdError
-from totodev_pub.case_manager_support.constants import PLACEHOLDER_HEADER
-from totodev_pub.case_manager_support.layout import (
-    live_grouping_key,
-    read_case_id_from_folder,
-    ref_path_for_case,
-)
+from totodev_pub.case_manager_support.layout import read_case_id_from_folder
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import CaseTypeRegistry
 from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
 from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
 
 if TYPE_CHECKING:
-    from totodev_pub.cached_file_folders import CachedFileFolders
     from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
+    from totodev_pub.case_manager_support.case_store import LocalCaseStore
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +44,9 @@ class AdoptResult(BaseModel, FileMappedPydanticMixin):
     case_id: str
     case_folder: str | None = None
     source_folder: str
-    aberrant_folder: str | None = None
+    # Set when a failed adopt's residue was quarantined outright. None also covers
+    # the case where quarantine was deferred behind a still-held lease.
+    quarantine_folder: str | None = None
     correlation_id: str
     rejection_reason: str | None = None
     completed_at: str = Field(
@@ -57,40 +54,28 @@ class AdoptResult(BaseModel, FileMappedPydanticMixin):
     )
 
 
-def _is_valid_adopt_source(source: Path, manager_dir: Path, policy: "CaseManagerPolicy") -> bool:
+def _is_valid_adopt_source(
+    source: Path, manager_dir: Path, policy: "CaseManagerPolicy", store: "LocalCaseStore"
+) -> bool:
+    """A source must be somewhere the store does not already manage.
+
+    Adopting a folder out of managed storage would mean taking a case the store
+    already owns and admitting it a second time.
+    """
     source = source.resolve()
-    staging_root = (manager_dir / policy.staging_subdir).resolve()
-    adopt_drop = (manager_dir / policy.adopt_drop_subdir).resolve()
-    try:
-        source.relative_to(staging_root)
-        return True
-    except ValueError:
-        pass
-    try:
-        source.relative_to(adopt_drop)
-        return True
-    except ValueError:
-        pass
-    cache_root = manager_dir.parent.resolve()
-    try:
-        rel = source.relative_to(cache_root)
-    except ValueError:
-        # External staging outside the cache root is always valid.
-        return True
-    # Inside cache: reject paths under managed life-stage buckets.
-    if rel.parts:
-        head = rel.parts[0]
-        if head in (policy.live_bucket, policy.aberrant_bucket) or head.startswith(
-            f"{policy.terminal_prefix}_"
-        ):
-            return False
-    return True
+    for scratch in (policy.staging_subdir, policy.adopt_drop_subdir):
+        try:
+            source.relative_to((manager_dir / scratch).resolve())
+            return True
+        except ValueError:
+            continue
+    return not store.owns_path(source)
 
 
 def validate_adopt_source(
     source_folder: Path,
     *,
-    cache: "CachedFileFolders",
+    store: "LocalCaseStore",
     policy: "CaseManagerPolicy",
     manager_dir: Path,
     registry: CaseTypeRegistry,
@@ -105,7 +90,7 @@ def validate_adopt_source(
     lease_state = FolderBackedCase.is_heartbeat_expired(source)
     if lease_state is False:
         return None, AdoptRejectReason.ACTIVE_LEASE, "active lease on source"
-    if not _is_valid_adopt_source(source, manager_dir, policy):
+    if not _is_valid_adopt_source(source, manager_dir, policy, store):
         return None, AdoptRejectReason.INVALID_SOURCE, "source inside managed grouping bucket"
     case_id = read_case_id_from_folder(source)
     if not case_id:
@@ -140,13 +125,13 @@ def _transfer_into_slave(source: Path, dest_slave: Path) -> None:
 async def adopt_case_folder(
     source_folder: Path,
     *,
-    cache: "CachedFileFolders",
+    store: "LocalCaseStore",
     policy: "CaseManagerPolicy",
     manager_dir: Path,
     registry: CaseTypeRegistry,
     driver_add: Callable[[FolderBackedCase], None],
     case_id_exists: Callable[[str], bool],
-    move_to_aberrant: Callable[..., Awaitable[Path]],
+    quarantine: Callable[..., Awaitable[Path | None]],
     correlation_id: str | None = None,
     expected_case_id: str | None = None,
 ) -> AdoptResult:
@@ -155,7 +140,7 @@ async def adopt_case_folder(
 
     case_id, reject_reason, detail = validate_adopt_source(
         source,
-        cache=cache,
+        store=store,
         policy=policy,
         manager_dir=manager_dir,
         registry=registry,
@@ -171,37 +156,20 @@ async def adopt_case_folder(
             rejection_reason=f"{reject_reason.value}: {detail}",
         )
 
-    ref_path = ref_path_for_case(policy, case_id)
-    grouping = live_grouping_key(policy)
-
     admitted: FolderBackedCase | None = None
     try:
-        import tempfile
-        from totodev_pub.cached_file_folders_support.file_proxy_local_file import LocalFileProxy
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-        ) as tmp:
-            tmp.write(PLACEHOLDER_HEADER)
-            tmp_path = tmp.name
-        try:
-            proxy = LocalFileProxy(tmp_path, ref_path=ref_path, delete_after_deploy=True)
-            await cache.upsert_file(proxy, grouping)
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-
-        dest_slave = cache.get_slave_dir(grouping, ref_path)
-        if (dest_slave / RECORD_NAME).exists():
+        dest = await store.create_location(case_id)
+        if (dest / RECORD_NAME).exists():
             raise DuplicateCaseIdError(case_id)
-        _transfer_into_slave(source, dest_slave)
-        if read_case_id_from_folder(dest_slave) != case_id:
+        _transfer_into_slave(source, dest)
+        if read_case_id_from_folder(dest) != case_id:
             raise ValueError("case_id mismatch after transfer")
-        admitted = registry.rehydrate(dest_slave)   # acquires the heartbeat lease
+        admitted = registry.rehydrate(dest)   # acquires the heartbeat lease
         driver_add(admitted)
         return AdoptResult(
             status="completed",
             case_id=case_id,
-            case_folder=str(dest_slave),
+            case_folder=str(dest),
             source_folder=str(source),
             correlation_id=corr,
         )
@@ -210,19 +178,18 @@ async def adopt_case_folder(
         # rehydrate() took the lease. If the failure came after that -- a rejected
         # driver_add, say -- the case still holds it, and quarantine legitimately
         # refuses to relocate a leased folder. Release it first so the failure
-        # path can finish instead of raising a second, more confusing error.
+        # path can finish instead of deferring behind a lease nobody will drop.
         if admitted is not None and not admitted.case_is_detached:
             try:
                 admitted.case_detach()
             except Exception:
                 logger.exception("Adopt failure path: could not detach %s", case_id)
-        aberrant_path = None
-        dest_slave = cache.get_slave_dir(grouping, ref_path) if cache.find_file(ref_path, grouping) else None
-        if dest_slave is not None and dest_slave.exists():
+        quarantine_path = None
+        residue = await store.resolve_path(case_id)
+        if residue is not None and residue.exists():
             try:
-                aberrant_path = str(
-                    await move_to_aberrant(case_id, dest_slave, str(exc), from_grouping=grouping)
-                )
+                landed = await quarantine(case_id, residue, str(exc))
+                quarantine_path = None if landed is None else str(landed)
             except Exception:
                 # Quarantine is best-effort; the caller still gets an "error"
                 # result naming the original failure rather than this one.
@@ -231,7 +198,7 @@ async def adopt_case_folder(
             status="error",
             case_id=case_id,
             source_folder=str(source),
-            aberrant_folder=aberrant_path,
+            quarantine_folder=quarantine_path,
             correlation_id=corr,
             rejection_reason=str(exc),
         )

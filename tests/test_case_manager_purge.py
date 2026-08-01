@@ -16,7 +16,7 @@ from case_manager_test_utils import (
     provision_manager,
     seed_detached_case,
 )
-from totodev_pub.case_manager_support.aberrant import move_case_to_aberrant
+from totodev_pub.case_manager_support.quarantine import quarantine_case
 from totodev_pub.case_manager_support.purge import run_redundant_purge
 from totodev_pub.folder_backed_case_support.case_keep_manifest import CaseKeepManifest
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
@@ -41,8 +41,8 @@ async def _quarantined_case(manager, tmp_path, name):
     case = await adopt_into_live(manager, staging)
     folder = case.case_folder
     case.case_detach()
-    return await move_case_to_aberrant(
-        manager._cache, manager._policy, case.case_id, folder, "for purge"
+    return await quarantine_case(
+        manager._store, manager._manager_dir, case.case_id, folder, "for purge"
     )
 
 
@@ -54,7 +54,7 @@ async def test_purge_removes_scratch_but_keeps_the_record(tmp_path):
     scratch = folder / "scratch.bin"
     scratch.write_text("ephemeral", encoding="utf-8")
 
-    report = run_redundant_purge(manager._cache, manager._policy, clock=_FAR_FUTURE)
+    report = run_redundant_purge(manager._store, manager._policy, clock=_FAR_FUTURE)
 
     assert folder in report.folders_purged
     assert not scratch.exists()
@@ -70,7 +70,7 @@ async def test_purge_respects_the_retention_window(tmp_path):
     scratch.write_text("ephemeral", encoding="utf-8")
 
     # Real clock: the folder was created moments ago, far inside the window.
-    report = run_redundant_purge(manager._cache, manager._policy)
+    report = run_redundant_purge(manager._store, manager._policy)
 
     assert report.folders_purged == []
     assert scratch.exists()
@@ -88,7 +88,7 @@ async def test_purge_disabled_by_policy_does_nothing(tmp_path):
     scratch = folder / "scratch.bin"
     scratch.write_text("ephemeral", encoding="utf-8")
 
-    report = run_redundant_purge(manager._cache, manager._policy, clock=_FAR_FUTURE)
+    report = run_redundant_purge(manager._store, manager._policy, clock=_FAR_FUTURE)
 
     assert report.folders_purged == []
     assert scratch.exists()
@@ -112,7 +112,7 @@ async def test_a_failure_mid_purge_is_not_swallowed(tmp_path, monkeypatch):
     monkeypatch.setattr(CaseKeepManifest, "purge", boom)
 
     with pytest.raises(OSError, match="disk went away"):
-        run_redundant_purge(manager._cache, manager._policy, clock=_FAR_FUTURE)
+        run_redundant_purge(manager._store, manager._policy, clock=_FAR_FUTURE)
 
 
 @pytest.mark.asyncio

@@ -37,4 +37,3 @@ class CaseManagerConfig:
     registry: "CaseTypeRegistry | None" = None
     register_types: Sequence[type["FolderBackedCase"]] = ()
     escalation_handlers: list[Callable[..., None]] = field(default_factory=list)
-    cache_override: Any = None

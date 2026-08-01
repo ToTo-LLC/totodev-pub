@@ -14,7 +14,8 @@ from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME, MA
 from totodev_pub.case_manager_support.exceptions import LiveCaseNotFoundError, ManagerNotFreshError
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow, read_board
 from totodev_pub.case_manager_support.fleet_status_watcher import FleetStatusBoardWatcher
-from totodev_pub.case_manager_support.layout import CaseLocation, live_grouping_key, policy_manager_dir
+from totodev_pub.case_manager_support.case_store import LIVE
+from totodev_pub.case_manager_support.layout import CaseLocation, policy_manager_dir
 from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor, RequestHandle
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager import CaseManager
@@ -166,12 +167,12 @@ class CaseManagerClient:
         target_type_name: str,
         strict: bool,
     ) -> None:
-        # NOTE: check the on-disk grouping, not loc.in_pool — this client attaches its
+        # NOTE: check the stored status, not loc.in_pool — this client attaches its
         # OWN CaseManager/driver (a separate, unsynced in-memory pool from whatever
         # process is actually running the fleet), so in_pool would read as False for
-        # every case, always. The live grouping key is a disk fact and needs no driver.
+        # every case, always. Status is a disk fact and needs no driver.
         loc = self._manager.locate(case_id=case_id, case_folder=case_folder)
-        if loc is None or loc.grouping_key != live_grouping_key(self._manager._policy):
+        if loc is None or loc.status != LIVE:
             raise LiveCaseNotFoundError(case_id or (loc.case_id if loc else str(case_folder)))
         target_cls = self._manager._registry.resolve_case_type(target_type_name)
         if target_cls is None:

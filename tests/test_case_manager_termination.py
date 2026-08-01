@@ -22,10 +22,10 @@ async def test_termination_moves_to_terminal(tmp_path):
         await asyncio.sleep(0.05)
         loc = manager.locate(case_id=case.case_id)
         if loc and loc.terminal and not loc.in_pool:
-            if loc.grouping_key[0].startswith("terminal_"):
+            if loc.status == "terminated":
                 break
     await manager.stop()
     loc = manager.locate(case_id=case.case_id)
     assert loc is not None
     assert loc.terminal
-    assert loc.grouping_key[0].startswith("terminal_")
+    assert loc.status == "terminated"

@@ -137,10 +137,22 @@ detection and the reason. `recover()` logs any from the last 24 hours at startup
 so a restart loop announces itself. Same-minute records overwrite, which
 deliberately collapses a sub-minute crash loop to one file per minute.
 
-**Escalations** — register with `manager.on_escalation(...)` for in-process
-notification of `MANAGER_UNRESPONSIVE`, `ADOPT_REJECTED`,
-`TERMINATION_VERIFICATION_FAILED`, `MAINTENANCE_ITEM_FAILED`, and the rest. This
-is the hook for paging and metrics.
+**Notices** — register with `manager.on_escalation(...)` for in-process
+notification. One channel carries two families, told apart by
+`kind.is_lifecycle`:
+
+- **Problems** — `MANAGER_UNRESPONSIVE`, `ADOPT_REJECTED`,
+  `TERMINATION_VERIFICATION_FAILED`, `MAINTENANCE_ITEM_FAILED`,
+  `READMIT_ANOMALY`, and the rest. This is the hook for paging and metrics.
+- **Departures** — `CASE_TERMINATED`, `CASE_QUARANTINED`, `CASE_EJECTED`: a case
+  has left the pool. Normal events, not problems. Filter on `is_lifecycle` so a
+  paging handler does not wake someone for a case closing normally.
+
+**Departures are announced, not catalogued, and delivery is at-most-once.** The
+manager keeps no durable ledger of departed cases; if the process dies between a
+case departing and your handler persisting, the notice is lost. Subscribe and
+keep your own record if you need history — this is operator convenience, not an
+audit log.
 
 **Fleet status board** — `.case_manager/fleet_status.jsonl`, a periodically
 refreshed snapshot of every case in the pool. Read it with

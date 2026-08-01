@@ -21,18 +21,24 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
 
-from totodev_pub.cached_file_folders import CachedFileFolders
-from totodev_pub.case_manager_support.aberrant import move_case_to_aberrant
 from totodev_pub.case_manager_support.adopt import AdoptResult, adopt_case_folder
 from totodev_pub.case_manager_support.case_manager_config import CaseManagerConfig
 from totodev_pub.case_manager_support.case_manager_manifest import CaseManagerManifest, ManifestPaths
 from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
+from totodev_pub.case_manager_support.case_store import (
+    LIVE,
+    QUARANTINED,
+    TERMINATED,
+    CaseEntry,
+    LocalCaseStore,
+)
 from totodev_pub.case_manager_support.constants import (
     EJECT_SUBDIR,
     FLEET_STATUS_FILENAME,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     PULSE_INTERVAL_SECS,
+    QUARANTINE_SUBDIR,
     RESULTS_SUBDIR,
     TERMINATION_SUBDIR,
 )
@@ -53,6 +59,7 @@ from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
     CacheRootStateError,
     CaseManagerStopTimeoutError,
+    EjectAbandonedError,
     EjectTimeoutError,
     InvalidAddressingError,
     LiveCaseNotFoundError,
@@ -64,27 +71,25 @@ from totodev_pub.case_manager_support.exceptions import (
 )
 from totodev_pub.case_manager_support.layout import (
     CaseLocation,
-    aberrant_grouping_key,
     assert_case_folder_movable,
-    folder_matches_case_tree,
-    iter_all_managed_folders,
-    iter_case_folders_in_grouping,
-    live_grouping_key,
-    normalize_case_folder_path,
     policy_manager_dir,
-    ref_path_for_case,
-    write_placeholder_file,
 )
 from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor
 from totodev_pub.case_manager_support.purge import PurgeReport, run_redundant_purge
-from totodev_pub.case_manager_support.reap import ReapReport, reap as run_reap
+from totodev_pub.case_manager_support.quarantine import (
+    QuarantineTicket,
+    pending_quarantine_tickets,
+    process_quarantine_ticket,
+    quarantine_case,
+    quarantine_ticket_exists,
+)
+from totodev_pub.case_manager_support.readmit import OrphanReadmitReport, readmit_orphans
 from totodev_pub.case_manager_support.recover import RecoverReport, recover_manager
 from totodev_pub.case_manager_support.shutdown import ShutdownDirective
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager_support.termination import (
     TerminationTicket,
     begin_termination,
-    enqueue_termination_from_disk,
     process_pending_ticket,
     replay_pending,
     termination_dir,
@@ -135,8 +140,8 @@ class CaseManager:
         self,
         config: CaseManagerConfig,
         *,
+        store: LocalCaseStore | None = None,
         driver: CasePoolDriver | None = None,
-        cache: CachedFileFolders | None = None,
     ) -> None:
         self._config = config
         self._policy = config.policy
@@ -145,16 +150,12 @@ class CaseManager:
         self._registry = config.registry or case_type_registry
         if config.register_types:
             self._registry.register_case_types(*config.register_types)
+        self._store = store if store is not None else LocalCaseStore.provision(
+            self._cache_root, self._policy
+        )
         # Explicit `is not None`, never truthiness: a CasePoolDriver defines
         # __len__, so a freshly constructed (empty) driver is falsy and `or`
         # would silently discard the one the caller injected.
-        self._cache = _first_supplied(
-            cache,
-            config.cache_override,
-            default=lambda: CachedFileFolders(
-                self._policy.grouping_pattern, str(self._cache_root)
-            ),
-        )
         self._driver = _first_supplied(
             driver, config.driver, default=self._build_default_driver
         )
@@ -216,8 +217,21 @@ class CaseManager:
         mgr_dir.mkdir(parents=True, exist_ok=True)
         pol.save(str(policy_path), retain_lock=False)
         cls._ensure_namespace_dirs(mgr_dir, pol)
-        CachedFileFolders(pol.grouping_pattern, str(root))
+        cls.provision_local_case_store(root, pol)
         return root
+
+    @staticmethod
+    def provision_local_case_store(
+        cache_root: str | Path, policy: CaseManagerPolicy | None = None
+    ) -> LocalCaseStore:
+        """Create (or attach to) the case storage under ``cache_root``.
+
+        A discoverability convenience — the knowledge lives on the store, and
+        this only delegates. Idempotent with validation: provisioning the same
+        layout again is harmless, provisioning a *different* one at the same root
+        raises.
+        """
+        return LocalCaseStore.provision(cache_root, policy or CaseManagerPolicy())
 
     @classmethod
     def attach(cls, cache_root: str | Path, **wiring: Any) -> "CaseManager":
@@ -248,9 +262,8 @@ class CaseManager:
             driver_kwargs=wiring.get("driver_kwargs") or {},
             registry=wiring.get("registry"),
             register_types=wiring.get("register_types") or (),
-            cache_override=wiring.get("cache"),
         )
-        manager = cls(config, driver=config.driver, cache=config.cache_override)
+        manager = cls(config, store=wiring.get("store"), driver=config.driver)
         manager._log_startup_summary()
         return manager
 
@@ -469,28 +482,31 @@ class CaseManager:
                 await process_pending_ticket(
                     ticket,
                     ticket_file,
-                    cache=self._cache,
+                    store=self._store,
                     policy=self._policy,
                     manager_dir=self._manager_dir,
-                    move_to_aberrant=self._move_to_aberrant,
-                    emit_escalation=self._emit_termination_failed,
+                    quarantine=self._quarantine,
+                    emit_notice=self._emit_notice,
                 )
+        for ticket_file in pending_quarantine_tickets(self._manager_dir):
+            with self._isolated_tick_item("quarantine ticket", ticket_file):
+                q_ticket = QuarantineTicket.load(str(ticket_file), acquire_lock=False)
+                landed = await process_quarantine_ticket(
+                    q_ticket,
+                    ticket_file,
+                    store=self._store,
+                    manager_dir=self._manager_dir,
+                    max_retries=self._policy.termination_max_retries,
+                )
+                if landed is not None:
+                    self._emit_notice(
+                        "CASE_QUARANTINED", q_ticket.case_id, landed, q_ticket.reason
+                    )
         eject_pending = eject_dir(self._manager_dir) / "pending"
         if eject_pending.exists():
             for ticket_file in sorted(eject_pending.glob("*.yaml")):
                 with self._isolated_tick_item("eject ticket", ticket_file):
-                    ticket = EjectTicket.load(str(ticket_file), acquire_lock=False)
-                    result = await process_eject_ticket(
-                        ticket,
-                        ticket_file,
-                        cache=self._cache,
-                        policy=self._policy,
-                        manager_dir=self._manager_dir,
-                    )
-                    if result and ticket.case_id in self._eject_waiters:
-                        fut = self._eject_waiters.pop(ticket.case_id)
-                        if not fut.done():
-                            fut.set_result(result)
+                    await self._advance_eject_ticket(ticket_file)
         with self._isolated_tick_item("mailbox drain", self._manager_dir):
             await self._mailbox.maintenance_tick()
         if self._policy.redundant_purge_terminal_after_secs is not None or (
@@ -498,12 +514,44 @@ class CaseManager:
         ):
             with self._isolated_tick_item("redundant purge", self._manager_dir):
                 await loop.run_in_executor(
-                    None, lambda: run_redundant_purge(self._cache, self._policy)
+                    None, lambda: run_redundant_purge(self._store, self._policy)
                 )
         self._publish_fleet_status_board()
         with self._isolated_tick_item("escalation detection", self._manager_dir):
             self._detect_escalations()
         self._last_tick_completed = time.monotonic()
+
+    async def _advance_eject_ticket(self, ticket_file: Path) -> None:
+        """Drive one eject ticket and settle its waiter either way.
+
+        A give-up has to reach the caller. ``eject_from_pool()`` resolves on the
+        export completing, and with the ticket retired to ``failed/`` there is
+        nothing left that could ever resolve it — a caller who passed no timeout
+        would wait forever.
+        """
+        ticket = EjectTicket.load(str(ticket_file), acquire_lock=False)
+        try:
+            result = await process_eject_ticket(
+                ticket,
+                ticket_file,
+                store=self._store,
+                policy=self._policy,
+                manager_dir=self._manager_dir,
+            )
+        except EjectAbandonedError as exc:
+            self._escalations.emit_simple(
+                "EJECT_FAILED", ticket.case_id, Path(ticket.case_folder), exc.reason
+            )
+            fut = self._eject_waiters.pop(ticket.case_id, None)
+            if fut is not None and not fut.done():
+                fut.set_exception(exc)
+            return
+        if result is None:
+            return
+        self._emit_notice("CASE_EJECTED", ticket.case_id, result.export_folder)
+        fut = self._eject_waiters.pop(ticket.case_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(result)
 
     def _fleet_locate(self) -> Callable[[str], Any]:
         return lambda cid: self.locate(case_id=cid)
@@ -562,6 +610,8 @@ class CaseManager:
         for case in self._driver.terminal_cases():
             if ticket_exists(self._manager_dir, case.case_id):
                 continue
+            if self._store.status_of(case.case_id) not in (LIVE, None):
+                continue    # already departed; its stored status is the receipt
             with self._isolated_tick_item("terminal reconcile", case.case_folder):
                 if self._fleet_board is not None:
                     self._fleet_board.note_terminal(case)
@@ -586,27 +636,35 @@ class CaseManager:
             driver_remove=self._driver.remove,
         )
 
-    async def reap(self) -> ReapReport:
-        return run_reap(
-            cache=self._cache,
-            policy=self._policy,
+    async def readmit_orphans(self) -> OrphanReadmitReport:
+        """Startup orphan recovery. See ``case_manager_support.readmit``.
+
+        The join across pool membership, the store's status, and the type
+        registry stays here rather than moving into the store: answering it needs
+        the driver and the registry, and injecting those into a storage object
+        would rebuild the very dependency the store exists to remove.
+        """
+        return readmit_orphans(
+            store=self._store,
             driver=self._driver,
             registry=self._registry,
-            enqueue_from_disk=lambda f: enqueue_termination_from_disk(
-                f, manager_dir=self._manager_dir, policy=self._policy
-            ),
-            has_eject_ticket=lambda cid: eject_ticket_path(
-                self._manager_dir, cid
-            ).exists(),
+            has_departure_ticket=self._has_departure_ticket,
             emit_anomaly=lambda cid, folder, msg: self._escalations.emit_simple(
-                "REAP_ANOMALY", cid, folder, msg
+                "READMIT_ANOMALY", cid, folder, msg
             ),
+        )
+
+    def _has_departure_ticket(self, case_id: str) -> bool:
+        """True when the case is already on its way out of the pool."""
+        return (
+            eject_ticket_path(self._manager_dir, case_id).exists()
+            or quarantine_ticket_exists(self._manager_dir, case_id)
         )
 
     async def run_redundant_purge(self) -> PurgeReport:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, lambda: run_redundant_purge(self._cache, self._policy)
+            None, lambda: run_redundant_purge(self._store, self._policy)
         )
 
     # ------------------------------------------------------------------
@@ -625,13 +683,13 @@ class CaseManager:
             return existing
         result = await adopt_case_folder(
             Path(source_folder),
-            cache=self._cache,
+            store=self._store,
             policy=self._policy,
             manager_dir=self._manager_dir,
             registry=self._registry,
             driver_add=self._driver.add,
-            case_id_exists=self._case_id_exists,
-            move_to_aberrant=self._move_to_aberrant,
+            case_id_exists=self._store.contains,
+            quarantine=self._quarantine,
             correlation_id=correlation_id,
             expected_case_id=expected_case_id,
         )
@@ -663,7 +721,6 @@ class CaseManager:
             case,
             export_to_folder=export_to_folder,
             manager_dir=self._manager_dir,
-            policy=self._policy,
             request_halt=self._driver.request_halt,
             driver_remove=self._driver.remove,
         )
@@ -676,21 +733,17 @@ class CaseManager:
         return await fut
 
     async def reopen_case(self, case_id: str) -> None:
+        """Return a departed case to the live pool.
+
+        The one status change that moves in the *gaining* direction, which is why
+        it re-resolves the folder after the move rather than reusing the one it
+        looked up beforehand.
+        """
         loc = self.locate(case_id=case_id)
         if loc is None or loc.in_pool:
             raise LiveCaseNotFoundError(case_id)
-        assert_case_folder_movable(loc.case_folder, case_id, "reopen")
-        ref_path = ref_path_for_case(self._policy, case_id)
-        self._cache.move_file(
-            ref_path,
-            ref_path,
-            grouping_key=loc.grouping_key,
-            new_grouping_key=live_grouping_key(self._policy),
-        )
-        new_loc = self.locate(case_id=case_id)
-        assert new_loc is not None
-        case = self._registry.rehydrate(new_loc.case_folder)
-        self._driver.add(case)
+        folder = await self._store.set_status(case_id, LIVE)
+        self._driver.add(self._registry.rehydrate(folder))
 
     def get_live(self, case_id: str) -> FolderBackedCase:
         for case in self._driver:
@@ -827,25 +880,31 @@ class CaseManager:
         case_id: str | None = None,
         case_folder: Path | None = None,
     ) -> CaseLocation | None:
+        """Find a case at any status. Exactly one of ``case_id`` / ``case_folder``.
+
+        Both directions are index lookups, not fleet scans — which matters
+        because every addressed ``fire()`` resolves through here, so a scan would
+        put an O(fleet) cost on the mailbox path.
+        """
         if (case_id is None) == (case_folder is None):
             raise InvalidAddressingError()
-        if case_id is not None:
-            for cid, folder, gk in iter_all_managed_folders(self._cache, self._policy):
-                if cid == case_id:
-                    return self._to_location(cid, folder, gk)
-            return None
-        folder = normalize_case_folder_path(case_folder)
-        for cid, f, gk in iter_all_managed_folders(self._cache, self._policy):
-            if folder_matches_case_tree(folder, f):
-                return self._to_location(cid, f, gk)
-        return None
+        if case_folder is not None:
+            case_id = self._store.case_id_at(case_folder)
+            if case_id is None:
+                return None
+        entry = self._store.find(case_id)
+        return None if entry is None else self._to_location(entry)
 
     def locate_all(self, *, external_key: str) -> list[CaseLocation]:
+        """Every case carrying ``external_key``.
+
+        Unlike ``locate()`` this is a full scan that reads each case's record —
+        external keys are not indexed. Use ``locate(case_id=…)`` on any hot path.
+        """
         hits: list[CaseLocation] = []
-        for cid, folder, gk in iter_all_managed_folders(self._cache, self._policy):
-            reader = FolderBackedCaseReader(folder)
-            if reader.case_external_key == external_key:
-                hits.append(self._to_location(cid, folder, gk))
+        for entry in self._store.iter_all():
+            if FolderBackedCaseReader(entry.case_folder).case_external_key == external_key:
+                hits.append(self._to_location(entry))
         return hits
 
     def reader(
@@ -877,33 +936,22 @@ class CaseManager:
             yield FolderBackedCaseReader(case.case_folder)
 
     def iter_live_bucket(self) -> Iterator[FolderBackedCaseReader]:
-        for _cid, folder, _gk in iter_case_folders_in_grouping(
-            self._cache, live_grouping_key(self._policy)
-        ):
-            yield FolderBackedCaseReader(folder)
+        """Every case at live status, whether or not the pool currently holds it."""
+        yield from self._readers_at(LIVE)
 
-    def iter_terminal(self, *, grouping_glob: str | None = None) -> Iterator[FolderBackedCaseReader]:
-        glob = grouping_glob or f"{self._policy.terminal_prefix}_*"
-        for grouping in self._cache.groupings(filters=[glob]):
-            gk = grouping.grouping_key
-            if gk is None:
-                continue
-            for _cid, folder, _gk in iter_case_folders_in_grouping(self._cache, gk):
-                yield FolderBackedCaseReader(folder)
+    def iter_terminal(self, *, partition: str | None = None) -> Iterator[FolderBackedCaseReader]:
+        """Archived cases, optionally narrowed to one archive partition."""
+        for entry in self._store.iter_by_status(TERMINATED):
+            if partition is None or entry.partition == partition:
+                yield FolderBackedCaseReader(entry.case_folder)
 
-    def iter_aberrant(self) -> Iterator[FolderBackedCaseReader]:
-        for _cid, folder, _gk in iter_case_folders_in_grouping(
-            self._cache, aberrant_grouping_key(self._policy)
-        ):
-            yield FolderBackedCaseReader(folder)
+    def iter_quarantine(self) -> Iterator[FolderBackedCaseReader]:
+        """Cases the manager has stopped driving. See ``support.quarantine``."""
+        yield from self._readers_at(QUARANTINED)
 
-    def iter_quarantine(self, *, grouping_glob: str = "quarantine_*") -> Iterator[FolderBackedCaseReader]:
-        for grouping in self._cache.groupings(filters=[grouping_glob]):
-            gk = grouping.grouping_key
-            if gk is None:
-                continue
-            for _cid, folder, _gk in iter_case_folders_in_grouping(self._cache, gk):
-                yield FolderBackedCaseReader(folder)
+    def _readers_at(self, status: str) -> Iterator[FolderBackedCaseReader]:
+        for entry in self._store.iter_by_status(status):
+            yield FolderBackedCaseReader(entry.case_folder)
 
     def on_escalation(self, callback: Callable[[CaseEscalation], None]) -> int:
         return self._escalations.register(callback)
@@ -956,15 +1004,14 @@ class CaseManager:
             kwargs.setdefault("choke_limits", self._policy.choke_limits)
         return cls(**kwargs)
 
-    def _to_location(self, case_id: str, folder: Path, grouping_key: tuple[str, ...]) -> CaseLocation:
-        reader = FolderBackedCaseReader(folder)
-        in_pool = any(c.case_id == case_id for c in self._driver)
+    def _to_location(self, entry: CaseEntry) -> CaseLocation:
+        reader = FolderBackedCaseReader(entry.case_folder)
         return CaseLocation(
-            case_id=case_id,
+            case_id=entry.case_id,
             external_key=reader.case_external_key,
-            case_folder=folder,
-            grouping_key=grouping_key,
-            in_pool=in_pool,
+            case_folder=entry.case_folder,
+            status=entry.status,
+            in_pool=any(c.case_id == entry.case_id for c in self._driver),
             terminal=reader.case_is_terminal,
         )
 
@@ -978,23 +1025,16 @@ class CaseManager:
             raise InvalidAddressingError()
         return self.locate(case_id=case_id, case_folder=case_folder)
 
-    def _case_id_exists(self, case_id: str) -> bool:
-        return self.locate(case_id=case_id) is not None
-
-    async def _move_to_aberrant(
-        self, case_id: str, folder: Path, reason: str, *, from_grouping: tuple[str, ...] | None = None
-    ) -> Path:
-        return await move_case_to_aberrant(
-            self._cache,
-            self._policy,
-            case_id,
-            folder,
-            reason,
-            from_grouping=from_grouping,
+    async def _quarantine(self, case_id: str, folder: Path, reason: str) -> Path | None:
+        landed = await quarantine_case(
+            self._store, self._manager_dir, case_id, folder, reason
         )
+        if landed is not None:
+            self._emit_notice("CASE_QUARANTINED", case_id, landed, reason)
+        return landed
 
-    def _emit_termination_failed(
-        self, kind: str, case_id: str, folder: Path, detail: str | None
+    def _emit_notice(
+        self, kind: str, case_id: str, folder: Path | None, detail: str | None = None
     ) -> None:
         self._escalations.emit_simple(kind, case_id, folder, detail)
 
@@ -1059,6 +1099,11 @@ class CaseManager:
 
     @staticmethod
     def _ensure_namespace_dirs(mgr_dir: Path, policy: CaseManagerPolicy) -> None:
+        """Create the manager's own protocol namespace — and nothing outside it.
+
+        Storage buckets are the case store's to create; this only owns what lives
+        under the manager namespace.
+        """
         mgr_dir.mkdir(parents=True, exist_ok=True)
         for sub in (
             policy.staging_subdir,
@@ -1066,8 +1111,9 @@ class CaseManager:
             policy.fire_mailbox_subdir,
             policy.adopt_mailbox_subdir,
             RESULTS_SUBDIR,
-            *(f"{TERMINATION_SUBDIR}/{leaf}" for leaf in ("pending", "failed", "done")),
-            *(f"{EJECT_SUBDIR}/{leaf}" for leaf in ("pending", "failed", "done")),
+            *(f"{TERMINATION_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
+            *(f"{EJECT_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
+            *(f"{QUARANTINE_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
         ):
             (mgr_dir / sub).mkdir(parents=True, exist_ok=True)
         for sub in ("intake", "malformed"):
@@ -1078,8 +1124,6 @@ class CaseManager:
         (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.shutdown_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         ensure_board_file(mgr_dir, enabled=policy.enable_fleet_status_board)
-        live = mgr_dir.parent / policy.live_bucket
-        live.mkdir(parents=True, exist_ok=True)
 
     def _write_manifest(self, *, running: bool = False, stopped: bool = False) -> None:
         rel = lambda p: str(Path(p).relative_to(self._cache_root))

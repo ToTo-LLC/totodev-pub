@@ -49,4 +49,5 @@ PLACEHOLDER_HEADER = (
 
 TERMINATION_SUBDIR = "termination"
 EJECT_SUBDIR = "eject"
+QUARANTINE_SUBDIR = "quarantine"
 RESULTS_SUBDIR = "results"

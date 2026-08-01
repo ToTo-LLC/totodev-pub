@@ -1,7 +1,20 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Escalation detection and handler dispatch (§8)."""
+"""Kind-tagged notices the manager publishes, and their handler dispatch.
+
+Two families share one channel: **problems** the operator should act on, and
+**lifecycle facts** about cases leaving the pool. One channel rather than two
+because subscribers filter by kind anyway, and a parallel registry would be more
+machinery for the same result.
+
+Departures are *announced, not catalogued*. The manager does not become the
+librarian of departed cases — an application that needs history subscribes and
+keeps its own record. Note what that implies: **delivery is at-most-once.**
+In-process pub/sub does not survive a crash, so a case that departs just before
+the process dies is never announced. That is acceptable for operator convenience
+and unacceptable as an audit log; do not use it as one.
+"""
 
 from __future__ import annotations
 
@@ -13,16 +26,39 @@ from typing import Any, Callable
 
 
 class CaseEscalationKind(str, enum.Enum):
+    # Problems.
     REPEATED_FAILURE = "REPEATED_FAILURE"
     STALLED = "STALLED"
     AUTO_BLOCKED = "AUTO_BLOCKED"
-    REAP_ANOMALY = "REAP_ANOMALY"
+    READMIT_ANOMALY = "READMIT_ANOMALY"
     ADOPT_REJECTED = "ADOPT_REJECTED"
     ADOPT_FAILED = "ADOPT_FAILED"
     TERMINATION_VERIFICATION_FAILED = "TERMINATION_VERIFICATION_FAILED"
     EJECT_FAILED = "EJECT_FAILED"
     MANAGER_UNRESPONSIVE = "MANAGER_UNRESPONSIVE"
     MAINTENANCE_ITEM_FAILED = "MAINTENANCE_ITEM_FAILED"
+
+    # Lifecycle: a case has left the pool. Normal events, not problems.
+    CASE_TERMINATED = "CASE_TERMINATED"
+    CASE_QUARANTINED = "CASE_QUARANTINED"
+    CASE_EJECTED = "CASE_EJECTED"
+
+    @property
+    def is_lifecycle(self) -> bool:
+        """True for departure announcements, False for problems.
+
+        The discriminator subscribers filter on — a paging handler wants the
+        problems and nothing else."""
+        return self in _LIFECYCLE_KINDS
+
+
+_LIFECYCLE_KINDS = frozenset(
+    {
+        CaseEscalationKind.CASE_TERMINATED,
+        CaseEscalationKind.CASE_QUARANTINED,
+        CaseEscalationKind.CASE_EJECTED,
+    }
+)
 
 
 @dataclass(frozen=True)

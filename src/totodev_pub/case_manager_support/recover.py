@@ -10,8 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from totodev_pub.case_manager_support.adopt import adopt_case_folder
-from totodev_pub.case_manager_support.layout import iter_case_folders_in_grouping, live_grouping_key
+from totodev_pub.case_manager_support.case_store import LIVE
 from totodev_pub.case_manager_support.shutdown import discard_stale_requests, shutdown_intake_dir
 from totodev_pub.case_manager_support.watchdog import log_recent_death_records
 from totodev_pub.folder_backed_case_support.pool_membership_journal import (
@@ -40,9 +39,9 @@ class RecoverReport:
     dropped_paths: list[Path] = field(default_factory=list)
     death_records_recent: int = 0
     shutdown_requests_discarded: int = 0
-    reap_readmitted: int = 0
-    reap_termination_enqueued: int = 0
-    reap_anomalies: list[str] = field(default_factory=list)
+    orphans_readmitted: int = 0
+    orphan_anomalies: list[str] = field(default_factory=list)
+    stale_pool_entries: list[str] = field(default_factory=list)
 
 
 async def recover_manager(manager: "CaseManager") -> RecoverReport:
@@ -55,12 +54,9 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
         shutdown_intake_dir(manager._manager_dir, manager._policy)
     )
 
-    live_paths = [
-        folder
-        for _cid, folder, _gk in iter_case_folders_in_grouping(
-            manager._cache, live_grouping_key(manager._policy)
-        )
-    ]
+    # One scan, not two: the store's own status index is the working set, so the
+    # manager does not run a second pass of its own over the same folders.
+    live_paths = [entry.case_folder for entry in manager._store.iter_by_status(LIVE)]
 
     journal_path = manager._policy.journal_path
     if journal_path:
@@ -96,8 +92,8 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     report.termination_pending = manager._count_termination_pending()
     report.eject_pending = manager._count_eject_pending()
 
-    reap_report = await manager.reap()
-    report.reap_readmitted = len(reap_report.readmitted)
-    report.reap_termination_enqueued = len(reap_report.termination_enqueued)
-    report.reap_anomalies = list(reap_report.anomalies)
+    readmit_report = await manager.readmit_orphans()
+    report.orphans_readmitted = len(readmit_report.readmitted)
+    report.orphan_anomalies = list(readmit_report.anomalies)
+    report.stale_pool_entries = list(readmit_report.stale_pool_entries)
     return report
