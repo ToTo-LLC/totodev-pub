@@ -23,12 +23,12 @@ permit budgeting, and ``_order_chokeables`` for the ordering hook
 (``SeniorityCasePoolDriver`` overrides it to preserve queue order instead).
 
 Implements ``CasePoolDriver`` with extensions: ``peek``, ``by_tier``, ``snapshot``,
-``find_by_external_key``, ``settle``. Each case has a ``_Slot`` (tier +
+``find_by_external_key``, ``settle``. Each case has a ``Slot`` (tier +
 ``skip_countdown``); ``_DORMANT`` (-1) marks terminal or in-flight slots. Beat loop:
 sweep → heartbeat slice → fixed-rate sleep (target period ``I0``, minus time already
 spent since the last beat, floored at ``BEAT_YIELD_FLOOR``; a sweep that launched
 work targets the shorter ``I0 * EAGER_BEAT_FRACTION`` while the system keeps up —
-see ``_TierPolicy``). No disk management —
+see ``TierPolicy``). No disk management —
 ``PoolMembershipJournal`` handles crash recovery separately.
 """
 
@@ -80,7 +80,7 @@ class Tier(enum.Enum):
 # Tier policy (promotion/demotion rules and tunables)
 
 @dataclass
-class _TierPolicy:
+class TierPolicy:
     """The promotion/demotion rules and timing tunables as data, so thresholds and the
     kind->effect mapping can be swapped or subclassed without touching the sweep.
 
@@ -120,7 +120,7 @@ class _TierPolicy:
         dead-end (no auto exits) starts WARM. (Terminal cases never enter rotation.)"""
         return Tier.HOT if case.case_is_advanceable else Tier.WARM
 
-    def reclassify(self, slot: "_Slot", result: AdvanceResult) -> None:
+    def reclassify(self, slot: "Slot", result: AdvanceResult) -> None:
         """Mutate ``slot`` (tier / reset_multiple / streaks) from the latest result.
 
         Only ever called for a NON-terminal case (terminal cases are made dormant by the
@@ -147,7 +147,7 @@ class _TierPolicy:
         accelerated = not slot.case.case_is_advanceable
         self._apply_noop_ladder(slot, accelerated=accelerated)
 
-    def _apply_noop_ladder(self, slot: "_Slot", *, accelerated: bool) -> None:
+    def _apply_noop_ladder(self, slot: "Slot", *, accelerated: bool) -> None:
         k_hot_to_warm = self.K_HOT_TO_WARM_ACCEL if accelerated else self.K_HOT_TO_WARM
         k_warm_to_cold = self.K_WARM_TO_COLD_ACCEL if accelerated else self.K_WARM_TO_COLD
         if slot.tier is Tier.HOT and slot.noop_streak >= k_hot_to_warm:
@@ -176,7 +176,7 @@ class _PendingFire:
 
 
 @dataclass
-class _Slot:
+class Slot:
     """Per-case scheduling state. Slots never move: inserted once, removed once;
     promote/demote is in-place mutation of ``tier`` / ``reset_multiple``."""
     case: FolderBackedCase
@@ -233,20 +233,20 @@ class BalancedCasePoolDriver(CasePoolDriver):
     def __init__(
         self,
         *,
-        policy: Optional[_TierPolicy] = None,
+        policy: Optional[TierPolicy] = None,
         concurrency_ceiling: int = 50,
         choke_limits: dict[str, int] | None = None,
     ) -> None:
         super().__init__()
-        self._policy = policy or _TierPolicy()
+        self._policy = policy or TierPolicy()
         self._ceiling = concurrency_ceiling
         self._choke_limits = dict(choke_limits or {})
         self._governor = ChokePermitGovernor(self._choke_limits)
         self._choke_validated_types: set[type] = set()
 
-        self._by_folder: dict[Path, _Slot] = {}
-        self._by_case_id: dict[str, _Slot] = {}
-        self._by_external_key: dict[str, list[_Slot]] = {}
+        self._by_folder: dict[Path, Slot] = {}
+        self._by_case_id: dict[str, Slot] = {}
+        self._by_external_key: dict[str, list[Slot]] = {}
 
         self._in_flight_count = 0
         self._stagger_counter = 0          # scatters same-tier items across phases
@@ -287,15 +287,15 @@ class BalancedCasePoolDriver(CasePoolDriver):
         self._index_add(slot)
         self._emit(CasePoolEventNames.ADMITTED, case)
 
-    def _make_slot(self, case: FolderBackedCase) -> _Slot:
+    def _make_slot(self, case: FolderBackedCase) -> Slot:
         if case.case_is_terminal:
-            return _Slot(
+            return Slot(
                 case=case, tier=Tier.COLD, reset_multiple=self._policy.M_COLD,
                 skip_countdown=_DORMANT, terminal=True,
             )
         tier = self._policy.admission_tier(case)
         reset_multiple = self._policy.base_multiple(tier)
-        return _Slot(
+        return Slot(
             case=case, tier=tier, reset_multiple=reset_multiple,
             skip_countdown=self._staggered_countdown(reset_multiple),
         )
@@ -378,7 +378,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
         self._sweep_preamble()
         launched = 0
         try:
-            chokeables: list[tuple[_Slot, frozenset[str]]] = []
+            chokeables: list[tuple[Slot, frozenset[str]]] = []
             for slot in list(self._by_folder.values()):
                 if slot.skip_countdown <= 0:          # dormant (terminal / in-flight)
                     continue
@@ -404,7 +404,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
             self._last_sweep_launches = launched
             self._sweep_end()
 
-    def _slot_choke_need(self, slot: _Slot) -> frozenset[str]:
+    def _slot_choke_need(self, slot: Slot) -> frozenset[str]:
         """The choke resources ``slot``'s next launch will need: its lead pending
         fire's trigger-specific need if one is queued, else the generic need for
         its current state."""
@@ -413,15 +413,15 @@ class BalancedCasePoolDriver(CasePoolDriver):
         return slot.case.case_type_spec().fsm.pending_chokes_for(slot.case.case_state)
 
     def _order_chokeables(
-        self, chokeables: list[tuple[_Slot, frozenset[str]]],
-    ) -> list[tuple[_Slot, frozenset[str]]]:
+        self, chokeables: list[tuple[Slot, frozenset[str]]],
+    ) -> list[tuple[Slot, frozenset[str]]]:
         """Order in which this beat's choke-needing due slots compete for the
         frozen budget. Default: longest-waiting-first, so no slot is starved by
         incidental sweep order. Subclasses may override for a different contract
         (e.g. queue/seniority order — see ``SeniorityCasePoolDriver``)."""
         return sorted(chokeables, key=lambda item: item[0].choke_wait_streak, reverse=True)
 
-    def _attempt_launch(self, slot: _Slot, needed: frozenset[str]) -> bool:
+    def _attempt_launch(self, slot: Slot, needed: frozenset[str]) -> bool:
         """Gate a due slot through the concurrency ceiling, then the choke budget,
         then launch it (via its pending fire if one is queued, else the generic
         advance). Tracks ``choke_wait_streak`` on decline/success so a later beat's
@@ -444,14 +444,14 @@ class BalancedCasePoolDriver(CasePoolDriver):
             slot.choke_wait_streak = 0
         return launched
 
-    def _launch_generic(self, slot: _Slot, grant: ChokeGrant) -> bool:
+    def _launch_generic(self, slot: Slot, grant: ChokeGrant) -> bool:
         if not self._live_or_evict(slot):
             self._choke_release(grant)
             return False
         self._launch_with_grant(slot, grant)
         return True
 
-    def _launch_pending_fire(self, slot: _Slot, grant: ChokeGrant) -> bool:
+    def _launch_pending_fire(self, slot: Slot, grant: ChokeGrant) -> bool:
         """Launch the head pending fire using an already-acquired ``grant``. Returns
         False (releasing the grant) if the case couldn't be kept live."""
         if not self._live_or_evict(slot):
@@ -478,17 +478,17 @@ class BalancedCasePoolDriver(CasePoolDriver):
     def _sweep_end(self) -> None:
         self._governor.end_sweep()
 
-    def _slot_prelaunch(self, slot: _Slot) -> None:
+    def _slot_prelaunch(self, slot: Slot) -> None:
         """Hook for subclasses (e.g. queue wake / requeue). No-op on tiered."""
 
-    def _launch_with_grant(self, slot: _Slot, grant: ChokeGrant) -> asyncio.Task:
+    def _launch_with_grant(self, slot: Slot, grant: ChokeGrant) -> asyncio.Task:
         return self._launch_case_step(slot, grant=grant)
 
     def _choke_release(self, grant: ChokeGrant | None) -> None:
         if grant is not None:
             self._governor.release(grant)
 
-    def _release_slot_grant(self, slot: _Slot) -> None:
+    def _release_slot_grant(self, slot: Slot) -> None:
         grant = slot.pending_grant
         if grant is not None:
             self._choke_release(grant)
@@ -496,7 +496,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
             slot.choked = None
 
     def _needed_chokes_for_fire(
-        self, slot: _Slot, trigger: str | None,
+        self, slot: Slot, trigger: str | None,
     ) -> frozenset[str]:
         fsm = slot.case.case_type_spec().fsm
         if trigger is not None:
@@ -587,7 +587,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
 
     def _launch_case_step(
         self,
-        slot: _Slot,
+        slot: Slot,
         trigger: str | None = None,
         trigger_kwargs: dict | None = None,
         *,
@@ -603,7 +603,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
         return task
 
     async def _run_case_step(
-        self, slot: _Slot, trigger: str | None, trigger_kwargs: dict | None,
+        self, slot: Slot, trigger: str | None, trigger_kwargs: dict | None,
     ) -> AdvanceResult:
         """Run one case step and perform ALL post-processing within the task, so that when
         the task completes the slot is fully reclassified and events have fired (keeps tests
@@ -636,7 +636,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
         self._complete_step(slot, result)
         return result
 
-    def _complete_step(self, slot: _Slot, result: AdvanceResult) -> None:
+    def _complete_step(self, slot: Slot, result: AdvanceResult) -> None:
         self._release_slot_grant(slot)
         self._finish_in_flight(slot)
         slot.last_result = result
@@ -681,10 +681,10 @@ class BalancedCasePoolDriver(CasePoolDriver):
             # More attached fires wait: don't wait a full tier interval.
             slot.skip_countdown = 1
 
-    def _slot_post_step(self, slot: _Slot, result: AdvanceResult) -> None:
+    def _slot_post_step(self, slot: Slot, result: AdvanceResult) -> None:
         """Hook for subclasses (e.g. requeue-on-wake). No-op on tiered."""
 
-    def _finish_in_flight(self, slot: _Slot) -> None:
+    def _finish_in_flight(self, slot: Slot) -> None:
         if slot.in_flight:
             slot.in_flight = False
             self._in_flight_count -= 1
@@ -699,7 +699,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
         if exc is not None:
             logger.debug("case-step task ended with exception: %r", exc)
 
-    def _settle_halt(self, slot: _Slot) -> None:
+    def _settle_halt(self, slot: Slot) -> None:
         self._fail_slot_fires(
             slot,
             FireRejectedError(slot.case.case_folder, reason="case is halted"),
@@ -719,7 +719,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
 
     def _complete_active_fire(
         self,
-        slot: _Slot,
+        slot: Slot,
         result: AdvanceResult | None,
         error: BaseException | None,
     ) -> None:
@@ -729,7 +729,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
         slot.active_fire = None
         self._invoke_fire_callback(rec.on_complete, result, error)
 
-    def _fail_slot_fires(self, slot: _Slot, error: BaseException) -> None:
+    def _fail_slot_fires(self, slot: Slot, error: BaseException) -> None:
         """Fail the in-flight attached fire (if any) and every pending record."""
         if slot.active_fire is not None:
             rec = slot.active_fire
@@ -744,7 +744,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
             if slot.active_fire is not None or slot.pending_fires:
                 self._fail_slot_fires(slot, error)
 
-    def _emit_advance_events(self, slot: _Slot, result: AdvanceResult) -> None:
+    def _emit_advance_events(self, slot: Slot, result: AdvanceResult) -> None:
         # Order: ALERTED → ADVANCED → FAILED → TERMINATED
         case = slot.case
         if result.alerted:
@@ -759,7 +759,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
 
     # -- Detach recovery + eviction ---------------------------------------
 
-    def _live_or_evict(self, slot: _Slot) -> bool:
+    def _live_or_evict(self, slot: Slot) -> bool:
         """Ensure ``slot.case`` is live; return False (and evict) if it can't be made live.
 
         Cheap non-raising precheck first (the common path); on detachment, rehydrate a fresh
@@ -780,7 +780,7 @@ class BalancedCasePoolDriver(CasePoolDriver):
         self._index_add(slot)
         return True
 
-    def _evict(self, slot: _Slot, *, reason: BaseException) -> None:
+    def _evict(self, slot: Slot, *, reason: BaseException) -> None:
         self._release_slot_grant(slot)
         folder = slot.case.case_folder
         self._fail_slot_fires(
@@ -971,13 +971,13 @@ class BalancedCasePoolDriver(CasePoolDriver):
 
     # -- Internal index maintenance ---------------------------------------
 
-    def _index_add(self, slot: _Slot) -> None:
+    def _index_add(self, slot: Slot) -> None:
         self._by_case_id[slot.case.case_id] = slot
         key = slot.case.case_external_key
         if key is not None:
             self._by_external_key.setdefault(key, []).append(slot)
 
-    def _index_remove(self, slot: _Slot) -> None:
+    def _index_remove(self, slot: Slot) -> None:
         self._by_case_id.pop(slot.case.case_id, None)
         key = slot.case.case_external_key
         if key is not None:

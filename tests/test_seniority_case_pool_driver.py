@@ -8,7 +8,7 @@ from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import (
     Tier,
-    _TierPolicy,
+    TierPolicy,
 )
 from totodev_pub.folder_backed_case_support.seniority_case_pool_driver import (
     SeniorityCasePoolDriver,
@@ -282,7 +282,7 @@ def test_fire_priority_wakes_on_release(tmp_path):
 def test_senior_hot_faster_than_junior_hot(tmp_path):
     """Front-N HOT slots get senior_hot_multiple; the rest keep policy.M_HOT."""
     async def body():
-        policy = _TierPolicy(M_HOT=5)
+        policy = TierPolicy(M_HOT=5)
         driver = SeniorityCasePoolDriver(
             policy=policy,
             choke_limits={},
@@ -314,7 +314,7 @@ def test_senior_hot_faster_than_junior_hot(tmp_path):
 def test_warm_ignores_seniority(tmp_path):
     """A front-of-queue WARM case keeps M_WARM — seniority never overrides WARM/COLD."""
     async def body():
-        policy = _TierPolicy(M_HOT=5, M_WARM=10)
+        policy = TierPolicy(M_HOT=5, M_WARM=10)
         driver = SeniorityCasePoolDriver(
             policy=policy,
             choke_limits={},
@@ -341,7 +341,7 @@ def test_warm_ignores_seniority(tmp_path):
 def test_demotion_drops_senior_hot_acceleration(tmp_path):
     """Demoting past K_HOT_TO_WARM automatically drops senior-hot override."""
     async def body():
-        policy = _TierPolicy(M_HOT=5, M_WARM=10)
+        policy = TierPolicy(M_HOT=5, M_WARM=10)
         driver = SeniorityCasePoolDriver(
             policy=policy,
             choke_limits={},
@@ -365,7 +365,7 @@ def test_demotion_drops_senior_hot_acceleration(tmp_path):
 def test_admission_time_senior_hotty(tmp_path):
     """Empty/small pools admit HOT cases as senior-hotty when len(pool) < N."""
     async def body():
-        policy = _TierPolicy(M_HOT=5)
+        policy = TierPolicy(M_HOT=5)
         driver = SeniorityCasePoolDriver(
             policy=policy,
             choke_limits={},

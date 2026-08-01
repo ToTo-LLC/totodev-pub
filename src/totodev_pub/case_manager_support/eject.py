@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Callable
 from pydantic import BaseModel
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
+from totodev_pub.case_manager_support.constants import EJECT_SUBDIR
 from totodev_pub.case_manager_support.layout import live_grouping_key, ref_path_for_case
 
 if TYPE_CHECKING:
@@ -54,7 +55,7 @@ class EjectResult:
 
 
 def eject_dir(manager_dir: Path) -> Path:
-    return manager_dir / "eject"
+    return manager_dir / EJECT_SUBDIR
 
 
 def eject_ticket_path(manager_dir: Path, case_id: str, *, subdir: str = "pending") -> Path:

@@ -42,6 +42,10 @@ class EscalationRegistry:
         self._handlers: dict[int, Callable[[CaseEscalation], None]] = {}
         self._next_id = 0
 
+    def __len__(self) -> int:
+        """Number of registered escalation handlers."""
+        return len(self._handlers)
+
     def register(self, callback: Callable[[CaseEscalation], None]) -> int:
         handle = self._next_id
         self._next_id += 1

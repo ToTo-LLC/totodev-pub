@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 class PurgeReport:
     folders_purged: list[Path] = field(default_factory=list)
     files_removed: list[str] = field(default_factory=list)
-    stragglers: list[Path] = field(default_factory=list)
 
 
 def run_redundant_purge(

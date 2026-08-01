@@ -21,7 +21,7 @@ from totodev_pub.folder_backed_case_support.exceptions import (
 from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import (
     BalancedCasePoolDriver,
     Tier,
-    _TierPolicy,
+    TierPolicy,
 )
 from totodev_pub.folder_backed_case_support.case_pool_driver import CasePoolEventNames
 
@@ -978,7 +978,7 @@ def test_yield_floor_clamped_to_small_periods(monkeypatch):
     effective floor is min(BEAT_YIELD_FLOOR, period)."""
     async def body():
         fake_time, recorder = _patch_pacing(monkeypatch)
-        driver = BalancedCasePoolDriver(policy=_TierPolicy(I0=0.01))
+        driver = BalancedCasePoolDriver(policy=TierPolicy(I0=0.01))
         await driver.advance()
         fake_time.now += 5.0
         await driver.advance()
@@ -1076,7 +1076,7 @@ def test_eager_beat_disabled_by_policy(tmp_path, monkeypatch):
     """EAGER_BEAT_FRACTION=1.0 disables the eager tempo even for launching sweeps."""
     async def body():
         fake_time, recorder = _patch_pacing(monkeypatch)
-        driver = BalancedCasePoolDriver(policy=_TierPolicy(EAGER_BEAT_FRACTION=1.0))
+        driver = BalancedCasePoolDriver(policy=TierPolicy(EAGER_BEAT_FRACTION=1.0))
         case = _make(AutoCase, tmp_path, "eager_off")
         driver.add(case)
         driver.boost(case.case_folder)

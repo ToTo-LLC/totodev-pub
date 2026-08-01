@@ -16,8 +16,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
 
@@ -28,15 +28,19 @@ from totodev_pub.case_manager_support.case_manager_config import CaseManagerConf
 from totodev_pub.case_manager_support.case_manager_manifest import CaseManagerManifest, ManifestPaths
 from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
 from totodev_pub.case_manager_support.constants import (
+    EJECT_SUBDIR,
     FLEET_STATUS_FILENAME,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     PULSE_INTERVAL_SECS,
+    RESULTS_SUBDIR,
+    TERMINATION_SUBDIR,
 )
 from totodev_pub.case_manager_support.eject import (
     EjectResult,
     EjectTicket,
     begin_eject,
+    eject_dir,
     eject_ticket_path,
     process_eject_ticket,
 )
@@ -82,6 +86,7 @@ from totodev_pub.case_manager_support.termination import (
     enqueue_termination_from_disk,
     process_pending_ticket,
     replay_pending,
+    termination_dir,
     ticket_exists,
 )
 from totodev_pub.folder_backed_case import FolderBackedCase, IncompatibleReclassError
@@ -238,18 +243,6 @@ class CaseManager:
             cls.provision(root, **overrides)
             return cls.attach(root, **overrides)
         raise CacheRootStateError(root)
-
-    @classmethod
-    def open_balanced(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
-        return cls.open(cache_root, **overrides)
-
-    @classmethod
-    def open_seniority(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
-        return cls.open(cache_root, driver_class=SeniorityCasePoolDriver, **overrides)
-
-    @classmethod
-    def open_inprocess(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
-        return cls.open(cache_root, enable_mailbox=False, **overrides)
 
     @classmethod
     def open_testing(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
@@ -448,42 +441,53 @@ class CaseManager:
             await asyncio.sleep(PULSE_INTERVAL_SECS)
 
     async def _maintenance_tick(self) -> None:
+        """One maintenance pass: termination tickets, eject tickets, mailbox, purge.
+
+        Every item is isolated. A single malformed ticket must degrade to "that
+        ticket is quarantined and escalated" rather than aborting the tick — an
+        aborted tick silently skips the mailbox drain, the purge, and the board
+        publish, and a ticket that fails the same way every tick would otherwise
+        exhaust the loop-failure budget and take the whole manager down.
+        """
         self._last_tick_started = time.monotonic()
         loop = asyncio.get_running_loop()
         for ticket_file in replay_pending(self._manager_dir):
-            ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
-            await loop.run_in_executor(
-                None,
-                lambda t=ticket, p=ticket_file: process_pending_ticket(
-                    t,
-                    p,
-                    cache=self._cache,
-                    policy=self._policy,
-                    manager_dir=self._manager_dir,
-                    move_to_aberrant=self._move_to_aberrant_sync,
-                    emit_escalation=self._emit_termination_failed,
-                ),
-            )
-        eject_pending = self._manager_dir / "eject" / "pending"
-        if eject_pending.exists():
-            for ticket_file in sorted(eject_pending.glob("*.yaml")):
-                ticket = EjectTicket.load(str(ticket_file), acquire_lock=False)
-                result = await process_eject_ticket(
+            with self._isolated_tick_item("termination ticket", ticket_file):
+                ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
+                await process_pending_ticket(
                     ticket,
                     ticket_file,
                     cache=self._cache,
                     policy=self._policy,
                     manager_dir=self._manager_dir,
+                    move_to_aberrant=self._move_to_aberrant,
+                    emit_escalation=self._emit_termination_failed,
                 )
-                if result and ticket.case_id in self._eject_waiters:
-                    fut = self._eject_waiters.pop(ticket.case_id)
-                    if not fut.done():
-                        fut.set_result(result)
-        await self._mailbox.maintenance_tick()
+        eject_pending = eject_dir(self._manager_dir) / "pending"
+        if eject_pending.exists():
+            for ticket_file in sorted(eject_pending.glob("*.yaml")):
+                with self._isolated_tick_item("eject ticket", ticket_file):
+                    ticket = EjectTicket.load(str(ticket_file), acquire_lock=False)
+                    result = await process_eject_ticket(
+                        ticket,
+                        ticket_file,
+                        cache=self._cache,
+                        policy=self._policy,
+                        manager_dir=self._manager_dir,
+                    )
+                    if result and ticket.case_id in self._eject_waiters:
+                        fut = self._eject_waiters.pop(ticket.case_id)
+                        if not fut.done():
+                            fut.set_result(result)
+        with self._isolated_tick_item("mailbox drain", self._manager_dir):
+            await self._mailbox.maintenance_tick()
         if self._policy.redundant_purge_terminal_after_secs is not None or (
             self._policy.redundant_purge_aberrant_after_secs is not None
         ):
-            await loop.run_in_executor(None, lambda: run_redundant_purge(self._cache, self._policy))
+            with self._isolated_tick_item("redundant purge", self._manager_dir):
+                await loop.run_in_executor(
+                    None, lambda: run_redundant_purge(self._cache, self._policy)
+                )
         self._publish_fleet_status_board()
         self._detect_escalations()
         self._last_tick_completed = time.monotonic()
@@ -605,7 +609,7 @@ class CaseManager:
             registry=self._registry,
             driver_add=self._driver.add,
             case_id_exists=self._case_id_exists,
-            move_to_aberrant=self._move_to_aberrant_sync,
+            move_to_aberrant=self._move_to_aberrant,
             correlation_id=correlation_id,
             expected_case_id=expected_case_id,
         )
@@ -922,11 +926,11 @@ class CaseManager:
         """Construct the driver from ``self._config`` (driver_class/driver_kwargs).
 
         Beat-tempo tunables (``I0``, ``EAGER_BEAT_FRACTION``, ``BEAT_YIELD_FLOOR``,
-        tier multiples, ...) live on the driver's ``_TierPolicy`` and are NOT part of
+        tier multiples, ...) live on the driver's ``TierPolicy`` and are NOT part of
         ``CaseManagerPolicy``. To override them, set ``driver_kwargs={"policy":
-        _TierPolicy(...)}`` on the ``CaseManagerConfig`` — see that class's
+        TierPolicy(...)}`` on the ``CaseManagerConfig`` — see that class's
         ``driver_kwargs`` field for details. Left unset, both concrete drivers run
-        with ``_TierPolicy()`` defaults, including the eager beat tempo enabled
+        with ``TierPolicy()`` defaults, including the eager beat tempo enabled
         (``EAGER_BEAT_FRACTION = 0.25``)."""
         cls = self._config.driver_class or BalancedCasePoolDriver
         kwargs = dict(self._config.driver_kwargs)
@@ -960,13 +964,12 @@ class CaseManager:
     def _case_id_exists(self, case_id: str) -> bool:
         return self.locate(case_id=case_id) is not None
 
-    def _move_to_aberrant_sync(
+    async def _move_to_aberrant(
         self, case_id: str, folder: Path, reason: str, *, from_grouping: tuple[str, ...] | None = None
     ) -> Path:
-        return move_case_to_aberrant(
+        return await move_case_to_aberrant(
             self._cache,
             self._policy,
-            self._manager_dir,
             case_id,
             folder,
             reason,
@@ -978,11 +981,27 @@ class CaseManager:
     ) -> None:
         self._escalations.emit_simple(kind, case_id, folder, detail)
 
-    def _replay_termination_pending(self) -> int:
+    @contextmanager
+    def _isolated_tick_item(self, what: str, source: Path) -> Iterator[None]:
+        """Contain one maintenance-tick item's failure. See ``_maintenance_tick``."""
+        try:
+            yield
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Maintenance tick: %s failed (%s); skipping", what, source)
+            self._escalations.emit_simple(
+                "MAINTENANCE_ITEM_FAILED", None, source, f"{what}: {exc!r}"
+            )
+
+    def _results_dir(self) -> Path:
+        return self._manager_dir / RESULTS_SUBDIR
+
+    def _count_termination_pending(self) -> int:
         return len(replay_pending(self._manager_dir))
 
-    def _replay_eject_pending(self) -> int:
-        pending = self._manager_dir / "eject" / "pending"
+    def _count_eject_pending(self) -> int:
+        pending = eject_dir(self._manager_dir) / "pending"
         return len(list(pending.glob("*.yaml"))) if pending.exists() else 0
 
     async def _scan_adopt_drop(self) -> dict[str, int]:
@@ -1017,14 +1036,9 @@ class CaseManager:
             policy.adopt_drop_subdir,
             policy.fire_mailbox_subdir,
             policy.adopt_mailbox_subdir,
-            "results",
-            "termination/pending",
-            "termination/failed",
-            "termination/done",
-            "eject/pending",
-            "eject/failed",
-            "eject/done",
-            "aberrant",
+            RESULTS_SUBDIR,
+            *(f"{TERMINATION_SUBDIR}/{leaf}" for leaf in ("pending", "failed", "done")),
+            *(f"{EJECT_SUBDIR}/{leaf}" for leaf in ("pending", "failed", "done")),
         ):
             (mgr_dir / sub).mkdir(parents=True, exist_ok=True)
         for sub in ("intake", "malformed"):
@@ -1053,10 +1067,10 @@ class CaseManager:
             shutdown_mailbox_intake=rel(
                 self._manager_dir / self._policy.shutdown_mailbox_subdir / "intake"
             ),
-            results=rel(self._manager_dir / "results"),
+            results=rel(self._results_dir()),
             adopt_drop=rel(self._manager_dir / self._policy.adopt_drop_subdir),
-            termination_pending=rel(self._manager_dir / "termination" / "pending"),
-            eject_pending=rel(self._manager_dir / "eject" / "pending"),
+            termination_pending=rel(termination_dir(self._manager_dir) / "pending"),
+            eject_pending=rel(eject_dir(self._manager_dir) / "pending"),
             staging=rel(self._manager_dir / self._policy.staging_subdir),
             fleet_status_board=rel(self._manager_dir / FLEET_STATUS_FILENAME),
         )
@@ -1080,14 +1094,14 @@ class CaseManager:
             self._cache_root,
             self._config.policy_path,
             driver_name,
-            len(self._registry._registry),
-            len(self._escalations._handlers),
+            len(self._registry),
+            len(self._escalations),
         )
 
     def _load_adopt_result(self, correlation_id: str | None) -> AdoptResult | None:
         if not correlation_id:
             return None
-        path = self._manager_dir / "results" / f"{correlation_id}.yaml"
+        path = self._results_dir() / f"{correlation_id}.yaml"
         if path.exists():
             try:
                 return AdoptResult.load(str(path), acquire_lock=False)
@@ -1096,7 +1110,7 @@ class CaseManager:
         return None
 
     def _publish_adopt_result(self, result: AdoptResult) -> None:
-        path = self._manager_dir / "results" / f"{result.correlation_id}.yaml"
+        path = self._results_dir() / f"{result.correlation_id}.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         result.save(str(path), retain_lock=False)
 

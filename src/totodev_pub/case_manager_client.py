@@ -18,11 +18,9 @@ from totodev_pub.case_manager_support.layout import CaseLocation, live_grouping_
 from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor, RequestHandle
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager import CaseManager
+from totodev_pub.folder_backed_case import IncompatibleReclassError
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
-from totodev_pub.folder_backed_case_support.exceptions import (
-    IncompatibleReclassError,
-    UnregisteredCaseTypeError,
-)
+from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
 
 
 class CaseManagerClient:

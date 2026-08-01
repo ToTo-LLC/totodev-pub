@@ -5,15 +5,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from pydantic import BaseModel, Field
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
+from totodev_pub.case_manager_support.constants import TERMINATION_SUBDIR
 from totodev_pub.case_manager_support.layout import (
     live_grouping_key,
     read_case_id_from_folder,
@@ -51,7 +53,7 @@ class TerminationTicket(BaseModel, FileMappedPydanticMixin):
 
 
 def termination_dir(manager_dir: Path) -> Path:
-    return manager_dir / "termination"
+    return manager_dir / TERMINATION_SUBDIR
 
 
 def ticket_path(manager_dir: Path, case_id: str, *, subdir: str = "pending") -> Path:
@@ -145,16 +147,22 @@ def enqueue_termination_from_disk(
     return True
 
 
-def process_pending_ticket(
+async def process_pending_ticket(
     ticket: TerminationTicket,
     ticket_file: Path,
     *,
     cache: "CachedFileFolders",
     policy: "CaseManagerPolicy",
     manager_dir: Path,
-    move_to_aberrant: Callable[[str, Path, str], None],
+    move_to_aberrant: Callable[..., Awaitable[Path]],
     emit_escalation: Callable[..., None] | None = None,
 ) -> None:
+    """Advance one termination ticket: verify, then relocate the case.
+
+    The relocation itself is filesystem work, so it is offloaded to a thread; the
+    aberrant fallback is awaited because registering a rescued case is an async
+    cache operation.
+    """
     case_id = ticket.case_id
     ref_path = ref_path_for_case(policy, case_id)
     src_grouping = live_grouping_key(policy)
@@ -174,7 +182,7 @@ def process_pending_ticket(
             ticket.state = TerminationState.FAILED
             write_ticket(ticket, termination_dir(manager_dir) / "failed" / f"{case_id}.yaml")
             ticket_file.unlink(missing_ok=True)
-            move_to_aberrant(case_id, folder, reason or "verification failed")
+            await move_to_aberrant(case_id, folder, reason or "verification failed")
             if emit_escalation:
                 emit_escalation("TERMINATION_VERIFICATION_FAILED", case_id, folder, reason)
         else:
@@ -184,11 +192,14 @@ def process_pending_ticket(
     ticket.state = TerminationState.MOVING
     write_ticket(ticket, ticket_file)
     try:
-        cache.move_file(
-            ref_path,
-            ref_path,
-            grouping_key=src_grouping,
-            new_grouping_key=dst_grouping,
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: cache.move_file(
+                ref_path,
+                ref_path,
+                grouping_key=src_grouping,
+                new_grouping_key=dst_grouping,
+            ),
         )
         ticket.state = TerminationState.COMPLETED
         done_path = termination_dir(manager_dir) / "done" / f"{case_id}.yaml"
@@ -202,7 +213,7 @@ def process_pending_ticket(
             ticket.state = TerminationState.FAILED
             write_ticket(ticket, termination_dir(manager_dir) / "failed" / f"{case_id}.yaml")
             ticket_file.unlink(missing_ok=True)
-            move_to_aberrant(case_id, folder, str(exc))
+            await move_to_aberrant(case_id, folder, str(exc))
             if emit_escalation:
                 emit_escalation("TERMINATION_VERIFICATION_FAILED", case_id, folder, str(exc))
         else:

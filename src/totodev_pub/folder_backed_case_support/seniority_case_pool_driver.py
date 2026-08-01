@@ -19,7 +19,7 @@ work does not jump ahead of the line.
 
 **Beat tempo is inherited, unchanged.** ``advance()`` is not overridden here, so
 the base driver's fixed-rate pacing applies as-is — including the eager beat
-(``_TierPolicy.EAGER_BEAT_FRACTION``, default ``0.25``): while a sweep keeps
+(``TierPolicy.EAGER_BEAT_FRACTION``, default ``0.25``): while a sweep keeps
 launching steps, the target period shrinks to a quarter of ``I0``, which is what
 lets a bursting senior case race through its auto chain faster than the nominal
 beat would allow. See ``BalancedCasePoolDriver.advance()`` for the full pacing
@@ -38,6 +38,7 @@ no-op.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,13 +49,13 @@ from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import (
     CasePeek,
     BalancedCasePoolDriver,
     Tier,
-    _Slot,
-    _TierPolicy,
+    Slot,
+    TierPolicy,
 )
 
 
 @dataclass
-class _SenioritySlot(_Slot):
+class _SenioritySlot(Slot):
     """Tiered slot plus queue wake tracking."""
 
     last_seen_state: str = ""
@@ -73,12 +74,18 @@ class SeniorityCasePoolDriver(BalancedCasePoolDriver):
 
     Optionally accelerates the front ``senior_count`` HOT slots via
     ``senior_hot_multiple`` (see module docstring). Defaults are a no-op.
+
+    **Scope: seniority governs scheduling, not shutdown.** It decides who wins
+    contested in-flight slots and choke permits while the pool is running.
+    ``stop()`` and ``settle()`` are inherited unchanged, so shutdown drains in
+    whatever order in-flight steps happen to finish — a case at the head of the
+    queue gets no priority on the way out.
     """
 
     def __init__(
         self,
         *,
-        policy: Optional[_TierPolicy] = None,
+        policy: Optional[TierPolicy] = None,
         concurrency_ceiling: int = 50,
         choke_limits: dict[str, int] | None = None,
         senior_count: int = 3,
@@ -94,55 +101,30 @@ class SeniorityCasePoolDriver(BalancedCasePoolDriver):
 
     def _is_senior(self, folder: Path) -> bool:
         """True when ``folder`` is among the front ``senior_count`` queue positions."""
-        return folder in set(itertools.islice(self._by_folder, self._senior_count))
+        return any(f == folder for f in itertools.islice(self._by_folder, self._senior_count))
 
-    def _apply_senior_hot(self, slot: _Slot) -> None:
+    def _apply_senior_hot(self, slot: Slot) -> None:
         """Override a HOT slot's cadence to the senior multiple when eligible."""
         if slot.tier is Tier.HOT and not slot.terminal:
             slot.reset_multiple = self._senior_hot_multiple
             slot.skip_countdown = max(1, self._senior_hot_multiple)
 
-    def _make_slot(self, case) -> _Slot:
-        slot = super()._make_slot(case)
-        # Case is not in ``_by_folder`` yet; its future position is ``len(_by_folder)``.
-        # When the pool is smaller than ``senior_count``, admit as a senior-hotty.
-        apply_senior = (
-            slot.tier is Tier.HOT
-            and not slot.terminal
-            and len(self._by_folder) < self._senior_count
-        )
-        if apply_senior:
-            reset_multiple = self._senior_hot_multiple
-            skip_countdown = max(1, self._senior_hot_multiple)
-        else:
-            reset_multiple = slot.reset_multiple
-            skip_countdown = slot.skip_countdown
-        return _SenioritySlot(
-            case=slot.case,
-            tier=slot.tier,
-            reset_multiple=reset_multiple,
-            skip_countdown=skip_countdown,
-            noop_streak=slot.noop_streak,
-            fail_streak=slot.fail_streak,
-            choke_wait_streak=slot.choke_wait_streak,
-            in_flight=slot.in_flight,
-            terminal=slot.terminal,
-            halt_requested=slot.halt_requested,
-            halt_settled=slot.halt_settled,
-            last_result=slot.last_result,
-            last_advanced_at=slot.last_advanced_at,
-            last_heartbeat_at=slot.last_heartbeat_at,
-            task=slot.task,
-            choked=slot.choked,
-            pending_grant=slot.pending_grant,
-            pending_fires=slot.pending_fires,
-            active_fire=slot.active_fire,
+    def _make_slot(self, case) -> _SenioritySlot:
+        base = super()._make_slot(case)
+        # Field-driven copy so a new Slot field propagates here automatically.
+        # dataclasses.replace() cannot serve: it rebuilds type(base), which is
+        # Slot, and cannot widen to the _SenioritySlot subclass.
+        senior = _SenioritySlot(
+            **{f.name: getattr(base, f.name) for f in dataclasses.fields(base)},
             last_seen_state=case.case_state,
         )
+        # Case is not in ``_by_folder`` yet; its future position is ``len(_by_folder)``.
+        # When the pool is smaller than ``senior_count``, admit as a senior-hotty.
+        if len(self._by_folder) < self._senior_count:
+            self._apply_senior_hot(senior)
+        return senior
 
-    def _slot_prelaunch(self, slot: _Slot) -> None:
-        if not isinstance(slot, _SenioritySlot):
-            return
+    def _slot_prelaunch(self, slot: _SenioritySlot) -> None:
         spec = slot.case.case_type_spec()
         if (
             slot.last_seen_state != slot.case.case_state
@@ -151,9 +133,7 @@ class SeniorityCasePoolDriver(BalancedCasePoolDriver):
             self._requeue_to_tail(slot)
         slot.last_seen_state = slot.case.case_state
 
-    def _slot_post_step(self, slot: _Slot, result: AdvanceResult) -> None:
-        if not isinstance(slot, _SenioritySlot):
-            return
+    def _slot_post_step(self, slot: _SenioritySlot, result: AdvanceResult) -> None:
         spec = slot.case.case_type_spec()
         if result.progressed and not spec.fsm.has_auto_exits(result.initial_state):
             self._requeue_to_tail(slot)
@@ -177,13 +157,28 @@ class SeniorityCasePoolDriver(BalancedCasePoolDriver):
 
     def _order_chokeables(self, chokeables):
         """Preserve queue order for choke contention too: the front of the line
-        (``_by_folder`` insertion order, which the walk already visited in order)
-        holds top claim on choke permits, same as it does for in-flight slots."""
+        holds top claim on choke permits, same as it does for in-flight slots.
+
+        Returning the list untouched is only correct while the base sweep builds
+        ``chokeables`` by walking ``_by_folder`` in order, so the list arrives
+        already in queue order. The assertion pins that invariant: if a future
+        sweep reorders or filters before this hook, seniority would silently stop
+        governing choke contention."""
+        order = {folder: i for i, folder in enumerate(self._by_folder)}
+        positions = [order.get(slot.case.case_folder, -1) for slot, _ in chokeables]
+        assert positions == sorted(positions), (
+            "chokeables arrived out of queue order; _order_chokeables can no "
+            "longer rely on the sweep's walk order"
+        )
         return chokeables
 
     def peek(self, case_folder: Path) -> SeniorityCasePeek:
         base = super().peek(case_folder)
-        queue_position = list(self._by_folder.keys()).index(case_folder)
+        # Position in an insertion-ordered queue is inherently a scan; this avoids
+        # copying the whole key list and stops at the match.
+        queue_position = next(
+            i for i, folder in enumerate(self._by_folder) if folder == case_folder
+        )
         return SeniorityCasePeek(
             case_folder=base.case_folder,
             case_id=base.case_id,

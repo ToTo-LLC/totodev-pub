@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from totodev_pub.case_manager_support.adopt import adopt_case_folder
-from totodev_pub.case_manager_support.escalation import CaseEscalationKind
 from totodev_pub.case_manager_support.layout import iter_case_folders_in_grouping, live_grouping_key
 from totodev_pub.case_manager_support.shutdown import discard_stale_requests, shutdown_intake_dir
 from totodev_pub.case_manager_support.watchdog import log_recent_death_records
@@ -29,8 +28,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RecoverReport:
     pool_restored: int = 0
-    termination_replayed: int = 0
-    eject_replayed: int = 0
+    termination_pending: int = 0
+    eject_pending: int = 0
     adopt_drop_seen: int = 0
     adopt_drop_admitted: int = 0
     adopt_drop_rejected: int = 0
@@ -91,8 +90,8 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
         report.adopt_drop_rejected = drop_report["rejected"]
         report.adopt_drop_skipped = drop_report["skipped"]
 
-    report.termination_replayed = manager._replay_termination_pending()
-    report.eject_replayed = manager._replay_eject_pending()
+    report.termination_pending = manager._count_termination_pending()
+    report.eject_pending = manager._count_eject_pending()
 
     await manager.reap()
     return report

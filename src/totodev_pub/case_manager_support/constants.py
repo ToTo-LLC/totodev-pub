@@ -50,4 +50,3 @@ PLACEHOLDER_HEADER = (
 TERMINATION_SUBDIR = "termination"
 EJECT_SUBDIR = "eject"
 RESULTS_SUBDIR = "results"
-ABERRANT_META_SUBDIR = "aberrant"

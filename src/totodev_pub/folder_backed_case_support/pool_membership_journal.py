@@ -323,7 +323,6 @@ class LeaseReclaimTimings:
     frozen lease is guaranteed to lapse within it."""
     freeze_observe_secs: float = LEASE_HEARTBEAT_THROTTLE_SECS + 5.0   # > one beat period (~15s)
     poll_secs: float = 2.0
-    deadline_margin_secs: float = 3.0
     max_total_secs: float = DEFAULT_LEASE_TTL_SECS * 2.0               # hard ceiling on the wait
 
 

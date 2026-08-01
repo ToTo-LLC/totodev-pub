@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -146,7 +146,7 @@ async def adopt_case_folder(
     registry: CaseTypeRegistry,
     driver_add: Callable[[FolderBackedCase], None],
     case_id_exists: Callable[[str], bool],
-    move_to_aberrant: Callable[[str, Path, str], Path],
+    move_to_aberrant: Callable[..., Awaitable[Path]],
     correlation_id: str | None = None,
     expected_case_id: str | None = None,
 ) -> AdoptResult:
@@ -210,7 +210,7 @@ async def adopt_case_folder(
         dest_slave = cache.get_slave_dir(grouping, ref_path) if cache.find_file(ref_path, grouping) else None
         if dest_slave is not None and dest_slave.exists():
             aberrant_path = str(
-                move_to_aberrant(case_id, dest_slave, str(exc), from_grouping=grouping)
+                await move_to_aberrant(case_id, dest_slave, str(exc), from_grouping=grouping)
             )
         return AdoptResult(
             status="error",
