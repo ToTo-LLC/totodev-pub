@@ -841,19 +841,17 @@ radius. **None of them block the Wave 1 merge** — every one predates this bran
 - [x] Adopt's failure path released the heartbeat lease before quarantining, so the handler can
       finish instead of raising a second, more confusing error.
 
-**KILLS THE FLEET**
+**KILLS THE FLEET — both fixed at the head of Wave 2**
 
-- [ ] `OPEN` — `_live_or_evict` (`balanced_case_pool_driver.py:773-774`) catches only
-      `FileNotFoundError`, `CaseAlreadyOpenError`, and `CaseTypeMismatchError`. A corrupt or truncated
-      `case_record.yaml` raises `ValidationError`, and an unregistered type raises
-      `UnregisteredCaseTypeError` — neither is caught. It is called mid-sweep, so the exception exits
-      `advance()` into `_manager_loop`, which is **outside** `_isolated_tick_item`. It repeats
-      deterministically every beat, so `_LOOP_FAILURE_LIMIT` is exhausted in three ticks. **One corrupt
-      record kills the whole fleet.**
-- [ ] `OPEN` — `_reconcile_terminal_in_pool()` and `_detect_escalations()` run in `_manager_loop` but
-      outside `_isolated_tick_item`. `begin_termination` does remove → detach → `write_ticket`; if the
-      ticket write raises (stale `.lock` sidecar), the case is out of the pool, detached, and
-      ticketless — stalled until restart — *and* the failure counts against the loop budget.
+- [x] `_live_or_evict` evicts on **any** rehydration failure, not just the three exception types it
+      used to name. It runs mid-sweep, outside `_isolated_tick_item`, and repeats deterministically
+      every beat — so one unreadable `case_record.yaml` used to exhaust `_LOOP_FAILURE_LIMIT` in three
+      ticks and take the whole fleet down. Eviction is the fail-safe: slot released, pending fires
+      rejected with the reason, `EVICTED` event emitted.
+- [x] `_reconcile_terminal_in_pool()` isolates **per case** and `_detect_escalations()` runs as an
+      isolated tick item. `begin_termination` is remove → detach → `write_ticket`; a ticket write that
+      raises still strands that one case, but no longer aborts the pass for the others or spends the
+      loop-failure budget.
 
 **STALLS A CASE PERMANENTLY**
 

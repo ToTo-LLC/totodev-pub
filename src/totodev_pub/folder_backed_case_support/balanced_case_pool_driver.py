@@ -58,7 +58,7 @@ from totodev_pub.folder_backed_case_support.choke_permit_governor import (
     ChokeGrant, ChokePermitGovernor,
 )
 from totodev_pub.folder_backed_case_support.exceptions import (
-    CaseAlreadyOpenError, CaseInFlightError, CaseTypeMismatchError,
+    CaseInFlightError,
     DetachedCaseError, FireRejectedError, OwnershipLostError, UnconfiguredChokeError,
 )
 
@@ -765,13 +765,20 @@ class BalancedCasePoolDriver(CasePoolDriver):
         Cheap non-raising precheck first (the common path); on detachment, rehydrate a fresh
         object and adopt it into the slot, keeping the slot — and the case's identity —
         stable. Eviction only when rehydration is impossible.
+
+        **Any** rehydration failure evicts. This runs mid-sweep, so an escaping
+        exception leaves ``advance()`` and lands in the caller's loop with no
+        per-case containment; because it would repeat deterministically every
+        beat, a single unreadable ``case_record.yaml`` would take the whole fleet
+        down. Eviction is the fail-safe: the slot is released, pending fires are
+        rejected with the reason, and an EVICTED event names the case.
         """
         if not slot.case.case_is_detached:
             return True
         folder = slot.case.case_folder
         try:
             fresh = case_type_registry.rehydrate(folder)
-        except (FileNotFoundError, CaseAlreadyOpenError, CaseTypeMismatchError) as err:
+        except Exception as err:
             self._evict(slot, reason=err)
             return False
         # Adopt the fresh object; re-point any derived indexes at the same slot.

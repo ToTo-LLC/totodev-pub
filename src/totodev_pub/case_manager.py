@@ -501,7 +501,8 @@ class CaseManager:
                     None, lambda: run_redundant_purge(self._cache, self._policy)
                 )
         self._publish_fleet_status_board()
-        self._detect_escalations()
+        with self._isolated_tick_item("escalation detection", self._manager_dir):
+            self._detect_escalations()
         self._last_tick_completed = time.monotonic()
 
     def _fleet_locate(self) -> Callable[[str], Any]:
@@ -550,9 +551,18 @@ class CaseManager:
         self._notify_fleet_board(event.case)
 
     def _reconcile_terminal_in_pool(self) -> int:
+        """Enqueue termination for terminal cases still sitting in the pool.
+
+        Isolated per case. ``begin_termination`` is remove → detach → write ticket;
+        a ticket write that raises leaves that one case out of the pool, detached,
+        and ticketless, which is bad enough on its own — it must not also abort the
+        pass for every other terminal case, nor spend the loop-failure budget.
+        """
         count = 0
         for case in self._driver.terminal_cases():
-            if not ticket_exists(self._manager_dir, case.case_id):
+            if ticket_exists(self._manager_dir, case.case_id):
+                continue
+            with self._isolated_tick_item("terminal reconcile", case.case_folder):
                 if self._fleet_board is not None:
                     self._fleet_board.note_terminal(case)
                     self._notify_fleet_board(case, force=True)
