@@ -116,6 +116,18 @@ _TIER2_KWARGS = frozenset(CaseManagerPolicy.tier2_field_names())
 _LOOP_FAILURE_LIMIT = 3
 
 
+def _first_supplied(*candidates: Any, default: Callable[[], Any]) -> Any:
+    """First non-None candidate, else ``default()``.
+
+    Truthiness is wrong for these collaborators — an empty pool driver is falsy
+    — so injection is decided on identity with None alone.
+    """
+    for candidate in candidates:
+        if candidate is not None:
+            return candidate
+    return default()
+
+
 class CaseManager:
     """Fleet coordinator composing cache, driver, registry, and protocol dirs."""
 
@@ -133,11 +145,19 @@ class CaseManager:
         self._registry = config.registry or case_type_registry
         if config.register_types:
             self._registry.register_case_types(*config.register_types)
-        self._cache = cache or config.cache_override or CachedFileFolders(
-            self._policy.grouping_pattern,
-            str(self._cache_root),
+        # Explicit `is not None`, never truthiness: a CasePoolDriver defines
+        # __len__, so a freshly constructed (empty) driver is falsy and `or`
+        # would silently discard the one the caller injected.
+        self._cache = _first_supplied(
+            cache,
+            config.cache_override,
+            default=lambda: CachedFileFolders(
+                self._policy.grouping_pattern, str(self._cache_root)
+            ),
         )
-        self._driver = driver or config.driver or self._build_default_driver()
+        self._driver = _first_supplied(
+            driver, config.driver, default=self._build_default_driver
+        )
         self._escalations = EscalationRegistry()
         self._mailbox = MailboxProcessor(self)
         self._running = False
