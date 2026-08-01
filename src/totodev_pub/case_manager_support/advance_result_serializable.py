@@ -15,6 +15,12 @@ from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 
 
 class AdvanceResultSerializable(BaseModel, FileMappedPydanticMixin):
+    """A fire's outcome, as a result file.
+
+    ``kind`` is the discriminator every result type carries, so a reader can tell
+    them apart by asking rather than by guessing from the shape of the text."""
+
+    kind: Literal["advance"] = "advance"
     status: Literal["completed", "rejected", "error"]
     initial_state: str
     final_state: str

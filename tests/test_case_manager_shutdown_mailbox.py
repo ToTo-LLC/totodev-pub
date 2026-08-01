@@ -1,11 +1,8 @@
 # Part of the totodev_pub library.
 
-import asyncio
-import logging
-
 import pytest
 
-from case_manager_test_utils import provision_manager
+from case_manager_test_utils import transport_for,  provision_manager
 from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.shutdown import ShutdownRequest
 
@@ -16,7 +13,7 @@ async def test_client_submit_shutdown_writes_structured_request(tmp_path):
     await manager.recover()
     client = CaseManagerClient(tmp_path / "cache")
     handle = client.submit_shutdown(graceful=True, reason="drain", only_if_fresh=False)
-    intake = manager._mailbox.shutdown_intake()
+    intake = transport_for(manager).shutdown_intake()
     files = [p for p in intake.iterdir() if not p.name.startswith(".")]
     assert len(files) == 1
     req = ShutdownRequest.load(str(files[0]), acquire_lock=False)
@@ -25,40 +22,18 @@ async def test_client_submit_shutdown_writes_structured_request(tmp_path):
     assert req.correlation_id == handle.correlation_id
 
 
-@pytest.mark.asyncio
-async def test_cooperative_pickup_invokes_registered_callback(tmp_path):
-    manager = provision_manager(tmp_path)
-    await manager.recover()
-    seen = []
-    manager.on_shutdown_request(seen.append)
-    await manager.start()
-    client = CaseManagerClient(tmp_path / "cache")
-    client.submit_shutdown(graceful=False, reason="stop now", only_if_fresh=False)
-    for _ in range(300):
-        if seen:
-            break
-        await asyncio.sleep(0.02)
-    await manager.stop()
-    assert seen and seen[0].graceful is False and seen[0].reason == "stop now"
-    # The request file was consumed at pickup.
-    intake = manager._mailbox.shutdown_intake()
-    assert not any(p for p in intake.iterdir() if not p.name.startswith("."))
+def test_the_manager_has_no_shutdown_surface(tmp_path):
+    """Shutdown is process control, so the fleet has no say in it.
 
-
-@pytest.mark.asyncio
-async def test_pickup_without_host_warns_and_discards(tmp_path, caplog):
+    A manager that nobody hosts cannot promise process-exit semantics, and used
+    to warn about exactly that at pickup time. Now it simply never sees the
+    request: the host polls the intake, always, and a manager without a host has
+    no pickup path to misuse. Pickup itself is covered end-to-end in
+    ``test_case_manager_host_serve.py``.
+    """
     manager = provision_manager(tmp_path)
-    await manager.recover()
-    await manager.start()
-    client = CaseManagerClient(tmp_path / "cache")
-    client.submit_shutdown(only_if_fresh=False)
-    with caplog.at_level(logging.WARNING):
-        for _ in range(300):
-            if any("no host is registered" in r.getMessage() for r in caplog.records):
-                break
-            await asyncio.sleep(0.02)
-    await manager.stop()
-    assert any("no host is registered" in r.getMessage() for r in caplog.records)
+    assert not hasattr(manager, "on_shutdown_request")
+    assert not hasattr(manager, "_notify_shutdown_request")
 
 
 @pytest.mark.asyncio

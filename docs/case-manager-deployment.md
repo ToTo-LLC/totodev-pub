@@ -4,24 +4,38 @@ How to host, supervise, and shut down a `CaseManager` process. For what a
 CaseManager *is*, see `src/totodev_pub/case_manager.py`; for the host contract in
 code, see `case_manager_support/case_manager_host.py`.
 
-## The host
+## Three layers
 
-One process hosts one manager. `serve()` owns the whole lifecycle — recovery,
-start, signals, exit codes, and the watchdog — so the host program is small:
+A managed fleet runs as three things, and knowing which one owns what is most of
+operating it:
+
+| Layer | Owns |
+|---|---|
+| **Host** (`serve()`) | The process: signals, exit codes, the watchdog, **and shutdown** |
+| **Signaling adapter** | The file-drop request transport: fire, adopt, reclassify, results |
+| **`CaseManager`** | The fleet. No transport, no process lifecycle |
+
+`serve()` sequences all of it, so the host program stays small:
 
 ```python
 import asyncio
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_support.case_manager_host import serve
+from totodev_pub.case_manager_support.signaling_adapter import SignalingAdapter
 from myapp.cases import InquiryCase
 
 manager = CaseManager.open("/data/inquiries", register_types=[InquiryCase])
-asyncio.run(serve(manager))
+asyncio.run(serve(manager, adapter=SignalingAdapter(manager)))
 ```
 
+**Omit `adapter=` and the process serves no requests** — no fire mailbox, no
+adopt mailbox, no reclassify mailbox. That is a supported shape, not a degraded
+one: it is what an embedded host looks like, driving the manager through its own
+methods. Shutdown still works, because the host owns it.
+
 `serve()` requires a freshly constructed manager. Do not call `recover()` or
-`start()` yourself — it sequences those, and raises `ValueError` if they have
-already run.
+`start()` yourself — it sequences those (and the adapter's own recovery), and
+raises `ValueError` if they have already run.
 
 ## Exit codes
 
@@ -68,8 +82,10 @@ Two properties worth knowing:
 - **Shutdown requests are never honored across a restart.** `recover()` discards
   any request it finds at startup and logs it. A request that arrives while the
   process is down is not queued — resubmit it.
-- **The shutdown mailbox is polled even when the request mailboxes are off.**
-  `enable_mailbox=False` disables fire/adopt/reclassify intake, not shutdown.
+- **Shutdown is always available.** The host polls for it, not the fleet and not
+  the adapter, so it works with no adapter attached, with `enable_mailbox=False`,
+  and with the watchdog off. Asking a process to stop is process control, and
+  the layer that owns exit codes owns it.
 
 ### Grace periods must nest
 
@@ -96,7 +112,7 @@ as a clean exit.
 | `pulse_stuck` — the event loop stopped pulsing | 5s | exit 70 |
 | `loop_task_dead` — the manager loop task died | immediate | exit 70 |
 | `loop_failure` — 3 consecutive tick failures | immediate | exit 70 |
-| `mailbox_neglect` — oldest intake file unserved | `max(10 × maintenance_interval, 30s)` | exit 70 |
+| `mailbox_neglect` — oldest request unserved by the adapter | `max(10 × maintenance_interval, 30s)` | exit 70 |
 | `tick_slow` — a tick is taking too long | `min(lease TTL, manifest_stale_secs) / 2` | **alarm only, always** |
 
 `tick_slow` never kills, regardless of `watchdog_action` — a slow tick is a
@@ -104,6 +120,10 @@ symptom, not a wedge.
 
 **`watchdog_action="alarm_only"`** keeps the diagnosis (escalation + traceback
 dump) but never exits. Useful when an external supervisor owns remediation.
+
+**`mailbox_neglect` needs an adapter.** With no request transport attached
+nothing owns an intake backlog, so the check is structurally absent rather than
+merely disabled — there is nothing that could be neglected.
 
 **`watchdog_enabled=False`** gives up detection — no pulse, task-death, or
 mailbox-neglect monitoring — but *not* the fail-loud contract: three consecutive

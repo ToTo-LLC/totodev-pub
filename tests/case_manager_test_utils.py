@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from totodev_pub.case_manager import CaseManager
+from totodev_pub.case_manager_support.mailbox import MailboxTransport
+from totodev_pub.case_manager_support.signaling_adapter import SignalingAdapter
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
@@ -71,6 +73,24 @@ def seed_detached_case(
     case = case_cls.create_case_in_folder(folder, external_key=external_key)
     case.case_detach()
     return case
+
+
+def transport_for(manager: CaseManager) -> MailboxTransport:
+    """The mailbox layout for a manager, without attaching an adapter to it."""
+    return MailboxTransport(manager._manager_dir, manager._policy)
+
+
+def attach_adapter(manager: CaseManager) -> SignalingAdapter:
+    """Give a manager a request transport, the way serve() does.
+
+    The fleet no longer knows what a mailbox is, so a test that exercises the
+    file-drop protocol has to compose the two explicitly — which is the point of
+    the extraction, not an inconvenience of it.
+    """
+    adapter = SignalingAdapter(manager)
+    adapter.recover()
+    adapter.attach()
+    return adapter
 
 
 async def adopt_into_live(manager: CaseManager, staging: Path) -> FolderBackedCase:

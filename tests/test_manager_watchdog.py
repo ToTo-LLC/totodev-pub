@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from case_manager_test_utils import provision_manager
+from case_manager_test_utils import transport_for,  provision_manager
 from totodev_pub.case_manager_support.shutdown import shutdown_intake_dir, write_shutdown_request
 from totodev_pub.case_manager_support.watchdog import (
     ManagerWatchdog,
@@ -251,7 +251,8 @@ async def test_mailbox_neglect_kills_when_intake_goes_unserved(tmp_path):
     escalations = []
     manager.on_notice(escalations.append)
 
-    intake = manager._mailbox.fire_intake()
+    transport = transport_for(manager)
+    intake = transport.fire_intake()
     intake.mkdir(parents=True, exist_ok=True)
     stale = intake / "stale.yaml"
     stale.write_text("correlation_id: x\n", encoding="utf-8")
@@ -264,7 +265,12 @@ async def test_mailbox_neglect_kills_when_intake_goes_unserved(tmp_path):
     manager._run_task = None
     manager._last_pulse = time.monotonic()
     exit_fn = ExitRecorder()
-    dog = _make_watchdog(manager, asyncio.get_running_loop(), exit_fn)
+    dog = _make_watchdog(
+        manager,
+        asyncio.get_running_loop(),
+        exit_fn,
+        oldest_request_age=transport.oldest_request_age_secs,
+    )
     dog.arm()
     dog._armed_at = time.monotonic() - 99.0
     try:
@@ -298,7 +304,7 @@ async def test_fresh_intake_does_not_alarm(tmp_path):
     # short threshold on its own.
     manager = provision_manager(tmp_path, watchdog_mailbox_stale_secs=5.0)
     await manager.recover()
-    intake = manager._mailbox.fire_intake()
+    intake = transport_for(manager).fire_intake()
     intake.mkdir(parents=True, exist_ok=True)
     for i in range(20):
         (intake / f"req{i}.yaml").write_text("correlation_id: x\n", encoding="utf-8")
@@ -322,15 +328,23 @@ async def test_fresh_intake_does_not_alarm(tmp_path):
 
 
 def test_mailbox_neglect_disabled_by_config(tmp_path):
-    """Two independent ways to switch the check off, both pure construction."""
+    """Two independent ways to switch the check off, both pure construction.
+
+    The second is now structural rather than a flag: with no request transport
+    attached, nothing owns an intake backlog, so there is no such thing as
+    neglecting one.
+    """
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     loop = asyncio.new_event_loop()
     try:
         zeroed = provision_manager(tmp_path / "a", watchdog_mailbox_stale_secs=0)
-        assert _make_watchdog(zeroed, loop, ExitRecorder())._mailbox_stale_secs is None
+        dog = _make_watchdog(
+            zeroed, loop, ExitRecorder(), oldest_request_age=lambda: 999.0
+        )
+        assert dog._mailbox_stale_secs is None
 
-        no_mailbox = provision_manager(tmp_path / "b", enable_mailbox=False)
-        assert _make_watchdog(no_mailbox, loop, ExitRecorder())._mailbox_stale_secs is None
+        no_adapter = provision_manager(tmp_path / "b")
+        assert _make_watchdog(no_adapter, loop, ExitRecorder())._mailbox_stale_secs is None
     finally:
         loop.close()

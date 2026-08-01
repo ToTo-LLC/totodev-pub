@@ -129,6 +129,7 @@ class ManagerWatchdog:
         loop: asyncio.AbstractEventLoop,
         exit_code: int,
         on_shutdown_request: Callable[[ShutdownDirective], None] | None = None,
+        oldest_request_age: Callable[[], float | None] | None = None,
         action: str | None = None,
         stop_grace_secs: float = 30.0,
         check_interval_secs: float = 1.0,
@@ -138,6 +139,7 @@ class ManagerWatchdog:
         self._loop = loop
         self._exit_code = exit_code
         self._on_shutdown_request = on_shutdown_request
+        self._oldest_request_age = oldest_request_age
         self._stop_grace_secs = stop_grace_secs
         self._check_interval = check_interval_secs
         self._exit_fn = exit_fn
@@ -151,8 +153,10 @@ class ManagerWatchdog:
             else max(10 * PULSE_INTERVAL_SECS, 5.0)
         )
         raw_mailbox = policy.watchdog_mailbox_stale_secs
-        if not policy.enable_mailbox or raw_mailbox == 0:
-            self._mailbox_stale_secs: float | None = None  # check disabled
+        if oldest_request_age is None or raw_mailbox == 0:
+            # No transport attached, or the check switched off: nothing owns an
+            # intake backlog, so there is no such thing as neglecting one.
+            self._mailbox_stale_secs: float | None = None
         elif raw_mailbox is None:
             self._mailbox_stale_secs = max(10 * policy.maintenance_interval_secs, 30.0)
         else:
@@ -266,14 +270,14 @@ class ManagerWatchdog:
             )
             return
 
-        # 4. Mailbox neglect — loop ticking but the mailbox processor broken.
+        # 4. Request neglect — loop ticking but the signaling adapter broken.
         #    Excludes the shutdown mailbox (a command with its own pickup path,
         #    not a backlog). A large-but-fresh backlog does not alarm.
         if (
             self._mailbox_stale_secs is not None
             and now - armed_at > self._mailbox_stale_secs
         ):
-            oldest_age = self._oldest_intake_age()
+            oldest_age = self._oldest_intake_age()   # injected; see __init__
             if oldest_age is not None and oldest_age > self._mailbox_stale_secs:
                 self._ladder(
                     WatchdogDetection.MAILBOX_NEGLECT,
@@ -298,25 +302,18 @@ class ManagerWatchdog:
                 self._emit_notice(f"tick_slow: {detail}", prefer_threadsafe=True)
 
     def _oldest_intake_age(self) -> float | None:
-        mailbox = self._manager._mailbox
-        oldest_mtime: float | None = None
-        for intake in (
-            mailbox.fire_intake(),
-            mailbox.adopt_intake(),
-            mailbox.reclassify_intake(),
-        ):
-            if not intake.exists():
-                continue
-            for path in intake.glob("*.yaml"):  # non-hidden by construction
-                try:
-                    mtime = path.stat().st_mtime
-                except OSError:
-                    continue
-                if oldest_mtime is None or mtime < oldest_mtime:
-                    oldest_mtime = mtime
-        if oldest_mtime is None:
+        """Age of the oldest unserved request, from whoever owns the transport.
+
+        Injected rather than read off the manager: the manager no longer owns a
+        mailbox, and a watchdog that knew how to find one would put the layering
+        back the way it was."""
+        if self._oldest_request_age is None:
             return None
-        return time.time() - oldest_mtime
+        try:
+            return self._oldest_request_age()
+        except Exception:
+            logger.warning("Could not read the request backlog age", exc_info=True)
+            return None
 
     # -- the kill ladder ---------------------------------------------------
 

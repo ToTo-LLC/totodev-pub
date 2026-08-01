@@ -2,7 +2,7 @@
 
 import pytest
 
-from case_manager_test_utils import TicketCase, adopt_into_live, provision_manager, seed_detached_case
+from case_manager_test_utils import attach_adapter, transport_for, TicketCase, adopt_into_live, provision_manager, seed_detached_case
 
 
 @pytest.mark.asyncio
@@ -33,10 +33,21 @@ async def test_is_idle(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_is_idle_false_with_pending_intake(tmp_path):
+async def test_pending_intake_is_the_adapters_half_of_idle(tmp_path):
+    """The manager can no longer see unserved requests, and should not pretend to.
+
+    "Is the whole system idle" is now a composite: an empty pool *and* an empty
+    intake. Each half is answered by whoever owns it.
+    """
     manager = provision_manager(tmp_path)
     await manager.recover()
-    intake = manager._mailbox.fire_intake()
+    adapter = attach_adapter(manager)
+    assert manager.is_idle is True
+    assert adapter.is_idle is True
+
+    intake = adapter.transport.fire_intake()
     intake.mkdir(parents=True, exist_ok=True)
     (intake / "req.yaml").write_text("pending: true\n", encoding="utf-8")
-    assert manager.is_idle is False
+
+    assert adapter.is_idle is False, "the adapter sees the backlog"
+    assert manager.is_idle is True, "the fleet has nothing pooled, and says only that"

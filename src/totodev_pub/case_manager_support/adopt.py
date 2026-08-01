@@ -40,6 +40,7 @@ class AdoptRejectReason(str, Enum):
 
 
 class AdoptResult(BaseModel, FileMappedPydanticMixin):
+    kind: Literal["adopt"] = "adopt"
     status: Literal["completed", "rejected", "error"]
     case_id: str
     case_folder: str | None = None

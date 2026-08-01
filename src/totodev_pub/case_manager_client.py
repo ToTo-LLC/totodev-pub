@@ -16,7 +16,7 @@ from totodev_pub.case_manager_support.fleet_status import FleetStatusRow, read_b
 from totodev_pub.case_manager_support.fleet_status_watcher import FleetStatusBoardWatcher
 from totodev_pub.case_manager_support.case_store import LIVE
 from totodev_pub.case_manager_support.layout import CaseLocation, policy_manager_dir
-from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor, RequestHandle
+from totodev_pub.case_manager_support.mailbox import MailboxTransport, RequestHandle
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.folder_backed_case import IncompatibleReclassError
@@ -30,7 +30,7 @@ class CaseManagerClient:
     def __init__(self, cache_root: str | Path) -> None:
         self._cache_root = Path(cache_root).resolve()
         self._manager = CaseManager.attach(self._cache_root)
-        self._mailbox = MailboxProcessor(self._manager)
+        self._transport = MailboxTransport(self._manager._manager_dir, self._manager._policy)
 
     @classmethod
     def from_manifest(cls, manifest_path: str | Path) -> "CaseManagerClient":
@@ -98,7 +98,7 @@ class CaseManagerClient:
         only_if_fresh: bool = True,
     ) -> RequestHandle:
         self._check_fresh(only_if_fresh)
-        return self._mailbox.submit_fire(
+        return self._transport.submit_fire(
             case_id=case_id,
             case_folder=case_folder,
             trigger=trigger,
@@ -153,7 +153,7 @@ class CaseManagerClient:
                 target_type_name=name,
                 strict=(preflight == "strict"),
             )
-        return self._mailbox.submit_reclassify(
+        return self._transport.submit_reclassify(
             case_id=case_id,
             case_folder=case_folder,
             target_type=name,
@@ -184,10 +184,10 @@ class CaseManagerClient:
             raise IncompatibleReclassError(reader.case_state, target_cls.__name__)
 
     def poll_result(self, handle: RequestHandle):
-        return self._mailbox.poll_result(handle)
+        return self._transport.poll_result(handle)
 
     async def wait_result(self, handle: RequestHandle, *, timeout: float = 30.0):
-        return await self._mailbox.wait_result(handle, timeout=timeout)
+        return await self._transport.wait_result(handle, timeout=timeout)
 
     def fleet_status_board_path(self) -> Path:
         """The board's known location (manifest-advertised when available)."""
@@ -227,7 +227,7 @@ class CaseManagerClient:
         only_if_fresh: bool = True,
     ) -> RequestHandle:
         self._check_fresh(only_if_fresh)
-        return self._mailbox.submit_adopt(
+        return self._transport.submit_adopt(
             source_folder=source_folder,
             expected_case_id=expected_case_id,
             correlation_id=correlation_id,
@@ -263,7 +263,7 @@ class CaseManagerClient:
         On the immediate path the handle may never resolve — the manifest's
         ``stopped_at`` is the real confirmation either way."""
         self._check_fresh(only_if_fresh)
-        return self._mailbox.submit_shutdown(graceful=graceful, reason=reason)
+        return self._transport.submit_shutdown(graceful=graceful, reason=reason)
 
     async def wait_adopt(self, handle: RequestHandle, *, timeout: float = 60.0):
-        return await self._mailbox.wait_result(handle, timeout=timeout)
+        return await self._transport.wait_result(handle, timeout=timeout)

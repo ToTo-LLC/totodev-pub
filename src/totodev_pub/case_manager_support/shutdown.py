@@ -1,9 +1,12 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Shutdown-request protocol (§6) — shared by the mailbox processor (cooperative
-pickup), the watchdog (wedged pickup), and CaseManagerClient.submit_shutdown().
-One parser, one precedence rule, zero drift.
+"""Shutdown-request protocol (§6) — shared by the host (cooperative pickup), the
+watchdog (wedged pickup), and CaseManagerClient.submit_shutdown(). One parser,
+one precedence rule, zero drift.
+
+Shutdown is process control, not fleet mail, which is why the host owns pickup
+and serves it whether or not any request transport exists.
 
 Protocol: ANY non-hidden file in the shutdown mailbox's intake/ dir triggers a
 shutdown. Parsed file content is authoritative; the SIGTERM filename token
@@ -19,6 +22,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -45,7 +49,7 @@ class ShutdownAck(BaseModel, FileMappedPydanticMixin):
     poll_result/wait_result resolve normally. On the immediate path the handle
     may never resolve — the manifest's stopped_at is the real confirmation."""
 
-    kind: str = "shutdown"
+    kind: Literal["shutdown"] = "shutdown"
     correlation_id: str
     acknowledged_at: str
     graceful: bool
@@ -105,7 +109,7 @@ def write_shutdown_request(
     reason: str | None = None,
     correlation_id: str | None = None,
 ) -> tuple[str, Path]:
-    """Structured writer (used by MailboxProcessor.submit_shutdown). Returns
+    """Structured writer (used by MailboxTransport.submit_shutdown). Returns
     (correlation_id, final_path)."""
     intake.mkdir(parents=True, exist_ok=True)
     corr = correlation_id or str(uuid.uuid4())

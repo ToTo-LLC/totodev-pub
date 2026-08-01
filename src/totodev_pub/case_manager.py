@@ -74,7 +74,6 @@ from totodev_pub.case_manager_support.layout import (
     assert_case_folder_movable,
     policy_manager_dir,
 )
-from totodev_pub.case_manager_support.mailbox.processor import MailboxProcessor
 from totodev_pub.case_manager_support.purge import PurgeReport, run_redundant_purge
 from totodev_pub.case_manager_support.quarantine import (
     QuarantineTicket,
@@ -85,7 +84,6 @@ from totodev_pub.case_manager_support.quarantine import (
 )
 from totodev_pub.case_manager_support.readmit import OrphanReadmitReport, readmit_orphans
 from totodev_pub.case_manager_support.recover import RecoverReport, recover_manager
-from totodev_pub.case_manager_support.shutdown import ShutdownDirective
 from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager_support.ticket_attempts import TicketAttemptLedger
 from totodev_pub.case_manager_support.termination import (
@@ -163,12 +161,14 @@ class CaseManager:
         self._notices = NoticeRegistry()
         # Attempts at tickets that cannot record their own. See ticket_attempts.
         self._ticket_attempts = TicketAttemptLedger()
-        self._mailbox = MailboxProcessor(self)
+        # Transport is not the fleet's business. Anything that wants to be driven
+        # by the tick registers here; the manager knows only that it is a
+        # coroutine. See case_manager_support/signaling_adapter.py.
+        self._maintenance_cbs: list[Callable[[], Awaitable[None]]] = []
         self._running = False
         self._stopping = False
         self._run_task: asyncio.Task[None] | None = None
         self._loop_failure_cb: Callable[[BaseException], None] | None = None
-        self._shutdown_request_cb: Callable[[ShutdownDirective], None] | None = None
         self._terminated_handle: Any = None
         self._eject_waiters: dict[str, asyncio.Future[EjectResult]] = {}
         # §2 liveness stamps (read by the watchdog thread; write-only here).
@@ -307,20 +307,13 @@ class CaseManager:
 
     @property
     def is_idle(self) -> bool:
-        """No pooled cases and no pending mailbox intake (§8 self-completion).
+        """No pooled cases — the fleet has nothing left to drive.
 
-        Does not include the shutdown mailbox — a shutdown file may arrive after
-        an idle check but before the process exits."""
-        if len(self._driver) > 0:
-            return False
-        for intake in (
-            self._mailbox.fire_intake(),
-            self._mailbox.adopt_intake(),
-            self._mailbox.reclassify_intake(),
-        ):
-            if intake.exists() and any(intake.glob("*.yaml")):
-                return False
-        return True
+        This is only *half* of "is the whole system idle". A signaling adapter
+        may be holding requests that have not reached the pool yet, and the
+        manager can no longer see them. The host composes the two; a caller
+        asking this directly is asking about the fleet alone."""
+        return len(self._driver) == 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -479,6 +472,9 @@ class CaseManager:
         """
         self._last_tick_started = time.monotonic()
         loop = asyncio.get_running_loop()
+        for callback in self._maintenance_cbs:
+            with self._isolated_tick_item("maintenance callback", self._manager_dir):
+                await callback()
         for ticket_file in replay_pending(self._manager_dir):
             with self._isolated_tick_item("termination ticket", ticket_file):
                 await self._drive_ticket(
@@ -496,8 +492,6 @@ class CaseManager:
                     await self._drive_ticket(
                         "eject", ticket_file, self._advance_eject_ticket
                     )
-        with self._isolated_tick_item("mailbox drain", self._manager_dir):
-            await self._mailbox.maintenance_tick()
         if self._policy.redundant_purge_terminal_after_secs is not None or (
             self._policy.redundant_purge_aberrant_after_secs is not None
         ):
@@ -760,12 +754,14 @@ class CaseManager:
         self,
         source_folder: Path,
         *,
-        correlation_id: str | None = None,
         expected_case_id: str | None = None,
     ) -> AdoptResult:
-        existing = self._load_adopt_result(correlation_id)
-        if existing is not None:
-            return existing
+        """Take a detached case folder into managed storage and the live pool.
+
+        Carries no correlation id: de-duplicating a re-delivered request is
+        transport business, and the fleet has no opinion about whether two
+        requests to adopt the same folder came from one client retrying.
+        """
         result = await adopt_case_folder(
             Path(source_folder),
             store=self._store,
@@ -775,7 +771,6 @@ class CaseManager:
             driver_add=self._driver.add,
             case_id_exists=self._store.contains,
             quarantine=self._quarantine,
-            correlation_id=correlation_id,
             expected_case_id=expected_case_id,
         )
         if result.status == "rejected":
@@ -786,7 +781,6 @@ class CaseManager:
             self._notices.emit_simple(
                 "ADOPT_FAILED", result.case_id, Path(source_folder), result.rejection_reason
             )
-        self._publish_adopt_result(result)
         return result
 
     def allocate_staging_folder(self) -> Path:
@@ -898,6 +892,35 @@ class CaseManager:
             on_complete=on_complete,
         )
         return await fut
+
+    def attach_fire(
+        self,
+        case_folder: Path,
+        trigger: str | None,
+        trigger_kwargs: dict[str, Any],
+        *,
+        on_launch: Callable[[], None] | None = None,
+        on_complete: Callable[[AdvanceResult | None, BaseException | None], None] | None = None,
+    ) -> None:
+        """Queue a fire on a case's slot and return immediately.
+
+        The fire-and-report half of ``fire()``, for a caller that reports the
+        outcome somewhere other than an awaited return value — a transport
+        publishing a result file, above all. Both callbacks run on the event-loop
+        thread: ``on_launch`` when the sweep actually starts the step,
+        ``on_complete`` when it settles either way.
+
+        Public because the signaling adapter needs it. Reaching into
+        ``manager._driver`` instead is how a transport ends up depending on the
+        scheduling layer's internals.
+        """
+        self._driver.attach_fire(
+            case_folder,
+            trigger,
+            trigger_kwargs,
+            **({"on_launch": on_launch} if on_launch is not None else {}),
+            **({"on_complete": on_complete} if on_complete is not None else {}),
+        )
 
     async def reclassify_case(
         self,
@@ -1051,22 +1074,18 @@ class CaseManager:
         re-raises instead (embedded usage — logged loudly, task dies)."""
         self._loop_failure_cb = callback
 
-    def on_shutdown_request(self, callback: Callable[[ShutdownDirective], None]) -> None:
-        """Register the single host callback invoked when a shutdown-mailbox
-        request is picked up cooperatively (the watchdog has its own pickup
-        path). serve() wires this to the §6 shutdown protocol."""
-        self._shutdown_request_cb = callback
+    def on_maintenance(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Run ``callback`` at the head of every maintenance tick.
 
-    def _notify_shutdown_request(self, directive: ShutdownDirective) -> None:
-        if self._shutdown_request_cb is None:
-            logger.warning(
-                "Shutdown request %s received but no host is registered "
-                "(embedded start() usage?); discarded — a manager that nobody "
-                "hosts cannot promise process exit semantics.",
-                directive.source_path.name,
-            )
-            return
-        self._shutdown_request_cb(directive)
+        The seam a signaling adapter attaches to. At the *head* deliberately:
+        requests drained here reach the pool before the same tick's sweep, so a
+        fire submitted between ticks is stepped by the very next sweep rather
+        than the one after it.
+
+        Each callback is isolated like any other tick item — one that raises is
+        logged and noticed, and the rest of the tick still runs.
+        """
+        self._maintenance_cbs.append(callback)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1148,9 +1167,6 @@ class CaseManager:
                 "MAINTENANCE_ITEM_FAILED", None, source, f"{what}: {exc!r}"
             )
 
-    def _results_dir(self) -> Path:
-        return self._manager_dir / RESULTS_SUBDIR
-
     def _count_termination_pending(self) -> int:
         return len(replay_pending(self._manager_dir))
 
@@ -1225,7 +1241,7 @@ class CaseManager:
             shutdown_mailbox_intake=rel(
                 self._manager_dir / self._policy.shutdown_mailbox_subdir / "intake"
             ),
-            results=rel(self._results_dir()),
+            results=rel(self._manager_dir / RESULTS_SUBDIR),
             adopt_drop=rel(self._manager_dir / self._policy.adopt_drop_subdir),
             termination_pending=rel(termination_dir(self._manager_dir) / "pending"),
             eject_pending=rel(eject_dir(self._manager_dir) / "pending"),
@@ -1253,22 +1269,6 @@ class CaseManager:
             len(self._registry),
             len(self._notices),
         )
-
-    def _load_adopt_result(self, correlation_id: str | None) -> AdoptResult | None:
-        if not correlation_id:
-            return None
-        path = self._results_dir() / f"{correlation_id}.yaml"
-        if path.exists():
-            try:
-                return AdoptResult.load(str(path), acquire_lock=False)
-            except Exception:
-                return None
-        return None
-
-    def _publish_adopt_result(self, result: AdoptResult) -> None:
-        path = self._results_dir() / f"{result.correlation_id}.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        result.save(str(path), retain_lock=False)
 
     async def _settle_with_diagnostics(self) -> None:
         if hasattr(self._driver, "settle"):

@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RecoverReport:
+    """What the *fleet* found at startup.
+
+    Requests in flight when the process died are not here: settling those is the
+    signaling adapter's recovery, which the host sequences alongside this one.
+    Neither half knows how to do the other's."""
+
     pool_restored: int = 0
     termination_pending: int = 0
     eject_pending: int = 0
@@ -33,9 +39,6 @@ class RecoverReport:
     adopt_drop_admitted: int = 0
     adopt_drop_rejected: int = 0
     adopt_drop_skipped: int = 0
-    mailbox_fire_replayed: int = 0
-    mailbox_adopt_replayed: int = 0
-    mailbox_reclassify_replayed: int = 0
     dropped_paths: list[Path] = field(default_factory=list)
     death_records_recent: int = 0
     shutdown_requests_discarded: int = 0
@@ -76,11 +79,6 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     )
     report.pool_restored = len(rebuild.readded)
     report.dropped_paths = list(rebuild.dropped)
-
-    if manager._policy.enable_mailbox:
-        report.mailbox_fire_replayed = manager._mailbox.replay_fire_on_recover()
-        report.mailbox_adopt_replayed = manager._mailbox.replay_adopt_on_recover()
-        report.mailbox_reclassify_replayed = manager._mailbox.replay_reclassify_on_recover()
 
     if manager._policy.startup_adopt_scan:
         drop_report = await manager._scan_adopt_drop()

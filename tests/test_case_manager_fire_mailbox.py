@@ -5,7 +5,14 @@ import os
 
 import pytest
 
-from case_manager_test_utils import TicketCase, adopt_into_live, provision_manager, seed_detached_case
+from case_manager_test_utils import (
+    TicketCase,
+    adopt_into_live,
+    attach_adapter,
+    transport_for,
+    provision_manager,
+    seed_detached_case,
+)
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.exceptions import ManagerNotRunningError
@@ -20,6 +27,7 @@ async def test_fire_mailbox_submit(tmp_path):
     seed_detached_case(TicketCase, staging / "c1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
+    attach_adapter(manager)
     await manager.start()
     client = CaseManagerClient(tmp_path / "cache")
     handle = client.submit_fire(case_id=case.case_id, trigger="work", only_if_fresh=False)
@@ -53,15 +61,17 @@ async def test_fire_intake_drains_fifo_by_arrival(tmp_path):
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
 
-    intake = manager._mailbox.fire_intake()
+    transport = transport_for(manager)
+    intake = transport.fire_intake()
     base = 1_000_000_000.0
     for i, (corr, trig) in enumerate([("zz", "a"), ("mm", "b"), ("aa", "c")]):
-        manager._mailbox.submit_fire(case_id=case.case_id, trigger=trig, correlation_id=corr)
+        transport.submit_fire(case_id=case.case_id, trigger=trig, correlation_id=corr)
         os.utime(intake / f"{corr}.yaml", (base + i, base + i))   # pin arrival order
 
+    attach_adapter(manager)
     await manager.start()
     try:
-        results_dir = manager._mailbox.results_dir()
+        results_dir = transport.results_dir()
         for _ in range(200):
             if all((results_dir / f"{c}.yaml").exists() for c in ("zz", "mm", "aa")):
                 break
@@ -94,6 +104,7 @@ async def test_manager_fire_through_running_loop(tmp_path):
     seed_detached_case(TicketCase, staging / "c1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
+    attach_adapter(manager)
     await manager.start()
     try:
         result = await manager.fire(case_id=case.case_id, trigger="work")

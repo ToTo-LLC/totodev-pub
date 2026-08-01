@@ -2,7 +2,12 @@
 
 import pytest
 
-from case_manager_test_utils import TicketCase, provision_manager, seed_detached_case
+from case_manager_test_utils import (
+    TicketCase,
+    attach_adapter,
+    provision_manager,
+    seed_detached_case,
+)
 from totodev_pub.case_manager_client import CaseManagerClient
 
 
@@ -10,6 +15,7 @@ from totodev_pub.case_manager_client import CaseManagerClient
 async def test_adopt_mailbox(tmp_path):
     manager = provision_manager(tmp_path, enable_mailbox=True)
     await manager.recover()
+    attach_adapter(manager)
     await manager.start()
     staging = tmp_path / "staging" / "c1"
     staging.mkdir(parents=True)

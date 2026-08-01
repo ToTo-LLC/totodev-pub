@@ -30,8 +30,16 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
+from pathlib import Path
+
+from totodev_pub.case_manager_support.constants import RESULTS_SUBDIR
 from totodev_pub.case_manager_support.exceptions import CaseManagerStopTimeoutError
-from totodev_pub.case_manager_support.shutdown import ShutdownDirective, write_shutdown_ack
+from totodev_pub.case_manager_support.shutdown import (
+    ShutdownDirective,
+    scan_shutdown_intake,
+    shutdown_intake_dir,
+    write_shutdown_ack,
+)
 from totodev_pub.case_manager_support.watchdog import (
     ManagerWatchdog,
     WatchdogDetection,
@@ -40,6 +48,7 @@ from totodev_pub.case_manager_support.watchdog import (
 
 if TYPE_CHECKING:
     from totodev_pub.case_manager import CaseManager
+    from totodev_pub.case_manager_support.signaling_adapter import SignalingAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +83,12 @@ def _tracer_downgrade(policy: Any) -> str | None:
     return None
 
 
+def _results_dir(manager: "CaseManager") -> Path:
+    """Where results are published. The host writes exactly one — the shutdown
+    ack — and does so whether or not a request transport exists."""
+    return manager._manager_dir / RESULTS_SUBDIR
+
+
 def _hard_exit(code: int) -> None:
     """os._exit wrapper — bypasses all Python cleanup by design (works even
     when the interpreter is too damaged for sys.exit). Module-level so tests
@@ -84,6 +99,7 @@ def _hard_exit(code: int) -> None:
 async def serve(
     manager: "CaseManager",
     *,
+    adapter: "SignalingAdapter | None" = None,
     stop_grace_secs: float = 30.0,
     stop_when: Callable[[], bool] | None = None,
     stop_when_empty: bool = False,
@@ -99,11 +115,19 @@ async def serve(
     serve() owns that sequencing itself. ``stop_grace_secs`` is host wiring,
     not deployment policy: Docker's ``stop_grace_period`` must exceed it.
 
+    ``adapter`` is the request transport, if there is one. A manager with no
+    adapter is driven entirely through its own methods — which is the normal
+    shape for an embedded or test host, and the reason the fleet no longer
+    knows what a mailbox is. Shutdown is **not** part of it: this host polls the
+    shutdown mailbox unconditionally, so ``enable_mailbox=False`` disables
+    request intake without disabling the ability to ask the process to stop.
+
     ``stop_when`` is polled once per maintenance interval on the manager's
     event loop — a blocking predicate is the caller's bug, exactly like a
-    blocking ``perform_*`` hook. ``stop_when_empty=True`` is sugar for
-    "stop when manager.is_idle" (job-manager hosts, §8); mutually exclusive
-    with an explicit ``stop_when``.
+    blocking ``perform_*`` hook. ``stop_when_empty=True`` is sugar for "stop
+    when nothing is left to do", which with an adapter attached means an empty
+    pool *and* an empty intake — the manager alone can no longer see the
+    second half. Mutually exclusive with an explicit ``stop_when``.
 
     Production deployments should leave ``watchdog_enabled=True`` (the
     default). ``watchdog_enabled=False`` gives up wedge *detection* — no pulse,
@@ -119,7 +143,7 @@ async def serve(
     if stop_when is not None and stop_when_empty:
         raise ValueError("stop_when and stop_when_empty are mutually exclusive")
     if stop_when_empty:
-        stop_when = lambda: manager.is_idle  # noqa: E731
+        stop_when = lambda: manager.is_idle and (adapter is None or adapter.is_idle)  # noqa: E731
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -131,8 +155,15 @@ async def serve(
             cause["directive"] = directive
             stop_event.set()
 
-    # 1. Sequencing: recover() then start() (which starts the pulse task).
+    # 1. Sequencing: both recoveries, then start() (which starts the pulse task).
+    #    Two parties, one order: the fleet settles its storage and pool first,
+    #    then the adapter settles requests that were in flight when the process
+    #    died — a dead-lettered fire has to name a case the manager has already
+    #    accounted for.
     await manager.recover()
+    if adapter is not None:
+        adapter.recover()
+        adapter.attach()
     await manager.start()
 
     action = _tracer_downgrade(manager._policy)
@@ -194,6 +225,7 @@ async def serve(
             loop=loop,
             exit_code=EXIT_WATCHDOG,
             on_shutdown_request=_shutdown_from_watchdog,
+            oldest_request_age=(None if adapter is None else adapter.transport.oldest_request_age_secs),
             action=action,
             stop_grace_secs=stop_grace_secs,
             exit_fn=_hard_exit,
@@ -201,9 +233,6 @@ async def serve(
         manager.on_loop_failure(watchdog.request_kill)
     else:
         manager.on_loop_failure(_loop_failure_no_watchdog)
-    manager.on_shutdown_request(
-        lambda directive: _record_cause("shutdown", directive)
-    )
 
     # SIGTERM/SIGINT: the deliberate, external, final stop (exit 0).
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -212,6 +241,26 @@ async def serve(
     # 4. Arm after start(), with a fresh stamp — recovery time is never measured.
     if watchdog is not None:
         watchdog.arm()
+
+    # Shutdown is process control, so the host polls for it — always, and
+    # independently of whether any request transport exists. It used to ride on
+    # the manager's mailbox drain, which meant `enable_mailbox=False` plus
+    # `watchdog_enabled=False` left no way at all to ask the process to stop.
+    async def _poll_shutdown_intake() -> None:
+        intake = shutdown_intake_dir(manager._manager_dir, manager._policy)
+        interval = manager._policy.maintenance_interval_secs
+        while not stop_event.is_set():
+            try:
+                directive = scan_shutdown_intake(intake)
+                if directive is not None:
+                    directive.source_path.unlink(missing_ok=True)
+                    _record_cause("shutdown", directive)
+                    return
+            except Exception:
+                logger.exception("Shutdown intake poll failed; continuing to watch")
+            await asyncio.sleep(interval)
+
+    shutdown_poller = asyncio.create_task(_poll_shutdown_intake())
 
     poller: asyncio.Task[None] | None = None
     if stop_when is not None:
@@ -231,6 +280,7 @@ async def serve(
     finally:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.remove_signal_handler(sig)
+        shutdown_poller.cancel()
         if poller is not None:
             poller.cancel()
 
@@ -257,7 +307,7 @@ async def serve(
     directive: ShutdownDirective = cause["directive"]
     if directive.graceful:
         # Ack before the drain so poll_result/wait_result resolve normally.
-        write_shutdown_ack(manager._mailbox.results_dir(), directive)
+        write_shutdown_ack(_results_dir(manager), directive)
         try:
             await manager.stop(timeout=stop_grace_secs)
         except CaseManagerStopTimeoutError:

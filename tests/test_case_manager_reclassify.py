@@ -4,11 +4,11 @@
 
 import pytest
 
-from case_manager_test_utils import adopt_into_live, seed_detached_case
+from case_manager_test_utils import transport_for,  attach_adapter, adopt_into_live, seed_detached_case
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.exceptions import LiveCaseNotFoundError
-from totodev_pub.case_manager_support.mailbox.processor import RequestHandle, ReclassifyResult
+from totodev_pub.case_manager_support.mailbox import RequestHandle, ReclassifyResult
 from totodev_pub.folder_backed_case import FolderBackedCase, IncompatibleReclassError
 from totodev_pub.folder_backed_case_support.case_type_registry import CaseTypeRegistry
 from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
@@ -126,6 +126,7 @@ async def test_reclassify_mailbox_submit_completes(tmp_path):
     manager = provision(tmp_path, enable_mailbox=True)
     await manager.recover()
     case = await seed_parked_intake(manager, tmp_path)
+    attach_adapter(manager)
     await manager.start()
     try:
         client = CaseManagerClient(tmp_path / "cache")
@@ -149,6 +150,7 @@ async def test_reclassify_mailbox_error_result_for_incompatible_target(tmp_path)
     manager = provision(tmp_path, enable_mailbox=True)
     await manager.recover()
     case = await seed_parked_intake(manager, tmp_path)
+    attach_adapter(manager)
     await manager.start()
     try:
         client = CaseManagerClient(tmp_path / "cache")
@@ -176,10 +178,11 @@ async def test_reclassify_mailbox_malformed_request_gets_error_result_not_silenc
     the body is garbage."""
     manager = provision(tmp_path, enable_mailbox=True)
     await manager.recover()
-    mailbox = manager._mailbox
-    mailbox._ensure_dirs()
+    mailbox = transport_for(manager)
+    mailbox.ensure_dirs()
     corr = "malformed-corr-id"
     (mailbox.reclassify_intake() / f"{corr}.yaml").write_text("not: [valid pydantic body\n")
+    attach_adapter(manager)
     await manager.start()
     try:
         client = CaseManagerClient(tmp_path / "cache")
@@ -203,7 +206,7 @@ async def test_client_preflight_rejects_unknown_case_without_touching_mailbox(tm
         client.submit_reclassify(
             case_id="does-not-exist", target_type="RoutedCase", only_if_fresh=False,
         )
-    assert list(manager._mailbox.reclassify_intake().glob("*.yaml")) == []
+    assert list(transport_for(manager).reclassify_intake().glob("*.yaml")) == []
 
 
 @pytest.mark.asyncio
@@ -217,7 +220,7 @@ async def test_client_preflight_rejects_incompatible_state_without_touching_mail
             case_id=case.case_id, target_type="UnrelatedCase", only_if_fresh=False,
         )
     # Rejected before ever reaching the mailbox.
-    assert list(manager._mailbox.reclassify_intake().glob("*.yaml")) == []
+    assert list(transport_for(manager).reclassify_intake().glob("*.yaml")) == []
     reader = client.reader(case_id=case.case_id)
     assert reader.case_object_type == "IntakeCase"
 
@@ -235,7 +238,7 @@ async def test_client_preflight_defers_when_type_unresolvable_in_this_process(tm
     handle = client.submit_reclassify(
         case_id=case.case_id, target_type="UnrelatedCase", only_if_fresh=False,
     )
-    assert list(manager._mailbox.reclassify_intake().glob("*.yaml"))   # queued, not rejected
+    assert list(transport_for(manager).reclassify_intake().glob("*.yaml"))   # queued, not rejected
     assert handle.correlation_id
 
 
@@ -251,7 +254,7 @@ async def test_client_preflight_strict_rejects_unresolvable_type_locally(tmp_pat
             case_id=case.case_id, target_type="RoutedCase", only_if_fresh=False,
             preflight="strict",
         )
-    assert list(manager._mailbox.reclassify_intake().glob("*.yaml")) == []
+    assert list(transport_for(manager).reclassify_intake().glob("*.yaml")) == []
 
 
 @pytest.mark.asyncio
@@ -264,5 +267,5 @@ async def test_client_preflight_false_submits_unconditionally(tmp_path):
         case_id=case.case_id, target_type="UnrelatedCase", only_if_fresh=False,
         preflight=False,
     )
-    assert list(manager._mailbox.reclassify_intake().glob("*.yaml"))
+    assert list(transport_for(manager).reclassify_intake().glob("*.yaml"))
     assert handle.correlation_id

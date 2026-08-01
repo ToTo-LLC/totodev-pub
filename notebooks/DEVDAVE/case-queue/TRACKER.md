@@ -1022,16 +1022,9 @@ pass proceeds; it is known to be incomplete.
 ### `case_manager_support/*`
 - [x] The subdir constants are wired to their actual usages (Wave 1); `ABERRANT_META_SUBDIR` is gone
       with F6 and `QUARANTINE_SUBDIR` joined them in Wave 2.
-- [ ] `mailbox/__init__.py` is a single empty comment line — the sibling `processor.py` defines a
-      large public surface (`MailboxProcessor`, 4 request/result types, `RequestHandle`) that nothing
-      re-exports at the `mailbox` package level; every caller reaches into `mailbox.processor`
-      directly. Consider re-exporting for a cleaner import surface.
-- [ ] `MailboxProcessor.poll_result()` determines a result's type by sniffing substrings in the raw
-      YAML text (`"kind: shutdown"`, `"adopt"` in the first 200 chars, etc.) rather than a single
-      structured discriminator field, with a 3-deep try/except fallback cascade. Works today; fragile
-      if a future result type's YAML happens to contain one of those substrings. Candidate fix: a
-      `kind:` field on every result type (mirroring what `ShutdownAck`/`ReclassifyResult` already
-      do).
+- [x] `mailbox/__init__.py` re-exports the package's public surface (Wave 3).
+- [x] `poll_result()` reads a `kind` discriminator that every result type carries (Wave 3). The
+      substring sniffing and its 3-deep fallback cascade are gone.
 - [x] `recover.py`'s dead notice-kind import removed (Wave 1).
 - [x] `eject.py`'s vestigial `wait_halted` branch removed (Wave 1).
 - [x] `termination.py`'s `process_pending_ticket` genuinely awaits now — path resolution, the status
@@ -1234,22 +1227,42 @@ stable failure contract before it moves.
 Outward structural change, then the tooling and documentation that can only be written truthfully
 once the shape is final.
 
-- [ ] §4.0.2 — extract the signaling adapter (fire / adopt / reclassify, correlation IDs, result
-      publication, dead-lettering, replay); shutdown moves to the host.
-- [ ] §4.0.2 — two-party recovery sequencing; `RecoverReport` mailbox fields move out.
-- [ ] §4.0.2 — `is_idle` becomes a host-computed composite.
-- [ ] §4.0.2 — `adopt_case()` sheds `correlation_id`.
-- [ ] §1 — shutdown-mailbox handling moves to the host, superseding Wave 1's interim hoist.
-- [ ] §4.2 — `MailboxProcessor` per-request isolation, in the rewritten intake loops. **Known gap
-      shipped at the Wave 1 merge** — a malformed request can still poison an intake batch until this
-      lands.
-- [ ] §1 **(split)** — update `mailbox_neglect` coverage for the adapter's ownership.
-- [ ] §5 — `poll_result()` result-type discriminator replacing substring sniffing.
-- [ ] §5 — `mailbox/__init__.py` re-exports.
+**The extraction — done**
+
+- [x] §4.0.2 — signaling adapter extracted (`case_manager_support/signaling_adapter.py`): fire /
+      adopt / reclassify, correlation ids, result publication, dead-lettering, replay. The transport
+      itself split out separately (`mailbox/transport.py`) as the *writer* half, so a submitting
+      client needs no manager and no scheduling layer at all.
+- [x] §4.0.2 — the dependency is inverted for real. `MailboxProcessor(self)` was handed the whole
+      manager and reached into its internals; the adapter holds a manager and calls only public
+      methods. `CaseManager.attach_fire()` is public because of it, and a test boobytraps
+      `manager._driver` to prove the adapter never reaches past the boundary.
+- [x] §4.0.2 — two-party recovery. `AdapterRecoverReport` carries what the transport found;
+      `RecoverReport` carries what the fleet found; `serve()` sequences fleet-then-adapter, because a
+      dead-lettered fire has to name a case the manager has already accounted for.
+- [x] §4.0.2 — `is_idle` is the manager's pool alone. The host composes it with `adapter.is_idle`
+      for `stop_when_empty`, since neither half can answer the whole question.
+- [x] §4.0.2 — `adopt_case()` sheds `correlation_id`. De-duplicating a re-delivered request is
+      transport business; the fleet has no opinion about client retries.
+- [x] §1 — shutdown moved to the host, superseding Wave 1's interim hoist. It is polled
+      unconditionally, so it survives no-adapter, `enable_mailbox=False`, and `watchdog_enabled=False`
+      alike. The manager has no shutdown surface left to misuse.
+- [x] §4.2 — per-request isolation. One malformed or exploding request produces an error result for
+      *that* correlation id and the drain continues; silence would leave submitters unable to tell
+      "still queued" from "dropped". **This closes the gap knowingly shipped at the Wave 1 merge.**
+- [x] §1 **(split)** — `mailbox_neglect` now reads an injected backlog-age callable. With no adapter
+      the check is structurally absent rather than flag-disabled: nothing owns a backlog, so nothing
+      can neglect one.
+- [x] §5 — every result type carries a `kind`, and `poll_result()` reads it. The old substring
+      sniffing is gone, along with its 3-deep fallback cascade; a test publishes a result whose
+      folder name contains every sniffed substring and asserts it is still identified correctly.
+- [x] §5 — `mailbox/__init__.py` re-exports the package's public surface.
+
+**Remaining**
+
 - [ ] §4.3 — bag-loading construction convenience plus pytest fixture.
 - [ ] §4.3 — runnable manager example / generator / CLI: decide shape and build.
 - [ ] §4.4 **(split)** — full bench-testing pass on the tooled harness; findings back into §5.
-- [ ] §1 — operator deployment doc (restart policy, exit codes, container caveats).
 - [ ] §3 — `case-designer` skill updated for the pool-manager layer.
 - [ ] §5 — replace the `§N` comment convention with inline rationale.
 - [ ] §0 — confirm every class in the key-class list meets the finalize bar.
