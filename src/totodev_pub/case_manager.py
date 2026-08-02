@@ -1,14 +1,57 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""CaseManager — fleet coordinator for folder-backed cases.
+"""CaseManager — manage a pool of FolderBackedCase-derived workflows.
 
-Host entry point (process ownership, signals, exit codes, watchdog arm/park)::
+A single FolderBackedCase already knows how to store itself and step through
+its own lifecycle. Coordinating many of them is a different job: shared
+storage and archiving, fair progress under limited resources, restart after
+interruption, isolation of cases that keep failing, and a place for hosts to
+observe and intervene. CaseManager exists for that aggregate problem.
 
-    from totodev_pub.case_manager_support.case_manager_host import serve
+Typical use
+    Application code creates case folders externally, then adds them to a
+    CaseManager. From there, most or all of each case's remaining life is
+    spent in the manager's pool, being advanced toward a terminal state.
+    The manager owns storage layout, archiving, recovery, and related
+    housekeeping so callers do not have to invent that fleet machinery.
 
-``serve(manager)`` is the only supported whole-process host; see that module
-for the host contract.
+Scale and tuning
+    Defaults aim for hundreds to low thousands of live cases. Past that,
+    this may not be the right manager. Behavior is highly adjustable via
+    persisted policy (Layout and Tunables) and via Bindings such as the pool
+    driver (how work is paced and choke resources are shared), the case-type
+    registry, and the case classes themselves. Choke resources (CPU, DB
+    connections, external API capacity, and similar) are tracked so the
+    pool can respect configured budgets.
+
+Running and advancing
+    In its run mode the manager repeatedly advances pooled cases through
+    automatic stages, using asyncio for concurrent progress. Authors of
+    FolderBackedCase subclasses should avoid blocking the event loop
+    (push long work onto awaited threads or external processes). Manual
+    actions described by FolderBackedCaseInterface can be queued for
+    execution alongside automatic advances.
+
+Failure isolation and recovery
+    Cases that misbehave (for example by raising repeatedly) are
+    quarantined so they cannot harm the rest of the pool. Resolving a
+    quarantined case is an owner responsibility — typically fix the root
+    cause and reopen it. The manager is bound to a working directory that
+    holds the cases and protocol state as a persistent asset; on restart
+    that directory is inspected and recovery is attempted so interrupted
+    fleets can resume rather than start from scratch.
+
+Hosts and integration
+    Companion helpers make it straightforward to build case-processing
+    servers of various shapes, including file-format protocols for
+    cross-process communication. The usual whole-process host is::
+
+        from totodev_pub.case_manager_support.case_manager_host import serve
+
+    See that module for process ownership, signals, exit codes, and
+    watchdog behavior. The manager also exposes an aggregated view of
+    notable pool activity for observers.
 """
 
 from __future__ import annotations
@@ -139,7 +182,7 @@ def _first_supplied(*candidates: Any, default: Callable[[], Any]) -> Any:
 
 
 class _ResolvedPolicy(NamedTuple):
-    """A filespace's policy reconciled with what the caller supplied.
+    """A working directory's policy reconciled with what the caller supplied.
 
     ``is_new`` means the policy record does not exist yet and may be written.
     Derived paths are valid either way.
@@ -153,7 +196,10 @@ class _ResolvedPolicy(NamedTuple):
 
 
 class CaseManager:
-    """Fleet coordinator composing cache, driver, registry, and protocol dirs.
+    """Pool coordinator for FolderBackedCase-derived workflows.
+
+    Composes case storage, pool driver, type registry, and the manager's
+    control directory under a working directory. See the module docstring.
     """
 
     # ------------------------------------------------------------------
@@ -171,10 +217,10 @@ class CaseManager:
         register_types: Sequence[type[FolderBackedCase]] = (),
         **tunables_overrides: Any,
     ) -> None:
-        """Build a manager over an existing filespace.
+        """Build a manager over an existing working directory.
 
-        ``filespace`` is a ``LocalCaseStore`` or a path to a filespace that already
-        has a policy record. Construction never creates a filespace — use
+        ``filespace`` is a ``LocalCaseStore`` or a path to a working directory that
+        already has a policy record. Construction never creates one — use
         ``open_local_store()`` for that. A path with no policy record raises
         ``PolicyFileMissingError``.
 
@@ -262,16 +308,16 @@ class CaseManager:
         init_if_new: bool = True,
         **overrides: Any,
     ) -> LocalCaseStore:
-        """Open the managed filespace at ``cache_root``, creating it when absent.
+        """Open the managed working directory at ``cache_root``, creating it when absent.
 
-        The filespace is the policy record, manager protocol namespace, and case
-        storage together. This is the only creator. Pass the returned store to
+        This creates the policy record, the manager's control directory, and case
+        storage together — the only creator. Pass the returned store to
         ``CaseManager``. With ``init_if_new=False``, an absent policy record raises
         ``PolicyFileMissingError``.
 
-        Idempotent when the filespace already exists. A conflicting Layout field
-        raises. Tunables apply in memory to the returned store's policy; on first
-        create they are also written as the record's durable defaults.
+        Idempotent when the working directory already exists. A conflicting Layout
+        field raises. Tunables apply in memory to the returned store's policy; on
+        first create they are also written as the record's durable defaults.
         """
         root = Path(cache_root).resolve()
         resolved = cls._resolve_policy(root, policy, overrides, init_if_new=init_if_new)
@@ -287,7 +333,7 @@ class CaseManager:
         return store
 
     # ------------------------------------------------------------------
-    # Read-only lifecycle introspection (host/observability surface)
+    # Status (host / observability)
     # ------------------------------------------------------------------
 
     @property
@@ -302,12 +348,13 @@ class CaseManager:
 
     @property
     def is_idle(self) -> bool:
-        """True when the pool is empty and no departure ticket is still in flight.
+        """True when the pool is empty and no termination, eject, or quarantine is
+        still pending.
 
-        A case can leave the pool when termination is enqueued while its folder is
-        archived on a later tick, so an empty pool alone is not enough. This does
-        not cover signaling-adapter backlog the manager cannot see; the host
-        composes the two.
+        A case can leave the pool as soon as termination is enqueued, while its
+        folder is archived on a later tick — so an empty pool alone is not enough.
+        This does not cover signaling-adapter backlog the manager cannot see; the
+        host composes the two.
         """
         return len(self._driver) == 0 and not self._departures_in_flight()
 
@@ -316,12 +363,14 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     async def recover(self) -> RecoverReport:
-        """Claim the filespace lease, reconcile storage, and rebuild the pool.
+        """Claim exclusive ownership of the working directory, reconcile storage, and
+        rebuild the pool.
 
-        Required before ``start()``. Waits out competing case leases, re-admits
-        orphans, and counts pending tickets. After a hard kill this can take tens
-        of seconds while a held lease is watched past one beat. Raises
-        ``CompetingManagerError`` if another manager owns this cache root.
+        Required before ``start()``. Waits out competing case leases, restores live
+        cases that belong in the pool, and counts pending terminate/eject/quarantine
+        work. After a hard kill this can take tens of seconds while a held lease is
+        watched past one heartbeat. Raises ``CompetingManagerError`` if another
+        manager owns this working directory.
         """
         report = await recover_manager(self)
         self._recovered = True
@@ -329,11 +378,11 @@ class CaseManager:
         return report
 
     async def start(self) -> None:
-        """Begin the maintenance/sweep loop and the liveness pulse.
+        """Enter run mode: start advancing pooled cases and the liveness heartbeat.
 
         Idempotent. Raises if ``recover()`` has not completed — starting without
-        reconciling disk would drive an empty pool over a filespace that may hold
-        work.
+        reconciling disk would drive an empty pool over a working directory that
+        may still hold cases.
         """
         if self._running:
             return
@@ -364,10 +413,10 @@ class CaseManager:
         self._pulse_task = asyncio.create_task(self._pulse_loop())
 
     async def stop(self, *, timeout: float | None = None) -> None:
-        """Stop the loop and let in-flight steps settle.
+        """Leave run mode and wait until active advances finish.
 
-        With ``timeout`` set, a settle that overruns raises
-        ``CaseManagerStopTimeoutError`` carrying any triggers still running.
+        With ``timeout`` set, an overrun raises ``CaseManagerStopTimeoutError``
+        carrying any triggers still running.
         """
         self._stopping = True
         self._running = False
@@ -420,7 +469,7 @@ class CaseManager:
         self._release_filespace()
 
     # ------------------------------------------------------------------
-    # Case fleet API — intake & departure
+    # Case pool API — add & remove
     # ------------------------------------------------------------------
 
     async def adopt_case(
@@ -465,7 +514,7 @@ class CaseManager:
             await manager.adopt_case(staged)
 
         Staging is on the same filesystem as managed storage so adopt can rename
-        rather than copy, and the staged tree is expendable. Also sweeps abandoned
+        rather than copy, and the staged tree is expendable. Also removes abandoned
         staging folders.
         """
         return allocate_staging_folder(self._manager_dir, self._policy)
@@ -479,9 +528,9 @@ class CaseManager:
     ) -> EjectResult:
         """Export a case out of managed storage and wait until export completes.
 
-        Halts the case and waits for it to settle first, so a mid-step eject works.
-        ``timeout`` bounds each phase; on expiry ``EjectTimeoutError`` names any
-        triggers still running.
+        Halts the case and waits until its active advance finishes first, so a
+        mid-advance eject works. ``timeout`` bounds each phase; on expiry
+        ``EjectTimeoutError`` names any triggers still running.
         """
         case = self.get_live(case_id)
         # The driver refuses to remove a case mid-step, and says so: wait for
@@ -518,7 +567,7 @@ class CaseManager:
         return await fut
 
     async def reopen_case(self, case_id: str) -> None:
-        """Return a departed case to the live pool.
+        """Return a case that left the pool to the live pool again.
 
         Re-resolves the folder after the move (the path changes).
         """
@@ -529,14 +578,14 @@ class CaseManager:
         self._driver.add(self._registry.rehydrate(folder))
 
     # ------------------------------------------------------------------
-    # Case fleet API — live operations
+    # Case pool API — live operations
     # ------------------------------------------------------------------
 
     def get_live(self, case_id: str) -> FolderBackedCase:
-        """Return the managed live case object for out-of-band work.
+        """Return the managed live case object for work outside the pool's normal
+        advance scheduling.
 
-        Work on the returned instance is outside the pool's scheduling. Prefer
-        ``fire()`` unless that is specifically what you want.
+        Prefer ``fire()`` unless you specifically need direct access to the case.
         """
         for case in self._driver:
             if case.case_id == case_id:
@@ -551,23 +600,22 @@ class CaseManager:
         trigger: str | None = None,
         **trigger_kwargs: Any,
     ) -> AdvanceResult:
-        """Queue one case step on the scheduling slot and await its sweep-time result.
+        """Queue an advance (or manual action) on a pooled case and await the result
+        when the run loop executes it.
 
         Addressing: exactly one of ``case_id`` / ``case_folder``. With
-        ``trigger=None`` the case's auto edges are swept; with a pinned ``trigger``
-        that edge fires.
+        ``trigger=None``, available automatic transitions are attempted; with a
+        pinned ``trigger``, that manual action runs.
 
-        - Requires a running manager (``ManagerNotRunningError`` otherwise).
-          Mailbox files and this API share one queue: attach to the case's slot,
-          execute when the sweep reaches it (maintenance drains intake at the head
-          of each tick, then the sweep launches due slots).
-        - Uses the same concurrency ceiling and beat-quantized choke budget as
-          ordinary advances — not the driver's priority ``acquire_priority`` path.
-        - Multiple fires on one case queue on the slot and apply one sweep at a
-          time; they preempt auto-advance while pending.
+        - Requires run mode (``ManagerNotRunningError`` otherwise). Mailbox files
+          and this API share one queue with the pool's normal advances.
+        - Uses the same concurrency ceiling and choke-resource budgets as ordinary
+          advances — not the driver's priority path.
+        - Multiple queued advances on one case run one at a time and preempt
+          automatic advancing while pending.
         - Do not await this from inside a step hook for the same case (deadlock).
-        - Escape hatch: ``get_live()`` and call a trigger on the case object for an
-          immediate out-of-band step (skips pool events/bookkeeping; guarded by
+        - For an immediate step outside pool scheduling, use ``get_live()`` and call
+          a trigger on the case (skips pool events/bookkeeping; guarded by
           ``CaseTransitionInFlightError`` if a step is already running).
         """
         if not self._running:
@@ -607,12 +655,12 @@ class CaseManager:
         on_launch: Callable[[], None] | None = None,
         on_complete: Callable[[AdvanceResult | None, BaseException | None], None] | None = None,
     ) -> None:
-        """Queue a fire on a case's slot and return immediately.
+        """Queue an advance (or manual action) on a pooled case and return immediately.
 
-        Fire-and-report counterpart to ``fire()`` when the caller reports outcome
+        Callback counterpart to ``fire()`` when the caller reports the outcome
         elsewhere (e.g. a transport result file). Callbacks run on the event-loop
-        thread: ``on_launch`` when the sweep starts the step, ``on_complete`` when
-        it settles. Prefer this over calling into ``manager._driver``.
+        thread: ``on_launch`` when the run loop starts the step, ``on_complete``
+        when it finishes. Prefer this over calling into ``manager._driver``.
         """
         self._driver.attach_fire(
             case_folder,
@@ -632,9 +680,8 @@ class CaseManager:
         """Switch a live pooled case to a different registered case type, in place.
 
         Wraps ``FolderBackedCase.case_reclassify_to()`` with pool choreography: the
-        slot is removed for the identity switch and the new object is re-admitted
-        (fresh HOT slot), then ``boost()`` schedules it for the next beat so any
-        new automated paths run immediately.
+        case is removed for the identity switch, re-added under the new type, then
+        scheduled promptly so any new automatic paths can run.
 
         Addressing mirrors ``fire()``: exactly one of ``case_id`` / ``case_folder``.
         ``target_type`` may be the registered class or its bare name.
@@ -643,9 +690,9 @@ class CaseManager:
             LiveCaseNotFoundError: the case is not in the live pool.
             UnregisteredCaseTypeError: ``target_type`` is not registered.
             IncompatibleReclassError: current state is not a state of the target
-                class (checked before the slot is touched).
-            CaseInFlightError: a step is mid-flight (from ``driver.remove()``);
-                retry after it settles.
+                class (checked before the pool membership is changed).
+            CaseInFlightError: a step is mid-advance (from ``driver.remove()``);
+                retry after it finishes.
         """
         if isinstance(target_type, str):
             target_cls = self._registry.resolve_case_type(target_type)
@@ -680,7 +727,7 @@ class CaseManager:
         return fresh
 
     # ------------------------------------------------------------------
-    # Case fleet API — lookup & iteration
+    # Case pool API — lookup & iteration
     # ------------------------------------------------------------------
 
     def locate(
@@ -691,7 +738,7 @@ class CaseManager:
     ) -> CaseLocation | None:
         """Find a case at any status. Exactly one of ``case_id`` / ``case_folder``.
 
-        Both directions are index lookups, not fleet scans.
+        Both directions are index lookups, not pool-wide scans.
         """
         if (case_id is None) == (case_folder is None):
             raise InvalidAddressingError()
@@ -777,9 +824,10 @@ class CaseManager:
     def on_notice(self, callback: Callable[[CaseNotice], None]) -> int:
         """Subscribe to manager notices. Returns a handle for ``off_notice()``.
 
-        One channel carries problems and case-departure lifecycle facts; filter on
-        ``notice.kind.is_lifecycle``. Handlers must not block (they run on the
-        manager's loop). Exceptions in a handler are swallowed.
+        One channel carries problems and lifecycle notices for cases leaving the
+        pool (terminate / eject / quarantine); filter on ``notice.kind.is_lifecycle``.
+        Handlers must not block (they run on the manager's loop). Exceptions in a
+        handler are swallowed.
         """
         return self._notices.register(callback)
 
@@ -791,17 +839,17 @@ class CaseManager:
         """Register the host callback invoked when the manager loop gives up after
         repeated consecutive failures.
 
-        ``serve()`` wires this to the watchdog kill ladder. With no callback the
-        loop re-raises (embedded usage).
+        ``serve()`` connects this to the watchdog. With no callback the loop
+        re-raises (embedded usage).
         """
         self._loop_failure_cb = callback
 
     def on_maintenance(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Run ``callback`` at the head of every maintenance tick.
 
-        Callbacks here run before the same tick's sweep, so work drained into the
-        pool is eligible on the next sweep. Each callback is isolated: a raise is
-        logged and noticed, and the rest of the tick continues.
+        Callbacks run before the same tick's advances, so work added here can be
+        advanced soon. Each callback is isolated: a raise is logged and noticed,
+        and the rest of the tick continues.
         """
         self._maintenance_cbs.append(callback)
 
@@ -932,10 +980,10 @@ class CaseManager:
 
     @staticmethod
     def _ensure_namespace_dirs(mgr_dir: Path, policy: CaseManagerPolicy) -> None:
-        """Create the manager protocol namespace under the manager dir.
+        """Create the manager's control directory under the manager dir.
 
         Storage buckets are created by the case store; this owns only the manager
-        namespace.
+        control directory (mailboxes, tickets, leases, and related state).
         """
         mgr_dir.mkdir(parents=True, exist_ok=True)
         for sub in (
@@ -1027,7 +1075,7 @@ class CaseManager:
 
     @staticmethod
     def _validate_fresh_root(root: Path) -> None:
-        """Refuse to create a filespace in a non-empty root with no policy record.
+        """Refuse to create a working directory in a non-empty root with no policy record.
 
         Called only when no policy file was found.
         """
@@ -1043,11 +1091,11 @@ class CaseManager:
         return not any(path.iterdir())
 
     # ------------------------------------------------------------------
-    # Filespace lease
+    # Working-directory lease
     # ------------------------------------------------------------------
 
     async def _acquire_filespace(self) -> None:
-        """Claim the one-manager-per-cache-root lease. Idempotent within a session.
+        """Claim exclusive ownership of the working directory. Idempotent within a session.
 
         Leaves an already-held lease alone so re-recover does not fail on itself.
         """
@@ -1056,7 +1104,7 @@ class CaseManager:
         await acquire_manager_lease(self._filespace_lease)
 
     def _beat_filespace(self) -> None:
-        """Refresh the filespace lease; a stolen lease surfaces as loop failure.
+        """Refresh the working-directory lease; loss of ownership surfaces as loop failure.
 
         ``heartbeat`` self-throttles, so calling it every pulse is cheap.
         """
@@ -1065,7 +1113,7 @@ class CaseManager:
         self._filespace_lease.heartbeat()
 
     def _release_filespace(self) -> None:
-        """Drop the filespace lease so the next owner need not wait it out."""
+        """Release the working-directory lease so the next owner need not wait it out."""
         if not self._filespace_lease.is_active():
             return
         try:
@@ -1074,17 +1122,15 @@ class CaseManager:
             logger.exception("Could not release the filespace lease; it will lapse instead")
 
     # ------------------------------------------------------------------
-    # Manager loops
+    # Run-mode loops
     # ------------------------------------------------------------------
 
     async def _manager_loop(self) -> None:
-        """One tick: maintenance (mailbox intake first), then the pool sweep.
+        """One tick: maintenance (including mailbox intake), then advance the pool.
 
-        Maintenance runs first so externally submitted fires and their ``boost()``
-        land before the sweep spends its choke budget — boosted cases can step in
-        the same tick. Pacing is inside ``driver.advance()`` (advisory interval is
-        its fixed-rate period; maintenance time counts against it). This loop
-        sleeps only on the failure path.
+        Maintenance runs first so externally queued advances are eligible in the
+        same tick before choke-resource budget is spent. Pacing is inside
+        ``driver.advance()``. This loop sleeps only on the failure path.
         """
         interval = self._policy.maintenance_interval_secs
         consecutive_failures = 0
@@ -1116,10 +1162,10 @@ class CaseManager:
                 await asyncio.sleep(interval)
 
     async def _pulse_loop(self) -> None:
-        """Liveness pulse for the event loop (not the tick).
+        """Liveness heartbeat for the event loop (separate from the advance tick).
 
-        Stamps ``_last_pulse`` every ``PULSE_INTERVAL_SECS`` (watchdog kill signal)
-        and writes the manifest heartbeat on its own cadence so a slow mailbox fire
+        Stamps ``_last_pulse`` every ``PULSE_INTERVAL_SECS`` (watchdog signal) and
+        writes the manifest heartbeat on its own cadence so a slow queued advance
         does not make a healthy manager look stale.
         """
         while self._running:
@@ -1152,7 +1198,7 @@ class CaseManager:
             await asyncio.sleep(PULSE_INTERVAL_SECS)
 
     async def _maintenance_tick(self) -> None:
-        """One maintenance pass: termination/eject tickets, mailbox, purge.
+        """One maintenance pass: terminate/eject/quarantine tickets, mailbox, purge.
 
         Each item is isolated so one bad ticket is quarantined/escalated without
         aborting the rest of the tick or exhausting the loop-failure budget.
@@ -1192,19 +1238,18 @@ class CaseManager:
         self._last_tick_completed = time.monotonic()
 
     # ------------------------------------------------------------------
-    # Ticket processing
+    # Terminate / eject / quarantine tickets
     # ------------------------------------------------------------------
 
     async def _drive_ticket(
         self, what: str, ticket_file: Path, advance: Callable[[Path], Awaitable[None]]
     ) -> None:
-        """Run one ticket, counting attempts outside the ticket itself.
+        """Process one terminate/eject/quarantine ticket, counting attempts outside it.
 
         Unparseable tickets cannot update their own ``retry_count``; without an
         external ledger they would retry every tick forever. Below the threshold
-        this re-raises so isolation can log/notice and the next tick can retry
-        (transients must not burn the budget immediately). At the threshold the
-        ticket is retired.
+        this re-raises so isolation can log/notice and the next tick can retry.
+        At the threshold the ticket is retired.
         """
         try:
             await advance(ticket_file)
@@ -1220,9 +1265,9 @@ class CaseManager:
     async def _retire_unprocessable_ticket(self, what: str, ticket_file: Path) -> None:
         """Retire a ticket and stop driving the case it names.
 
-        Quarantines the case (do not invent a departure). ``case_id`` is taken from
-        the ticket filename — the one field a corrupt ticket cannot remove.
-        Recoverable via ``reopen_case()``.
+        Quarantines the case rather than inventing a status change the caller did
+        not ask for. ``case_id`` is taken from the ticket filename — the one field
+        a corrupt ticket cannot remove. Recoverable via ``reopen_case()``.
         """
         case_id = ticket_file.stem
         self._ticket_attempts.forget(ticket_file)
@@ -1282,9 +1327,9 @@ class CaseManager:
             self._emit_notice("CASE_QUARANTINED", ticket.case_id, landed, ticket.reason)
 
     async def _advance_eject_ticket(self, ticket_file: Path) -> None:
-        """Drive one eject ticket and settle its waiter either way.
+        """Process one eject ticket and complete its waiter either way.
 
-        If the ticket is retired to ``failed/`` with no waiter resolution,
+        If the ticket is retired to ``failed/`` without resolving the waiter,
         ``eject_from_pool()`` callers without a timeout would hang.
         """
         ticket = EjectTicket.load(str(ticket_file), acquire_lock=False)
@@ -1319,14 +1364,14 @@ class CaseManager:
         return len(list(pending.glob("*.yaml"))) if pending.exists() else 0
 
     def _has_departure_ticket(self, case_id: str) -> bool:
-        """True when the case is already on its way out of the pool."""
+        """True when eject or quarantine work for this case is already pending."""
         return (
             eject_ticket_path(self._manager_dir, case_id).exists()
             or quarantine_ticket_exists(self._manager_dir, case_id)
         )
 
     def _departures_in_flight(self) -> bool:
-        """True while any case is on its way out of managed storage."""
+        """True while any terminate, eject, or quarantine work is still pending."""
         return bool(
             replay_pending(self._manager_dir)
             or pending_quarantine_tickets(self._manager_dir)
@@ -1334,7 +1379,7 @@ class CaseManager:
         )
 
     # ------------------------------------------------------------------
-    # Fleet status board & pool events
+    # Pool status board & events
     # ------------------------------------------------------------------
 
     def _fleet_locate(self) -> Callable[[str], Any]:
@@ -1366,9 +1411,9 @@ class CaseManager:
             logger.warning("fleet status board full flush failed", exc_info=True)
 
     def _on_fleet_board_event(self, event: CasePoolEvent) -> None:
-        """Forward interesting pool edges to the board (append vs full flush).
+        """Forward interesting pool events to the status board.
 
-        REMOVED / EVICTED force a full publish so departed non-terminal cases drop
+        REMOVED / EVICTED force a full publish so cases that left the pool drop
         off (append alone cannot remove a ``case_id`` under last-wins).
         """
         if self._fleet_board is None:
@@ -1419,11 +1464,12 @@ class CaseManager:
         )
 
     async def _readmit_orphans(self) -> OrphanReadmitReport:
-        """Recover phase: re-admit live orphans. See ``case_manager_support.readmit``.
+        """Recover phase: restore live cases that belong in the pool but are missing.
 
-        Lives here because it needs the driver and type registry, not only the
-        store. Results appear on ``RecoverReport``. Not safe to run mid-flight
-        (fights ticket replay).
+        See ``case_manager_support.readmit``. Lives here because it needs the driver
+        and type registry, not only the store. Results appear on ``RecoverReport``.
+        Not safe to run while the manager is already advancing cases (fights ticket
+        replay).
         """
         return readmit_orphans(
             store=self._store,
@@ -1444,9 +1490,9 @@ class CaseManager:
     ) -> None:
         """Stop scheduling a case and wait until it is idle.
 
-        ``request_halt()`` returns immediately; ``HALTED`` fires when the case is
-        neither in flight nor scheduled. If already halted, returns without waiting
-        for another event.
+        ``request_halt()`` returns immediately; ``HALTED`` is emitted when the case
+        is neither mid-advance nor scheduled. If already halted, returns without
+        waiting for another event.
         """
         folder = case_folder.resolve()
         if any(c.case_folder.resolve() == folder for c in self._driver.halted_cases()):
