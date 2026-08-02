@@ -117,8 +117,8 @@ from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import Bal
 
 logger = logging.getLogger(__name__)
 
-_TIER1_KWARGS = frozenset(CaseManagerPolicy.tier1_field_names())
-_TIER2_KWARGS = frozenset(CaseManagerPolicy.tier2_field_names())
+_LAYOUT_KWARGS = frozenset(CaseManagerPolicy.layout_field_names())
+_TUNABLES_KWARGS = frozenset(CaseManagerPolicy.tunables_field_names())
 
 # Consecutive failed loop iterations before the manager gives up retrying and
 # hands the failure to the host (or re-raises). A loop that fails the same way
@@ -148,12 +148,16 @@ class _ResolvedPolicy(NamedTuple):
     policy: CaseManagerPolicy
     policy_path: Path
     manager_dir: Path
-    tier2_overrides: dict[str, Any]
+    tunables_overrides: dict[str, Any]
     is_new: bool
 
 
 class CaseManager:
     """Fleet coordinator composing cache, driver, registry, and protocol dirs."""
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
 
     def __init__(
         self,
@@ -164,7 +168,7 @@ class CaseManager:
         driver_kwargs: dict[str, Any] | None = None,
         registry: CaseTypeRegistry | None = None,
         register_types: Sequence[type[FolderBackedCase]] = (),
-        **tier2_overrides: Any,
+        **tunables_overrides: Any,
     ) -> None:
         """Build a manager over an existing filespace.
 
@@ -173,19 +177,19 @@ class CaseManager:
         with no policy record raises ``PolicyFileMissingError``, so bringing a
         filespace into existence always means naming ``open_local_store()``.
 
-        Keyword arguments are the manager's wiring — driver, registry, case types
-        — plus any Tier 2 tunable, which is applied in memory and leaves the
-        policy record untouched. A Tier 1 field is a layout fact and cannot be
-        supplied here; one that disagrees with the record raises.
+        Keyword arguments are the manager's Bindings — driver, registry, case types
+        — plus any Tunables field, which is applied in memory and leaves the
+        policy record untouched. A Layout field is fixed for the filespace and
+        cannot be supplied here; one that disagrees with the record raises.
         """
         if isinstance(filespace, LocalCaseStore):
             supplied_store: LocalCaseStore | None = filespace
             root = filespace.root_dir
-            resolved = self._resolve_from_store(filespace, tier2_overrides)
+            resolved = self._resolve_from_store(filespace, tunables_overrides)
         else:
             supplied_store = None
             root = Path(filespace).resolve()
-            resolved = self._resolve_policy(root, None, tier2_overrides, init_if_new=False)
+            resolved = self._resolve_policy(root, None, tunables_overrides, init_if_new=False)
 
         self._policy = resolved.policy
         self._cache_root = root
@@ -203,7 +207,7 @@ class CaseManager:
             policy=resolved.policy,
             policy_path=resolved.policy_path,
             manager_dir=resolved.manager_dir,
-            tier2_overrides=resolved.tier2_overrides,
+            tunables_overrides=resolved.tunables_overrides,
             driver=driver,
             driver_class=driver_class,
             driver_kwargs=driver_kwargs or {},
@@ -249,10 +253,6 @@ class CaseManager:
             )
         self._log_startup_summary()
 
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
-
     @classmethod
     def open_local_store(
         cls,
@@ -271,10 +271,9 @@ class CaseManager:
         raises ``PolicyFileMissingError`` rather than being created.
 
         Idempotent: opening the same filespace again is a no-op, and opening it
-        with a conflicting Tier 1 layout fact is loud. Tier 2 tunables are
-        applied to the returned store's policy in memory; on the call that
-        creates the filespace they are also written into the record as its
-        durable defaults.
+        with a conflicting Layout field is loud. Tunables are applied to the
+        returned store's policy in memory; on the call that creates the
+        filespace they are also written into the record as its durable defaults.
         """
         root = Path(cache_root).resolve()
         resolved = cls._resolve_policy(root, policy, overrides, init_if_new=init_if_new)
@@ -288,111 +287,6 @@ class CaseManager:
             resolved.policy.save(str(resolved.policy_path), retain_lock=False)
             cls._ensure_namespace_dirs(resolved.manager_dir, resolved.policy)
         return store
-
-    @classmethod
-    def _resolve_policy(
-        cls,
-        root: Path,
-        policy: CaseManagerPolicy | None,
-        overrides: dict[str, Any],
-        *,
-        init_if_new: bool,
-    ) -> _ResolvedPolicy:
-        """Reconcile a supplied policy and overrides against ``root``'s record.
-
-        Tier 1 fields are layout facts the storage was built on: a supplied value
-        that disagrees with the record raises, naming the field. Tier 2 fields are
-        tunables, applied in memory and never compared — the record holds their
-        defaults, not their only permitted values.
-        """
-        tier1, tier2 = cls._split_overrides(overrides)
-        persisted_path = cls._find_policy_path(root)
-
-        if persisted_path is None:
-            if not init_if_new:
-                raise PolicyFileMissingError(
-                    root / CaseManagerPolicy().manager_namespace / POLICY_FILENAME
-                )
-            cls._validate_fresh_root(root)
-            fresh = policy.model_copy(deep=True) if policy is not None else CaseManagerPolicy()
-            for field, value in tier1.items():
-                setattr(fresh, field, value)
-            mgr_dir = policy_manager_dir(root, fresh)
-            return _ResolvedPolicy(
-                policy=fresh.apply_tier2_overrides(**tier2),
-                policy_path=mgr_dir / POLICY_FILENAME,
-                manager_dir=mgr_dir,
-                tier2_overrides=tier2,
-                is_new=True,
-            )
-
-        persisted = CaseManagerPolicy.load(str(persisted_path), acquire_lock=False)
-        claimed = dict(tier1)
-        if policy is not None:
-            # A whole policy object claims every layout fact it carries, not just
-            # the ones that happen to differ from the defaults.
-            for field in _TIER1_KWARGS:
-                claimed.setdefault(field, getattr(policy, field))
-        for field, value in claimed.items():
-            file_value = getattr(persisted, field)
-            if file_value != value:
-                raise PolicyMismatchError(field, file_value=file_value, override_value=value)
-
-        return _ResolvedPolicy(
-            policy=persisted.apply_tier2_overrides(**tier2),
-            policy_path=persisted_path,
-            manager_dir=policy_manager_dir(root, persisted),
-            tier2_overrides=tier2,
-            is_new=False,
-        )
-
-    @classmethod
-    def _resolve_from_store(
-        cls, store: LocalCaseStore, overrides: dict[str, Any]
-    ) -> _ResolvedPolicy:
-        """Resolve against a store's own policy rather than re-reading the record.
-
-        A store already is the filespace resolved, and its policy may carry Tier 2
-        tuning the record deliberately does not — re-reading here would discard
-        exactly what the caller opened the store to set. Tier 1 needs no check
-        against the record: the store's layout facts are what its storage was
-        built on, which is the stronger of the two claims.
-        """
-        root = store.root_dir
-        policy_path = cls._find_policy_path(root)
-        if policy_path is None:
-            raise PolicyFileMissingError(root / store.policy.manager_namespace / POLICY_FILENAME)
-
-        tier1, tier2 = cls._split_overrides(overrides)
-        for field, value in tier1.items():
-            store_value = getattr(store.policy, field)
-            if store_value != value:
-                raise PolicyMismatchError(field, file_value=store_value, override_value=value)
-
-        return _ResolvedPolicy(
-            policy=store.policy.apply_tier2_overrides(**tier2),
-            policy_path=policy_path,
-            manager_dir=policy_manager_dir(root, store.policy),
-            tier2_overrides=tier2,
-            is_new=False,
-        )
-
-    @staticmethod
-    def _split_overrides(overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Sort override names into (Tier 1, Tier 2), rejecting anything else.
-
-        A name that is neither is a typo or a stale field, and silently dropping
-        it would leave the caller believing a setting took effect.
-        """
-        tier1 = {k: v for k, v in overrides.items() if k in _TIER1_KWARGS}
-        tier2 = {k: v for k, v in overrides.items() if k in _TIER2_KWARGS}
-        unknown = sorted(set(overrides) - set(tier1) - set(tier2))
-        if unknown:
-            raise TypeError(
-                f"Unknown CaseManager policy field(s): {', '.join(unknown)}. "
-                "Keyword arguments must name a Tier 1 layout fact or a Tier 2 tunable."
-            )
-        return tier1, tier2
 
     # ------------------------------------------------------------------
     # Read-only lifecycle introspection (host/observability surface)
@@ -423,14 +317,6 @@ class CaseManager:
         manager can no longer see them. The host composes the two."""
         return len(self._driver) == 0 and not self._departures_in_flight()
 
-    def _departures_in_flight(self) -> bool:
-        """True while any case is on its way out of managed storage."""
-        return bool(
-            replay_pending(self._manager_dir)
-            or pending_quarantine_tickets(self._manager_dir)
-            or self._count_eject_pending()
-        )
-
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -449,35 +335,6 @@ class CaseManager:
         self._recovered = True
         self.last_recover_report = report
         return report
-
-    async def _acquire_filespace(self) -> None:
-        """Claim the one-manager-per-cache-root lease. Idempotent within a session.
-
-        Re-recovering must not trip over the lease this manager already holds, so
-        an active lease is left alone rather than re-acquired.
-        """
-        if self._filespace_lease.is_active():
-            return
-        await acquire_manager_lease(self._filespace_lease)
-
-    def _beat_filespace(self) -> None:
-        """Refresh the filespace lease, surfacing a stolen one as loop failure.
-
-        ``heartbeat`` self-throttles, so calling it every pulse costs a comparison
-        on all but one tick in twenty.
-        """
-        if not self._filespace_lease.is_active():
-            return
-        self._filespace_lease.heartbeat()
-
-    def _release_filespace(self) -> None:
-        """Drop the filespace lease so the next owner need not wait it out."""
-        if not self._filespace_lease.is_active():
-            return
-        try:
-            self._filespace_lease.release()
-        except Exception:
-            logger.exception("Could not release the filespace lease; it will lapse instead")
 
     async def start(self) -> None:
         """Begin the maintenance/sweep loop and the liveness pulse.
@@ -571,367 +428,8 @@ class CaseManager:
         # spares that successor the lease-expiry wait a crash would have cost it.
         self._release_filespace()
 
-    async def _manager_loop(self) -> None:
-        """One tick = maintenance (mailbox intake first), then the pool sweep.
-
-        Maintenance runs at the HEAD of the tick deliberately: externally submitted
-        fire requests are executed before the sweep spends its beat-quantized choke
-        budget, and the post-fire ``boost()`` lands before the sweep so the boosted
-        case is stepped in this same tick rather than the next one.
-
-        Pacing lives inside ``driver.advance()``: the advisory interval is its
-        fixed-rate target period, and maintenance time between beats counts against
-        that period. The loop itself only sleeps on the failure path, where
-        ``advance()`` may have raised before pacing."""
-        interval = self._policy.maintenance_interval_secs
-        consecutive_failures = 0
-        while self._running and not self._stopping:
-            try:
-                await self._maintenance_tick()
-                await self._driver.advance(suggested_interval_secs=interval)
-                self._reconcile_terminal_in_pool()
-                consecutive_failures = 0
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                consecutive_failures += 1
-                logger.exception(
-                    "Manager loop iteration failed (%d consecutive of %d allowed)",
-                    consecutive_failures,
-                    _LOOP_FAILURE_LIMIT,
-                )
-                if consecutive_failures >= _LOOP_FAILURE_LIMIT:
-                    if self._loop_failure_cb is not None:
-                        logger.error(
-                            "Manager loop giving up after %d consecutive failures; "
-                            "invoking on_loop_failure",
-                            consecutive_failures,
-                        )
-                        self._loop_failure_cb(exc)
-                        return
-                    raise
-                await asyncio.sleep(interval)
-
-    async def _pulse_loop(self) -> None:
-        """Liveness pulse — measures the event loop, not the tick.
-
-        Stamps ``_last_pulse`` every ``PULSE_INTERVAL_SECS`` (the watchdog's
-        kill-authorized signal) and writes the manifest heartbeat on its own
-        cadence, so a healthy manager doing one slow mailbox fire never looks
-        stale to clients."""
-        while self._running:
-            now = time.monotonic()
-            self._last_pulse = now
-            # Losing the filespace lease is not a pulse hiccup to log and carry on
-            # from: it means another manager is on this cache root and this one must
-            # stop touching it. Hand it to the loop-failure path, which is the seam
-            # that already knows how to take a manager down.
-            try:
-                self._beat_filespace()
-            except LeaseOwnershipLostError as exc:
-                logger.critical(
-                    "Filespace ownership lost — another manager has taken this cache root. "
-                    "Standing down rather than competing with it: %r", exc,
-                )
-                # Clearing _running also winds the manager loop down, so even a bare
-                # embedded manager with no failure callback stops driving.
-                self._running = False
-                if self._loop_failure_cb is not None:
-                    self._loop_failure_cb(exc)
-                return
-            if now - self._last_heartbeat_write >= self._policy.maintenance_interval_secs:
-                try:
-                    self._write_manifest(running=True)
-                except Exception:
-                    logger.exception("Pulse loop manifest heartbeat write failed")
-                else:
-                    self._last_heartbeat_write = now
-            await asyncio.sleep(PULSE_INTERVAL_SECS)
-
-    async def _maintenance_tick(self) -> None:
-        """One maintenance pass: termination tickets, eject tickets, mailbox, purge.
-
-        Every item is isolated. A single malformed ticket must degrade to "that
-        ticket is quarantined and escalated" rather than aborting the tick — an
-        aborted tick silently skips the mailbox drain, the purge, and the board
-        publish, and a ticket that fails the same way every tick would otherwise
-        exhaust the loop-failure budget and take the whole manager down.
-        """
-        self._last_tick_started = time.monotonic()
-        loop = asyncio.get_running_loop()
-        for callback in self._maintenance_cbs:
-            with self._isolated_tick_item("maintenance callback", self._manager_dir):
-                await callback()
-        for ticket_file in replay_pending(self._manager_dir):
-            with self._isolated_tick_item("termination ticket", ticket_file):
-                await self._drive_ticket(
-                    "termination", ticket_file, self._advance_termination_ticket
-                )
-        for ticket_file in pending_quarantine_tickets(self._manager_dir):
-            with self._isolated_tick_item("quarantine ticket", ticket_file):
-                await self._drive_ticket(
-                    "quarantine", ticket_file, self._advance_quarantine_ticket
-                )
-        eject_pending = eject_dir(self._manager_dir) / "pending"
-        if eject_pending.exists():
-            for ticket_file in sorted(eject_pending.glob("*.yaml")):
-                with self._isolated_tick_item("eject ticket", ticket_file):
-                    await self._drive_ticket(
-                        "eject", ticket_file, self._advance_eject_ticket
-                    )
-        if self._policy.redundant_purge_terminal_after_secs is not None or (
-            self._policy.redundant_purge_aberrant_after_secs is not None
-        ):
-            with self._isolated_tick_item("redundant purge", self._manager_dir):
-                await loop.run_in_executor(
-                    None, lambda: run_redundant_purge(self._store, self._policy)
-                )
-        self._publish_fleet_status_board()
-        with self._isolated_tick_item("condition detection", self._manager_dir):
-            self._detect_escalations()
-        self._last_tick_completed = time.monotonic()
-
-    async def _drive_ticket(
-        self, what: str, ticket_file: Path, advance: Callable[[Path], Awaitable[None]]
-    ) -> None:
-        """Run one ticket, counting attempts somewhere the ticket cannot corrupt.
-
-        A ticket's own ``retry_count`` is the right place to count — right up
-        until the ticket is the thing that is broken. One that will not parse can
-        never record that it was tried, so without an outside count it is retried
-        every tick forever while the case it describes sits removed from the
-        pool, detached, and un-enqueueable.
-
-        Below the threshold this re-raises, so the enclosing isolation logs and
-        notices exactly as before and the next tick tries again — a transient
-        failure must not burn through the budget on its first occurrence. At the
-        threshold the ticket is retired.
-        """
-        try:
-            await advance(ticket_file)
-        except Exception:
-            if self._ticket_attempts.record_failure(ticket_file) < (
-                self._policy.termination_max_retries
-            ):
-                raise
-            await self._retire_unprocessable_ticket(what, ticket_file)
-        else:
-            self._ticket_attempts.forget(ticket_file)
-
-    async def _retire_unprocessable_ticket(self, what: str, ticket_file: Path) -> None:
-        """Give up on a ticket, and on driving the case it describes.
-
-        The case is quarantined rather than repaired: the manager could not read
-        what it was supposed to do, so guessing would mean inventing a departure
-        the operator never asked for. Quarantine is the established posture for
-        exactly this — stop interacting, record why, leave it recoverable via
-        ``reopen_case()``.
-
-        The ``case_id`` comes from the *filename*, which is the one field a
-        corrupt ticket cannot take with it.
-        """
-        case_id = ticket_file.stem
-        self._ticket_attempts.forget(ticket_file)
-        logger.error(
-            "Abandoning unprocessable %s ticket for case %s after %d attempts",
-            what,
-            case_id,
-            self._policy.termination_max_retries,
-        )
-        failed_dir = ticket_file.parent.parent / "failed"
-        try:
-            failed_dir.mkdir(parents=True, exist_ok=True)
-            ticket_file.replace(failed_dir / ticket_file.name)
-        except OSError:
-            logger.exception("Could not retire %s to %s; unlinking", ticket_file, failed_dir)
-            ticket_file.unlink(missing_ok=True)
-
-        self._notices.emit_simple(
-            "TICKET_ABANDONED", case_id, ticket_file, f"{what} ticket is unprocessable"
-        )
-        # The waiter map is populated only by eject, so this settles an eject
-        # caller who would otherwise wait on a ticket that no longer exists.
-        waiter = self._eject_waiters.pop(case_id, None)
-        if waiter is not None and not waiter.done():
-            waiter.set_exception(
-                EjectAbandonedError(case_id=case_id, reason="eject ticket is unprocessable")
-            )
-
-        folder = await self._store.resolve_path(case_id)
-        if folder is not None:
-            await self._quarantine(
-                case_id, folder, f"{what} ticket could not be processed"
-            )
-
-    async def _advance_termination_ticket(self, ticket_file: Path) -> None:
-        ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
-        await process_pending_ticket(
-            ticket,
-            ticket_file,
-            store=self._store,
-            policy=self._policy,
-            manager_dir=self._manager_dir,
-            quarantine=self._quarantine,
-            emit_notice=self._emit_notice,
-        )
-
-    async def _advance_quarantine_ticket(self, ticket_file: Path) -> None:
-        ticket = QuarantineTicket.load(str(ticket_file), acquire_lock=False)
-        landed = await process_quarantine_ticket(
-            ticket,
-            ticket_file,
-            store=self._store,
-            manager_dir=self._manager_dir,
-            max_retries=self._policy.termination_max_retries,
-        )
-        if landed is not None:
-            self._emit_notice("CASE_QUARANTINED", ticket.case_id, landed, ticket.reason)
-
-    async def _advance_eject_ticket(self, ticket_file: Path) -> None:
-        """Drive one eject ticket and settle its waiter either way.
-
-        A give-up has to reach the caller. ``eject_from_pool()`` resolves on the
-        export completing, and with the ticket retired to ``failed/`` there is
-        nothing left that could ever resolve it — a caller who passed no timeout
-        would wait forever.
-        """
-        ticket = EjectTicket.load(str(ticket_file), acquire_lock=False)
-        try:
-            result = await process_eject_ticket(
-                ticket,
-                ticket_file,
-                store=self._store,
-                policy=self._policy,
-                manager_dir=self._manager_dir,
-            )
-        except EjectAbandonedError as exc:
-            self._notices.emit_simple(
-                "EJECT_FAILED", ticket.case_id, Path(ticket.case_folder), exc.reason
-            )
-            fut = self._eject_waiters.pop(ticket.case_id, None)
-            if fut is not None and not fut.done():
-                fut.set_exception(exc)
-            return
-        if result is None:
-            return
-        self._emit_notice("CASE_EJECTED", ticket.case_id, result.export_folder)
-        fut = self._eject_waiters.pop(ticket.case_id, None)
-        if fut is not None and not fut.done():
-            fut.set_result(result)
-
-    def _fleet_locate(self) -> Callable[[str], Any]:
-        return lambda cid: self.locate(case_id=cid)
-
-    def _notify_fleet_board(self, case: FolderBackedCase, *, force: bool = False) -> None:
-        if self._fleet_board is None:
-            return
-        try:
-            self._fleet_board.notify(
-                case,
-                force=force,
-                live_cases=list(self._driver),
-                locate=self._fleet_locate(),
-            )
-        except Exception:
-            logger.warning("fleet status board notify failed", exc_info=True)
-
-    def _publish_fleet_status_board(self, *, force: bool = False) -> None:
-        if self._fleet_board is None:
-            return
-        try:
-            self._fleet_board.publish_full_if_due(
-                list(self._driver),
-                locate=self._fleet_locate(),
-                force=force,
-            )
-        except Exception:
-            logger.warning("fleet status board full flush failed", exc_info=True)
-
-    def _on_fleet_board_event(self, event: CasePoolEvent) -> None:
-        """Interesting pool edges → notify the board; it decides append vs full flush.
-
-        REMOVED / EVICTED need a full publish so departed non-terminal cases drop
-        off the board (append alone cannot remove a case_id under last-wins).
-        """
-        if self._fleet_board is None:
-            return
-        if event.event in (CasePoolEventNames.REMOVED, CasePoolEventNames.EVICTED):
-            self._publish_fleet_status_board(force=True)
-            return
-        if event.event == CasePoolEventNames.ADVANCED:
-            ar = event.advance_result
-            if ar is None or not ar.progressed:
-                return
-        self._notify_fleet_board(event.case)
-
-    def _reconcile_terminal_in_pool(self) -> int:
-        """Enqueue termination for terminal cases still sitting in the pool.
-
-        Isolated per case. ``begin_termination`` is remove → detach → write ticket;
-        a ticket write that raises leaves that one case out of the pool, detached,
-        and ticketless, which is bad enough on its own — it must not also abort the
-        pass for every other terminal case, nor spend the loop-failure budget.
-        """
-        count = 0
-        for case in self._driver.terminal_cases():
-            if ticket_exists(self._manager_dir, case.case_id):
-                continue
-            if self._store.status_of(case.case_id) not in (LIVE, None):
-                continue    # already departed; its stored status is the receipt
-            with self._isolated_tick_item("terminal reconcile", case.case_folder):
-                if self._fleet_board is not None:
-                    self._fleet_board.note_terminal(case)
-                    self._notify_fleet_board(case, force=True)
-                if begin_termination(
-                    case,
-                    manager_dir=self._manager_dir,
-                    policy=self._policy,
-                    driver_remove=self._driver.remove,
-                ):
-                    count += 1
-        return count
-
-    def _on_terminated_event(self, event: CasePoolEvent) -> None:
-        if self._fleet_board is not None:
-            self._fleet_board.note_terminal(event.case)
-            self._notify_fleet_board(event.case, force=True)
-        begin_termination(
-            event.case,
-            manager_dir=self._manager_dir,
-            policy=self._policy,
-            driver_remove=self._driver.remove,
-        )
-
-    async def _readmit_orphans(self) -> OrphanReadmitReport:
-        """A phase of ``recover()``. See ``case_manager_support.readmit``.
-
-        The join across pool membership, the store's status, and the type
-        registry stays here rather than moving into the store: answering it needs
-        the driver and the registry, and injecting those into a storage object
-        would rebuild the very dependency the store exists to remove.
-
-        What it found reaches callers on the ``RecoverReport``; there is no reason
-        to run it on its own, and running it mid-flight would fight ticket replay.
-        """
-        return readmit_orphans(
-            store=self._store,
-            driver=self._driver,
-            registry=self._registry,
-            has_departure_ticket=self._has_departure_ticket,
-            emit_anomaly=lambda cid, folder, msg: self._notices.emit_simple(
-                "READMIT_ANOMALY", cid, folder, msg
-            ),
-        )
-
-    def _has_departure_ticket(self, case_id: str) -> bool:
-        """True when the case is already on its way out of the pool."""
-        return (
-            eject_ticket_path(self._manager_dir, case_id).exists()
-            or quarantine_ticket_exists(self._manager_dir, case_id)
-        )
-
     # ------------------------------------------------------------------
-    # Case fleet API
+    # Case fleet API — intake & departure
     # ------------------------------------------------------------------
 
     async def adopt_case(
@@ -1036,45 +534,6 @@ class CaseManager:
                 raise EjectTimeoutError(case_id=case_id, stuck=stuck)
         return await fut
 
-    async def _halt_and_settle(
-        self, case_folder: Path, *, case_id: str, timeout: float | None
-    ) -> None:
-        """Stop scheduling a case and wait until it is genuinely idle.
-
-        ``request_halt()`` returns immediately; ``HALTED`` fires once the case is
-        neither in flight nor scheduled. A case that has already halted will not
-        fire it again, so that is checked first rather than waited for.
-        """
-        folder = case_folder.resolve()
-        if any(c.case_folder.resolve() == folder for c in self._driver.halted_cases()):
-            return
-
-        settled: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-
-        def on_halted(event: CasePoolEvent) -> None:
-            if not settled.done() and event.case.case_folder.resolve() == folder:
-                settled.set_result(None)
-
-        # Subscribe before requesting: an already-idle case fires HALTED
-        # synchronously inside request_halt(), and we must not miss it.
-        handle = self._driver.case_event_subscribe(CasePoolEventNames.HALTED, on_halted)
-        try:
-            self._driver.request_halt(case_folder)
-            if timeout is None:
-                await settled
-            else:
-                try:
-                    await asyncio.wait_for(settled, timeout=timeout)
-                except asyncio.TimeoutError:
-                    raise EjectTimeoutError(
-                        case_id=case_id, stuck=self._collect_stuck_triggers()
-                    ) from None
-        finally:
-            try:
-                self._driver.case_event_unsubscribe(handle)
-            except KeyError:
-                pass
-
     async def reopen_case(self, case_id: str) -> None:
         """Return a departed case to the live pool.
 
@@ -1087,6 +546,10 @@ class CaseManager:
             raise LiveCaseNotFoundError(case_id)
         folder = await self._store.set_status(case_id, LIVE)
         self._driver.add(self._registry.rehydrate(folder))
+
+    # ------------------------------------------------------------------
+    # Case fleet API — live operations
+    # ------------------------------------------------------------------
 
     def get_live(self, case_id: str) -> FolderBackedCase:
         """The live case object itself, for out-of-band work.
@@ -1252,6 +715,10 @@ class CaseManager:
         self._notify_fleet_board(fresh)
         return fresh
 
+    # ------------------------------------------------------------------
+    # Case fleet API — lookup & iteration
+    # ------------------------------------------------------------------
+
     def locate(
         self,
         *,
@@ -1338,9 +805,9 @@ class CaseManager:
         """Cases the manager has stopped driving. See ``support.quarantine``."""
         yield from self._readers_at(QUARANTINED)
 
-    def _readers_at(self, status: str) -> Iterator[FolderBackedCaseReader]:
-        for entry in self._store.iter_by_status(status):
-            yield FolderBackedCaseReader(entry.case_folder)
+    # ------------------------------------------------------------------
+    # Observability hooks
+    # ------------------------------------------------------------------
 
     def on_notice(self, callback: Callable[[CaseNotice], None]) -> int:
         """Subscribe to manager notices. Returns a handle for ``off_notice()``.
@@ -1377,8 +844,114 @@ class CaseManager:
         self._maintenance_cbs.append(callback)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Construction helpers
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _resolve_policy(
+        cls,
+        root: Path,
+        policy: CaseManagerPolicy | None,
+        overrides: dict[str, Any],
+        *,
+        init_if_new: bool,
+    ) -> _ResolvedPolicy:
+        """Reconcile a supplied policy and overrides against ``root``'s record.
+
+        Layout fields are fixed facts the storage was built on: a supplied value
+        that disagrees with the record raises, naming the field. Tunables are
+        applied in memory and never compared — the record holds their
+        defaults, not their only permitted values.
+        """
+        layout, tunables = cls._split_overrides(overrides)
+        persisted_path = cls._find_policy_path(root)
+
+        if persisted_path is None:
+            if not init_if_new:
+                raise PolicyFileMissingError(
+                    root / CaseManagerPolicy().manager_namespace / POLICY_FILENAME
+                )
+            cls._validate_fresh_root(root)
+            fresh = policy.model_copy(deep=True) if policy is not None else CaseManagerPolicy()
+            for field, value in layout.items():
+                setattr(fresh, field, value)
+            mgr_dir = policy_manager_dir(root, fresh)
+            return _ResolvedPolicy(
+                policy=fresh.apply_tunables_overrides(**tunables),
+                policy_path=mgr_dir / POLICY_FILENAME,
+                manager_dir=mgr_dir,
+                tunables_overrides=tunables,
+                is_new=True,
+            )
+
+        persisted = CaseManagerPolicy.load(str(persisted_path), acquire_lock=False)
+        claimed = dict(layout)
+        if policy is not None:
+            # A whole policy object claims every Layout field it carries, not just
+            # the ones that happen to differ from the defaults.
+            for field in _LAYOUT_KWARGS:
+                claimed.setdefault(field, getattr(policy, field))
+        for field, value in claimed.items():
+            file_value = getattr(persisted, field)
+            if file_value != value:
+                raise PolicyMismatchError(field, file_value=file_value, override_value=value)
+
+        return _ResolvedPolicy(
+            policy=persisted.apply_tunables_overrides(**tunables),
+            policy_path=persisted_path,
+            manager_dir=policy_manager_dir(root, persisted),
+            tunables_overrides=tunables,
+            is_new=False,
+        )
+
+    @classmethod
+    def _resolve_from_store(
+        cls, store: LocalCaseStore, overrides: dict[str, Any]
+    ) -> _ResolvedPolicy:
+        """Resolve against a store's own policy rather than re-reading the record.
+
+        A store already is the filespace resolved, and its policy may carry Tunables
+        tuning the record deliberately does not — re-reading here would discard
+        exactly what the caller opened the store to set. Layout needs no check
+        against the record: the store's Layout fields are what its storage was
+        built on, which is the stronger of the two claims.
+        """
+        root = store.root_dir
+        policy_path = cls._find_policy_path(root)
+        if policy_path is None:
+            raise PolicyFileMissingError(root / store.policy.manager_namespace / POLICY_FILENAME)
+
+        layout, tunables = cls._split_overrides(overrides)
+        for field, value in layout.items():
+            store_value = getattr(store.policy, field)
+            if store_value != value:
+                raise PolicyMismatchError(field, file_value=store_value, override_value=value)
+
+        return _ResolvedPolicy(
+            policy=store.policy.apply_tunables_overrides(**tunables),
+            policy_path=policy_path,
+            manager_dir=policy_manager_dir(root, store.policy),
+            tunables_overrides=tunables,
+            is_new=False,
+        )
+
+    @staticmethod
+    def _split_overrides(overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Sort override names into (Layout, Tunables), rejecting anything else.
+
+        A name that is neither is a typo or a stale field, and silently dropping
+        it would leave the caller believing a setting took effect. Bindings keys
+        are accepted as named parameters on ``CaseManager``, not via this bag.
+        """
+        layout = {k: v for k, v in overrides.items() if k in _LAYOUT_KWARGS}
+        tunables = {k: v for k, v in overrides.items() if k in _TUNABLES_KWARGS}
+        unknown = sorted(set(overrides) - set(layout) - set(tunables))
+        if unknown:
+            raise TypeError(
+                f"Unknown CaseManager policy field(s): {', '.join(unknown)}. "
+                "Keyword arguments must name a Layout field or a Tunables field."
+            )
+        return layout, tunables
 
     def _build_default_driver(self) -> CasePoolDriver:
         """Construct the driver from ``self._config`` (driver_class/driver_kwargs).
@@ -1396,93 +969,6 @@ class CaseManager:
             kwargs.setdefault("concurrency_ceiling", self._policy.concurrency_ceiling)
             kwargs.setdefault("choke_limits", self._policy.choke_limits)
         return cls(**kwargs)
-
-    def _to_location(self, entry: CaseEntry) -> CaseLocation:
-        reader = FolderBackedCaseReader(entry.case_folder)
-        return CaseLocation(
-            case_id=entry.case_id,
-            external_key=reader.case_external_key,
-            case_folder=entry.case_folder,
-            status=entry.status,
-            in_pool=any(c.case_id == entry.case_id for c in self._driver),
-            terminal=reader.case_is_terminal,
-        )
-
-    def _resolve_single(
-        self,
-        *,
-        case_id: str | None = None,
-        case_folder: Path | None = None,
-    ) -> CaseLocation | None:
-        if (case_id is None) == (case_folder is None):
-            raise InvalidAddressingError()
-        return self.locate(case_id=case_id, case_folder=case_folder)
-
-    async def _quarantine(self, case_id: str, folder: Path, reason: str) -> Path | None:
-        landed = await quarantine_case(
-            self._store, self._manager_dir, case_id, folder, reason
-        )
-        if landed is not None:
-            self._emit_notice("CASE_QUARANTINED", case_id, landed, reason)
-        return landed
-
-    def _emit_notice(
-        self, kind: str, case_id: str, folder: Path | None, detail: str | None = None
-    ) -> None:
-        self._notices.emit_simple(kind, case_id, folder, detail)
-
-    def _readmit_after_failed_reclassify(
-        self, folder: Path, case: FolderBackedCase
-    ) -> None:
-        """Best-effort return of a case to the pool after a failed reclassify."""
-        try:
-            readd = self._registry.rehydrate(folder) if case.case_is_detached else case
-            self._driver.add(readd)
-        except Exception:
-            logger.exception(
-                "reclassify_case: failed to re-admit %s after reclassify error", folder
-            )
-
-    @contextmanager
-    def _isolated_tick_item(self, what: str, source: Path) -> Iterator[None]:
-        """Contain one maintenance-tick item's failure. See ``_maintenance_tick``."""
-        try:
-            yield
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception("Maintenance tick: %s failed (%s); skipping", what, source)
-            self._notices.emit_simple(
-                "MAINTENANCE_ITEM_FAILED", None, source, f"{what}: {exc!r}"
-            )
-
-    def _count_termination_pending(self) -> int:
-        return len(replay_pending(self._manager_dir))
-
-    def _count_eject_pending(self) -> int:
-        pending = eject_dir(self._manager_dir) / "pending"
-        return len(list(pending.glob("*.yaml"))) if pending.exists() else 0
-
-    async def _scan_adopt_drop(self) -> dict[str, int]:
-        drop = self._manager_dir / self._policy.adopt_drop_subdir
-        seen = admitted = rejected = skipped = 0
-        if not drop.exists():
-            return {"seen": 0, "admitted": 0, "rejected": 0, "skipped": 0}
-        for child in sorted(drop.iterdir()):
-            if not child.is_dir():
-                continue
-            if child.name.startswith("ADOPT_REJECTED_"):
-                skipped += 1
-                continue
-            seen += 1
-            result = await self.adopt_case(child)
-            if result.status == "completed":
-                admitted += 1
-            else:
-                rejected += 1
-                new_name = drop / f"ADOPT_REJECTED_{child.name}"
-                child.rename(new_name)
-        return {"seen": seen, "admitted": admitted, "rejected": rejected, "skipped": skipped}
 
     def _ensure_namespace(self) -> None:
         self._ensure_namespace_dirs(self._manager_dir, self._policy)
@@ -1562,6 +1048,595 @@ class CaseManager:
             len(self._notices),
         )
 
+    @staticmethod
+    def _find_policy_path(root: Path) -> Path | None:
+        if not root.exists():
+            return None
+        for candidate in (
+            root / ".case_manager" / POLICY_FILENAME,
+            root / POLICY_FILENAME,
+        ):
+            if candidate.exists():
+                return candidate
+        ns_dirs = [
+            p for p in root.iterdir()
+            if p.is_dir() and p.name.startswith(".case_manager")
+        ]
+        for ns in ns_dirs:
+            p = ns / POLICY_FILENAME
+            if p.exists():
+                return p
+        return None
+
+    @staticmethod
+    def _validate_fresh_root(root: Path) -> None:
+        """Guard the only path that can create a filespace.
+
+        Reached solely when no policy record was found, so a non-empty root here
+        is somebody else's directory: initialising over it is not a mistake worth
+        making convenient.
+        """
+        if root.exists() and not CaseManager._is_empty_dir(root):
+            raise CacheRootStateError(root)
+        if not root.exists() and not root.parent.exists():
+            raise CacheRootStateError(root, detail="parent directory missing")
+
+    @staticmethod
+    def _is_empty_dir(path: Path) -> bool:
+        if not path.is_dir():
+            return False
+        return not any(path.iterdir())
+
+    # ------------------------------------------------------------------
+    # Filespace lease
+    # ------------------------------------------------------------------
+
+    async def _acquire_filespace(self) -> None:
+        """Claim the one-manager-per-cache-root lease. Idempotent within a session.
+
+        Re-recovering must not trip over the lease this manager already holds, so
+        an active lease is left alone rather than re-acquired.
+        """
+        if self._filespace_lease.is_active():
+            return
+        await acquire_manager_lease(self._filespace_lease)
+
+    def _beat_filespace(self) -> None:
+        """Refresh the filespace lease, surfacing a stolen one as loop failure.
+
+        ``heartbeat`` self-throttles, so calling it every pulse costs a comparison
+        on all but one tick in twenty.
+        """
+        if not self._filespace_lease.is_active():
+            return
+        self._filespace_lease.heartbeat()
+
+    def _release_filespace(self) -> None:
+        """Drop the filespace lease so the next owner need not wait it out."""
+        if not self._filespace_lease.is_active():
+            return
+        try:
+            self._filespace_lease.release()
+        except Exception:
+            logger.exception("Could not release the filespace lease; it will lapse instead")
+
+    # ------------------------------------------------------------------
+    # Manager loops
+    # ------------------------------------------------------------------
+
+    async def _manager_loop(self) -> None:
+        """One tick = maintenance (mailbox intake first), then the pool sweep.
+
+        Maintenance runs at the HEAD of the tick deliberately: externally submitted
+        fire requests are executed before the sweep spends its beat-quantized choke
+        budget, and the post-fire ``boost()`` lands before the sweep so the boosted
+        case is stepped in this same tick rather than the next one.
+
+        Pacing lives inside ``driver.advance()``: the advisory interval is its
+        fixed-rate target period, and maintenance time between beats counts against
+        that period. The loop itself only sleeps on the failure path, where
+        ``advance()`` may have raised before pacing."""
+        interval = self._policy.maintenance_interval_secs
+        consecutive_failures = 0
+        while self._running and not self._stopping:
+            try:
+                await self._maintenance_tick()
+                await self._driver.advance(suggested_interval_secs=interval)
+                self._reconcile_terminal_in_pool()
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                logger.exception(
+                    "Manager loop iteration failed (%d consecutive of %d allowed)",
+                    consecutive_failures,
+                    _LOOP_FAILURE_LIMIT,
+                )
+                if consecutive_failures >= _LOOP_FAILURE_LIMIT:
+                    if self._loop_failure_cb is not None:
+                        logger.error(
+                            "Manager loop giving up after %d consecutive failures; "
+                            "invoking on_loop_failure",
+                            consecutive_failures,
+                        )
+                        self._loop_failure_cb(exc)
+                        return
+                    raise
+                await asyncio.sleep(interval)
+
+    async def _pulse_loop(self) -> None:
+        """Liveness pulse — measures the event loop, not the tick.
+
+        Stamps ``_last_pulse`` every ``PULSE_INTERVAL_SECS`` (the watchdog's
+        kill-authorized signal) and writes the manifest heartbeat on its own
+        cadence, so a healthy manager doing one slow mailbox fire never looks
+        stale to clients."""
+        while self._running:
+            now = time.monotonic()
+            self._last_pulse = now
+            # Losing the filespace lease is not a pulse hiccup to log and carry on
+            # from: it means another manager is on this cache root and this one must
+            # stop touching it. Hand it to the loop-failure path, which is the seam
+            # that already knows how to take a manager down.
+            try:
+                self._beat_filespace()
+            except LeaseOwnershipLostError as exc:
+                logger.critical(
+                    "Filespace ownership lost — another manager has taken this cache root. "
+                    "Standing down rather than competing with it: %r", exc,
+                )
+                # Clearing _running also winds the manager loop down, so even a bare
+                # embedded manager with no failure callback stops driving.
+                self._running = False
+                if self._loop_failure_cb is not None:
+                    self._loop_failure_cb(exc)
+                return
+            if now - self._last_heartbeat_write >= self._policy.maintenance_interval_secs:
+                try:
+                    self._write_manifest(running=True)
+                except Exception:
+                    logger.exception("Pulse loop manifest heartbeat write failed")
+                else:
+                    self._last_heartbeat_write = now
+            await asyncio.sleep(PULSE_INTERVAL_SECS)
+
+    async def _maintenance_tick(self) -> None:
+        """One maintenance pass: termination tickets, eject tickets, mailbox, purge.
+
+        Every item is isolated. A single malformed ticket must degrade to "that
+        ticket is quarantined and escalated" rather than aborting the tick — an
+        aborted tick silently skips the mailbox drain, the purge, and the board
+        publish, and a ticket that fails the same way every tick would otherwise
+        exhaust the loop-failure budget and take the whole manager down.
+        """
+        self._last_tick_started = time.monotonic()
+        loop = asyncio.get_running_loop()
+        for callback in self._maintenance_cbs:
+            with self._isolated_tick_item("maintenance callback", self._manager_dir):
+                await callback()
+        for ticket_file in replay_pending(self._manager_dir):
+            with self._isolated_tick_item("termination ticket", ticket_file):
+                await self._drive_ticket(
+                    "termination", ticket_file, self._advance_termination_ticket
+                )
+        for ticket_file in pending_quarantine_tickets(self._manager_dir):
+            with self._isolated_tick_item("quarantine ticket", ticket_file):
+                await self._drive_ticket(
+                    "quarantine", ticket_file, self._advance_quarantine_ticket
+                )
+        eject_pending = eject_dir(self._manager_dir) / "pending"
+        if eject_pending.exists():
+            for ticket_file in sorted(eject_pending.glob("*.yaml")):
+                with self._isolated_tick_item("eject ticket", ticket_file):
+                    await self._drive_ticket(
+                        "eject", ticket_file, self._advance_eject_ticket
+                    )
+        if self._policy.redundant_purge_terminal_after_secs is not None or (
+            self._policy.redundant_purge_aberrant_after_secs is not None
+        ):
+            with self._isolated_tick_item("redundant purge", self._manager_dir):
+                await loop.run_in_executor(
+                    None, lambda: run_redundant_purge(self._store, self._policy)
+                )
+        self._publish_fleet_status_board()
+        with self._isolated_tick_item("condition detection", self._manager_dir):
+            self._detect_escalations()
+        self._last_tick_completed = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # Ticket processing
+    # ------------------------------------------------------------------
+
+    async def _drive_ticket(
+        self, what: str, ticket_file: Path, advance: Callable[[Path], Awaitable[None]]
+    ) -> None:
+        """Run one ticket, counting attempts somewhere the ticket cannot corrupt.
+
+        A ticket's own ``retry_count`` is the right place to count — right up
+        until the ticket is the thing that is broken. One that will not parse can
+        never record that it was tried, so without an outside count it is retried
+        every tick forever while the case it describes sits removed from the
+        pool, detached, and un-enqueueable.
+
+        Below the threshold this re-raises, so the enclosing isolation logs and
+        notices exactly as before and the next tick tries again — a transient
+        failure must not burn through the budget on its first occurrence. At the
+        threshold the ticket is retired.
+        """
+        try:
+            await advance(ticket_file)
+        except Exception:
+            if self._ticket_attempts.record_failure(ticket_file) < (
+                self._policy.termination_max_retries
+            ):
+                raise
+            await self._retire_unprocessable_ticket(what, ticket_file)
+        else:
+            self._ticket_attempts.forget(ticket_file)
+
+    async def _retire_unprocessable_ticket(self, what: str, ticket_file: Path) -> None:
+        """Give up on a ticket, and on driving the case it describes.
+
+        The case is quarantined rather than repaired: the manager could not read
+        what it was supposed to do, so guessing would mean inventing a departure
+        the operator never asked for. Quarantine is the established posture for
+        exactly this — stop interacting, record why, leave it recoverable via
+        ``reopen_case()``.
+
+        The ``case_id`` comes from the *filename*, which is the one field a
+        corrupt ticket cannot take with it.
+        """
+        case_id = ticket_file.stem
+        self._ticket_attempts.forget(ticket_file)
+        logger.error(
+            "Abandoning unprocessable %s ticket for case %s after %d attempts",
+            what,
+            case_id,
+            self._policy.termination_max_retries,
+        )
+        failed_dir = ticket_file.parent.parent / "failed"
+        try:
+            failed_dir.mkdir(parents=True, exist_ok=True)
+            ticket_file.replace(failed_dir / ticket_file.name)
+        except OSError:
+            logger.exception("Could not retire %s to %s; unlinking", ticket_file, failed_dir)
+            ticket_file.unlink(missing_ok=True)
+
+        self._notices.emit_simple(
+            "TICKET_ABANDONED", case_id, ticket_file, f"{what} ticket is unprocessable"
+        )
+        # The waiter map is populated only by eject, so this settles an eject
+        # caller who would otherwise wait on a ticket that no longer exists.
+        waiter = self._eject_waiters.pop(case_id, None)
+        if waiter is not None and not waiter.done():
+            waiter.set_exception(
+                EjectAbandonedError(case_id=case_id, reason="eject ticket is unprocessable")
+            )
+
+        folder = await self._store.resolve_path(case_id)
+        if folder is not None:
+            await self._quarantine(
+                case_id, folder, f"{what} ticket could not be processed"
+            )
+
+    async def _advance_termination_ticket(self, ticket_file: Path) -> None:
+        ticket = TerminationTicket.load(str(ticket_file), acquire_lock=False)
+        await process_pending_ticket(
+            ticket,
+            ticket_file,
+            store=self._store,
+            policy=self._policy,
+            manager_dir=self._manager_dir,
+            quarantine=self._quarantine,
+            emit_notice=self._emit_notice,
+        )
+
+    async def _advance_quarantine_ticket(self, ticket_file: Path) -> None:
+        ticket = QuarantineTicket.load(str(ticket_file), acquire_lock=False)
+        landed = await process_quarantine_ticket(
+            ticket,
+            ticket_file,
+            store=self._store,
+            manager_dir=self._manager_dir,
+            max_retries=self._policy.termination_max_retries,
+        )
+        if landed is not None:
+            self._emit_notice("CASE_QUARANTINED", ticket.case_id, landed, ticket.reason)
+
+    async def _advance_eject_ticket(self, ticket_file: Path) -> None:
+        """Drive one eject ticket and settle its waiter either way.
+
+        A give-up has to reach the caller. ``eject_from_pool()`` resolves on the
+        export completing, and with the ticket retired to ``failed/`` there is
+        nothing left that could ever resolve it — a caller who passed no timeout
+        would wait forever.
+        """
+        ticket = EjectTicket.load(str(ticket_file), acquire_lock=False)
+        try:
+            result = await process_eject_ticket(
+                ticket,
+                ticket_file,
+                store=self._store,
+                policy=self._policy,
+                manager_dir=self._manager_dir,
+            )
+        except EjectAbandonedError as exc:
+            self._notices.emit_simple(
+                "EJECT_FAILED", ticket.case_id, Path(ticket.case_folder), exc.reason
+            )
+            fut = self._eject_waiters.pop(ticket.case_id, None)
+            if fut is not None and not fut.done():
+                fut.set_exception(exc)
+            return
+        if result is None:
+            return
+        self._emit_notice("CASE_EJECTED", ticket.case_id, result.export_folder)
+        fut = self._eject_waiters.pop(ticket.case_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(result)
+
+    def _count_termination_pending(self) -> int:
+        return len(replay_pending(self._manager_dir))
+
+    def _count_eject_pending(self) -> int:
+        pending = eject_dir(self._manager_dir) / "pending"
+        return len(list(pending.glob("*.yaml"))) if pending.exists() else 0
+
+    def _has_departure_ticket(self, case_id: str) -> bool:
+        """True when the case is already on its way out of the pool."""
+        return (
+            eject_ticket_path(self._manager_dir, case_id).exists()
+            or quarantine_ticket_exists(self._manager_dir, case_id)
+        )
+
+    def _departures_in_flight(self) -> bool:
+        """True while any case is on its way out of managed storage."""
+        return bool(
+            replay_pending(self._manager_dir)
+            or pending_quarantine_tickets(self._manager_dir)
+            or self._count_eject_pending()
+        )
+
+    # ------------------------------------------------------------------
+    # Fleet status board & pool events
+    # ------------------------------------------------------------------
+
+    def _fleet_locate(self) -> Callable[[str], Any]:
+        return lambda cid: self.locate(case_id=cid)
+
+    def _notify_fleet_board(self, case: FolderBackedCase, *, force: bool = False) -> None:
+        if self._fleet_board is None:
+            return
+        try:
+            self._fleet_board.notify(
+                case,
+                force=force,
+                live_cases=list(self._driver),
+                locate=self._fleet_locate(),
+            )
+        except Exception:
+            logger.warning("fleet status board notify failed", exc_info=True)
+
+    def _publish_fleet_status_board(self, *, force: bool = False) -> None:
+        if self._fleet_board is None:
+            return
+        try:
+            self._fleet_board.publish_full_if_due(
+                list(self._driver),
+                locate=self._fleet_locate(),
+                force=force,
+            )
+        except Exception:
+            logger.warning("fleet status board full flush failed", exc_info=True)
+
+    def _on_fleet_board_event(self, event: CasePoolEvent) -> None:
+        """Interesting pool edges → notify the board; it decides append vs full flush.
+
+        REMOVED / EVICTED need a full publish so departed non-terminal cases drop
+        off the board (append alone cannot remove a case_id under last-wins).
+        """
+        if self._fleet_board is None:
+            return
+        if event.event in (CasePoolEventNames.REMOVED, CasePoolEventNames.EVICTED):
+            self._publish_fleet_status_board(force=True)
+            return
+        if event.event == CasePoolEventNames.ADVANCED:
+            ar = event.advance_result
+            if ar is None or not ar.progressed:
+                return
+        self._notify_fleet_board(event.case)
+
+    def _reconcile_terminal_in_pool(self) -> int:
+        """Enqueue termination for terminal cases still sitting in the pool.
+
+        Isolated per case. ``begin_termination`` is remove → detach → write ticket;
+        a ticket write that raises leaves that one case out of the pool, detached,
+        and ticketless, which is bad enough on its own — it must not also abort the
+        pass for every other terminal case, nor spend the loop-failure budget.
+        """
+        count = 0
+        for case in self._driver.terminal_cases():
+            if ticket_exists(self._manager_dir, case.case_id):
+                continue
+            if self._store.status_of(case.case_id) not in (LIVE, None):
+                continue    # already departed; its stored status is the receipt
+            with self._isolated_tick_item("terminal reconcile", case.case_folder):
+                if self._fleet_board is not None:
+                    self._fleet_board.note_terminal(case)
+                    self._notify_fleet_board(case, force=True)
+                if begin_termination(
+                    case,
+                    manager_dir=self._manager_dir,
+                    policy=self._policy,
+                    driver_remove=self._driver.remove,
+                ):
+                    count += 1
+        return count
+
+    def _on_terminated_event(self, event: CasePoolEvent) -> None:
+        if self._fleet_board is not None:
+            self._fleet_board.note_terminal(event.case)
+            self._notify_fleet_board(event.case, force=True)
+        begin_termination(
+            event.case,
+            manager_dir=self._manager_dir,
+            policy=self._policy,
+            driver_remove=self._driver.remove,
+        )
+
+    async def _readmit_orphans(self) -> OrphanReadmitReport:
+        """A phase of ``recover()``. See ``case_manager_support.readmit``.
+
+        The join across pool membership, the store's status, and the type
+        registry stays here rather than moving into the store: answering it needs
+        the driver and the registry, and injecting those into a storage object
+        would rebuild the very dependency the store exists to remove.
+
+        What it found reaches callers on the ``RecoverReport``; there is no reason
+        to run it on its own, and running it mid-flight would fight ticket replay.
+        """
+        return readmit_orphans(
+            store=self._store,
+            driver=self._driver,
+            registry=self._registry,
+            has_departure_ticket=self._has_departure_ticket,
+            emit_anomaly=lambda cid, folder, msg: self._notices.emit_simple(
+                "READMIT_ANOMALY", cid, folder, msg
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Case operation helpers
+    # ------------------------------------------------------------------
+
+    async def _halt_and_settle(
+        self, case_folder: Path, *, case_id: str, timeout: float | None
+    ) -> None:
+        """Stop scheduling a case and wait until it is genuinely idle.
+
+        ``request_halt()`` returns immediately; ``HALTED`` fires once the case is
+        neither in flight nor scheduled. A case that has already halted will not
+        fire it again, so that is checked first rather than waited for.
+        """
+        folder = case_folder.resolve()
+        if any(c.case_folder.resolve() == folder for c in self._driver.halted_cases()):
+            return
+
+        settled: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def on_halted(event: CasePoolEvent) -> None:
+            if not settled.done() and event.case.case_folder.resolve() == folder:
+                settled.set_result(None)
+
+        # Subscribe before requesting: an already-idle case fires HALTED
+        # synchronously inside request_halt(), and we must not miss it.
+        handle = self._driver.case_event_subscribe(CasePoolEventNames.HALTED, on_halted)
+        try:
+            self._driver.request_halt(case_folder)
+            if timeout is None:
+                await settled
+            else:
+                try:
+                    await asyncio.wait_for(settled, timeout=timeout)
+                except asyncio.TimeoutError:
+                    raise EjectTimeoutError(
+                        case_id=case_id, stuck=self._collect_stuck_triggers()
+                    ) from None
+        finally:
+            try:
+                self._driver.case_event_unsubscribe(handle)
+            except KeyError:
+                pass
+
+    async def _quarantine(self, case_id: str, folder: Path, reason: str) -> Path | None:
+        landed = await quarantine_case(
+            self._store, self._manager_dir, case_id, folder, reason
+        )
+        if landed is not None:
+            self._emit_notice("CASE_QUARANTINED", case_id, landed, reason)
+        return landed
+
+    async def _scan_adopt_drop(self) -> dict[str, int]:
+        drop = self._manager_dir / self._policy.adopt_drop_subdir
+        seen = admitted = rejected = skipped = 0
+        if not drop.exists():
+            return {"seen": 0, "admitted": 0, "rejected": 0, "skipped": 0}
+        for child in sorted(drop.iterdir()):
+            if not child.is_dir():
+                continue
+            if child.name.startswith("ADOPT_REJECTED_"):
+                skipped += 1
+                continue
+            seen += 1
+            result = await self.adopt_case(child)
+            if result.status == "completed":
+                admitted += 1
+            else:
+                rejected += 1
+                new_name = drop / f"ADOPT_REJECTED_{child.name}"
+                child.rename(new_name)
+        return {"seen": seen, "admitted": admitted, "rejected": rejected, "skipped": skipped}
+
+    def _readers_at(self, status: str) -> Iterator[FolderBackedCaseReader]:
+        for entry in self._store.iter_by_status(status):
+            yield FolderBackedCaseReader(entry.case_folder)
+
+    def _to_location(self, entry: CaseEntry) -> CaseLocation:
+        reader = FolderBackedCaseReader(entry.case_folder)
+        return CaseLocation(
+            case_id=entry.case_id,
+            external_key=reader.case_external_key,
+            case_folder=entry.case_folder,
+            status=entry.status,
+            in_pool=any(c.case_id == entry.case_id for c in self._driver),
+            terminal=reader.case_is_terminal,
+        )
+
+    def _resolve_single(
+        self,
+        *,
+        case_id: str | None = None,
+        case_folder: Path | None = None,
+    ) -> CaseLocation | None:
+        if (case_id is None) == (case_folder is None):
+            raise InvalidAddressingError()
+        return self.locate(case_id=case_id, case_folder=case_folder)
+
+    def _emit_notice(
+        self, kind: str, case_id: str, folder: Path | None, detail: str | None = None
+    ) -> None:
+        self._notices.emit_simple(kind, case_id, folder, detail)
+
+    def _readmit_after_failed_reclassify(
+        self, folder: Path, case: FolderBackedCase
+    ) -> None:
+        """Best-effort return of a case to the pool after a failed reclassify."""
+        try:
+            readd = self._registry.rehydrate(folder) if case.case_is_detached else case
+            self._driver.add(readd)
+        except Exception:
+            logger.exception(
+                "reclassify_case: failed to re-admit %s after reclassify error", folder
+            )
+
+    # ------------------------------------------------------------------
+    # Diagnostics & escalations
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def _isolated_tick_item(self, what: str, source: Path) -> Iterator[None]:
+        """Contain one maintenance-tick item's failure. See ``_maintenance_tick``."""
+        try:
+            yield
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Maintenance tick: %s failed (%s); skipping", what, source)
+            self._notices.emit_simple(
+                "MAINTENANCE_ITEM_FAILED", None, source, f"{what}: {exc!r}"
+            )
+
     async def _settle_with_diagnostics(self) -> None:
         if hasattr(self._driver, "settle"):
             await self._driver.settle()
@@ -1604,42 +1679,3 @@ class CaseManager:
                 self._notices.emit_simple(
                     "AUTO_BLOCKED", case.case_id, case.case_folder, case_state=case.case_state
                 )
-
-    @staticmethod
-    def _find_policy_path(root: Path) -> Path | None:
-        if not root.exists():
-            return None
-        for candidate in (
-            root / ".case_manager" / POLICY_FILENAME,
-            root / POLICY_FILENAME,
-        ):
-            if candidate.exists():
-                return candidate
-        ns_dirs = [
-            p for p in root.iterdir()
-            if p.is_dir() and p.name.startswith(".case_manager")
-        ]
-        for ns in ns_dirs:
-            p = ns / POLICY_FILENAME
-            if p.exists():
-                return p
-        return None
-
-    @staticmethod
-    def _validate_fresh_root(root: Path) -> None:
-        """Guard the only path that can create a filespace.
-
-        Reached solely when no policy record was found, so a non-empty root here
-        is somebody else's directory: initialising over it is not a mistake worth
-        making convenient.
-        """
-        if root.exists() and not CaseManager._is_empty_dir(root):
-            raise CacheRootStateError(root)
-        if not root.exists() and not root.parent.exists():
-            raise CacheRootStateError(root, detail="parent directory missing")
-
-    @staticmethod
-    def _is_empty_dir(path: Path) -> bool:
-        if not path.is_dir():
-            return False
-        return not any(path.iterdir())

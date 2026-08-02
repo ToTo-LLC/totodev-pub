@@ -117,7 +117,7 @@ async def serve(
     for you, or skip if the caller has already done it: adopting cases *before*
     hosting requires a recovered manager (see ``bag_loading.load_case_bag``), so
     "already recovered" is a legitimate state to arrive in rather than an error.
-    ``stop_grace_secs`` is host wiring, not deployment policy: Docker's
+    ``stop_grace_secs`` is host binding, not deployment policy: Docker's
     ``stop_grace_period`` must exceed it.
 
     ``adapter`` is the request transport, if there is one. A manager with no

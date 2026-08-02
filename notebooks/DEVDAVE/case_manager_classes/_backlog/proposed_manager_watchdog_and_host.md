@@ -269,7 +269,7 @@ stopped containers.
 This mirrors the design principle above: the watchdog never repairs, it only detects,
 diagnoses, and dies.
 
-Policy knobs (Tier 2):
+Policy tunables (Tunables category on CaseManagerPolicy):
 
 ```yaml
 watchdog_enabled: true            # PERMITS a watchdog; only a host (serve()) ever STARTS one.
@@ -301,8 +301,8 @@ asyncio.run(serve(manager))
 `**overrides` pair that mirrors `open()`.** Earlier drafts of this proposal had
 `serve()` accept `(cache_root, **overrides)` and forward the bag into `open()`
 internally. Review of that shape surfaced a real coupling problem: `open()`/`attach()`
-already slice one flat kwargs dict three ways (Tier 1 policy fields, Tier 2 policy
-fields, and five specific wiring keys pulled by literal name — see
+already slice one flat kwargs dict three ways (Layout policy fields, Tunables policy
+fields, and five specific Bindings keys pulled by literal name — see
 `CaseManager.attach()`), silently dropping anything that matches none of those. Having
 `serve()` forward into that same ungoverned bag — or, worse, maintain its own parallel
 filter to pull out its own kwargs (e.g. `stop_grace_secs`) before forwarding the rest —
@@ -311,7 +311,7 @@ section above is otherwise careful to keep clean. Taking a pre-built `CaseManage
 instead has four concrete benefits:
 
 - **Construction and hosting are textually separated.** Everything left of `serve(...)`
-  is a fleet-construction concern (`open()`'s existing Tier 1/Tier 2/wiring semantics,
+  is a fleet-construction concern (`open()`'s existing Layout/Tunables/Bindings semantics,
   including its `PolicyMismatchError` validation); everything `serve()` itself accepts
   is a process-hosting concern. No reader has to know which bucket a given kwarg falls
   into by memory.
@@ -320,7 +320,7 @@ instead has four concrete benefits:
   see the object. This shape makes that ordering explicit instead of tunneling it
   through a second layer.
 - **Watchdog policy needs no `serve()`-side parameters at all.** `watchdog_enabled` and
-  the `watchdog_*_secs` knobs are Tier 2 policy fields (§3), so they already live on
+  the `watchdog_*_secs` values are Tunables policy fields (§3), so they already live on
   `manager._policy` by the time `serve()` receives the manager. `serve()` just reads
   them off the object instead of re-accepting them.
 - **Testability.** `serve()`'s own logic (signals, watchdog arm/park, shutdown exit
@@ -358,7 +358,7 @@ It wires, in order:
 5. Blocks until signaled, shutdown-requested, or watchdog-killed.
 
 `stop_grace_secs` is a **`serve()` keyword argument** with a default (proposed 30s) —
-it is host wiring, not deployment policy (unlike the watchdog knobs, it has no
+it is host binding, not deployment policy (unlike the watchdog tunables, it has no
 sensible per-deployment-policy-file meaning independent of how `serve()` is invoked);
 the Docker `stop_grace_period` comment in the compose example references it.
 
@@ -719,7 +719,7 @@ present:
 2. **`serve()` signature:** `serve(manager, *, stop_grace_secs=...)`, taking a
    pre-built `CaseManager`, not `(cache_root, **overrides)`. Full rationale in §4.
 3. **Watchdog scope:** armed by `serve()` only, never by `start()` (embedded/pytest
-   usage legitimately blocks the loop) — policy knobs in §3. Debugger sessions default
+   usage legitimately blocks the loop) — policy tunables in §3. Debugger sessions default
    to alarm-only (desktop behavior section).
 4. **Exit codes:** `0` is reserved for a stop that is both external to the manager's
    reactive machinery and genuinely final — an OS-signaled stop (§4) or self-completion

@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Persisted CaseManager policy (Tiers 1 and 2)."""
+"""Persisted CaseManager policy (Layout and Tunables)."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
 
     schema_version: int = POLICY_SCHEMA_VERSION
 
-    # Tier 1 — layout facts
+    # Layout — fixed once the filespace exists
     grouping_pattern: str = DEFAULT_GROUPING_PATTERN
     live_bucket: str = DEFAULT_LIVE_BUCKET
     terminal_prefix: str = DEFAULT_TERMINAL_PREFIX
@@ -46,7 +46,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     reclassify_mailbox_subdir: str = DEFAULT_RECLASSIFY_MAILBOX_SUBDIR
     shutdown_mailbox_subdir: str = DEFAULT_SHUTDOWN_MAILBOX_SUBDIR
 
-    # Tier 2 — operational tunables
+    # Tunables — operational settings (file holds defaults; process may override)
     concurrency_ceiling: int = 50
     choke_limits: Dict[str, int] = Field(default_factory=dict)
     enable_mailbox: bool = True
@@ -80,7 +80,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     strict_recovery: bool = False
 
     @classmethod
-    def tier1_field_names(cls) -> frozenset[str]:
+    def layout_field_names(cls) -> frozenset[str]:
         return frozenset({
             "schema_version",
             "grouping_pattern",
@@ -98,7 +98,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
         })
 
     @classmethod
-    def tier2_field_names(cls) -> frozenset[str]:
+    def tunables_field_names(cls) -> frozenset[str]:
         return frozenset({
             "concurrency_ceiling",
             "choke_limits",
@@ -129,10 +129,10 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "strict_recovery",
         })
 
-    def apply_tier2_overrides(self, **overrides: Any) -> "CaseManagerPolicy":
-        """Return a copy with in-memory Tier 2 overrides (file untouched)."""
+    def apply_tunables_overrides(self, **overrides: Any) -> "CaseManagerPolicy":
+        """Return a copy with in-memory Tunables overrides (file untouched)."""
         data = self.model_dump()
         for key, value in overrides.items():
-            if key in self.tier2_field_names():
+            if key in self.tunables_field_names():
                 data[key] = value
         return CaseManagerPolicy.model_validate(data)

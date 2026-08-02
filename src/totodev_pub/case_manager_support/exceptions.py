@@ -36,11 +36,11 @@ class PolicyFileMissingError(Exception):
 
 
 class PolicyMismatchError(Exception):
-    """Explicit Tier 1 override disagrees with the persisted policy file."""
+    """Explicit Layout override disagrees with the persisted policy file."""
 
     def __init__(self, field_name: str, *, file_value: Any, override_value: Any):
         super().__init__(
-            f"Tier 1 policy field {field_name!r} override {override_value!r} "
+            f"Layout policy field {field_name!r} override {override_value!r} "
             f"does not match persisted value {file_value!r} in case_manager_policy.yaml."
         )
         self.field_name = field_name

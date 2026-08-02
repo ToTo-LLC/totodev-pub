@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Coverage for CaseManagerConfig, the merged policy + wiring view construction builds."""
+"""Coverage for CaseManagerConfig, the merged policy + bindings view construction builds."""
 
 from pathlib import Path
 
@@ -45,9 +45,9 @@ def _minimal(tmp_path: Path, **overrides) -> CaseManagerConfig:
     )
 
 
-def test_wiring_fields_default_to_empty(tmp_path):
+def test_bindings_fields_default_to_empty(tmp_path):
     config = _minimal(tmp_path)
-    assert config.tier2_overrides == {}
+    assert config.tunables_overrides == {}
     assert config.driver is None
     assert config.driver_class is None
     assert config.driver_kwargs == {}
@@ -65,7 +65,7 @@ def test_mutable_defaults_are_not_shared_between_instances(tmp_path):
     assert second.notice_handlers == []
 
 
-def test_construction_populates_the_config_from_policy_and_wiring(tmp_path):
+def test_construction_populates_the_config_from_policy_and_bindings(tmp_path):
     root = tmp_path / "cache"
     CaseManager.open_local_store(root)
     registry = CaseTypeRegistry()
@@ -84,8 +84,8 @@ def test_construction_populates_the_config_from_policy_and_wiring(tmp_path):
     assert config.registry is registry
     assert list(config.register_types) == [TicketCase]
     assert config.driver_class is SeniorityCasePoolDriver
-    # Tier 2 overrides are applied to the in-memory policy and recorded as-is.
-    assert config.tier2_overrides == {"concurrency_ceiling": 7}
+    # Tunables overrides are applied to the in-memory policy and recorded as-is.
+    assert config.tunables_overrides == {"concurrency_ceiling": 7}
     assert config.policy.concurrency_ceiling == 7
 
 

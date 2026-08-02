@@ -55,20 +55,20 @@ def run(coro):
     return asyncio.run(coro)
 
 
-_WIRING_KEYS = {"driver", "driver_class", "driver_kwargs", "registry", "register_types"}
+_BINDING_KEYS = {"driver", "driver_class", "driver_kwargs", "registry", "register_types"}
 
 
 def provision_manager(tmp_path: Path, **overrides) -> CaseManager:
     """Open a fresh filespace under ``tmp_path`` and return a manager over it.
 
-    Policy overrides go into the record as it is created, wiring goes to the
+    Policy overrides go into the record as it is created, bindings go to the
     manager; the caller passes both as one flat set of keywords.
     """
-    wiring = {k: overrides.pop(k) for k in list(overrides) if k in _WIRING_KEYS}
+    bindings = {k: overrides.pop(k) for k in list(overrides) if k in _BINDING_KEYS}
     overrides.setdefault("maintenance_interval_secs", 0.01)
-    wiring.setdefault("register_types", [TicketCase, TerminalCase, ManualCase])
+    bindings.setdefault("register_types", [TicketCase, TerminalCase, ManualCase])
     store = CaseManager.open_local_store(tmp_path / "cache", **overrides)
-    return CaseManager(store, **wiring)
+    return CaseManager(store, **bindings)
 
 
 def seed_detached_case(

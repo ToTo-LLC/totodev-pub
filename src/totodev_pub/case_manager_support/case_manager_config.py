@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""In-memory merged CaseManager configuration (policy + wiring)."""
+"""In-memory merged CaseManager configuration (policy Layout/Tunables + Bindings)."""
 
 from __future__ import annotations
 
@@ -19,20 +19,20 @@ if TYPE_CHECKING:
 
 @dataclass
 class CaseManagerConfig:
-    """Merged view built during construction: persisted policy + Tier 3 wiring."""
+    """Merged view built during construction: persisted policy + Bindings."""
 
     cache_root: Path
     policy: CaseManagerPolicy
     policy_path: Path
     manager_dir: Path
-    tier2_overrides: dict[str, Any] = field(default_factory=dict)
+    tunables_overrides: dict[str, Any] = field(default_factory=dict)
     driver: "CasePoolDriver | None" = None
     driver_class: type | None = None
-    # Passed as-is to driver_class(**driver_kwargs) by _build_default_driver(). For
-    # BalancedCasePoolDriver / SeniorityCasePoolDriver this is the only way to override
-    # beat-tempo tunables (I0, EAGER_BEAT_FRACTION, BEAT_YIELD_FLOOR, ...): pass
-    # {"policy": TierPolicy(...)} — concurrency_ceiling/choke_limits are defaulted
-    # from CaseManagerPolicy automatically and need not be repeated here.
+    # Bindings: passed as-is to driver_class(**driver_kwargs) by _build_default_driver().
+    # For BalancedCasePoolDriver / SeniorityCasePoolDriver this is the only way to
+    # override beat-tempo tunables (I0, EAGER_BEAT_FRACTION, BEAT_YIELD_FLOOR, ...):
+    # pass {"policy": TierPolicy(...)} — concurrency_ceiling/choke_limits are
+    # defaulted from CaseManagerPolicy automatically and need not be repeated here.
     driver_kwargs: dict[str, Any] = field(default_factory=dict)
     registry: "CaseTypeRegistry | None" = None
     register_types: Sequence[type["FolderBackedCase"]] = ()

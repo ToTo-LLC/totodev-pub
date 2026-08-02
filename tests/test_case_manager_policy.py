@@ -63,15 +63,15 @@ def test_init_if_new_false_refuses_an_absent_filespace(tmp_path):
         CaseManager.open_local_store(tmp_path / "cache", init_if_new=False)
 
 
-def test_tier1_override_mismatch(tmp_path):
+def test_layout_override_mismatch(tmp_path):
     CaseManager.open_local_store(tmp_path / "cache", live_bucket="live")
     with pytest.raises(PolicyMismatchError) as excinfo:
         CaseManager.open_local_store(tmp_path / "cache", live_bucket="other")
     assert "live_bucket" in str(excinfo.value)
 
 
-def test_tier2_override_is_never_a_mismatch(tmp_path):
-    """Tier 2 is a tunable: the record holds a default, not the only value."""
+def test_tunables_override_is_never_a_mismatch(tmp_path):
+    """Tunables: the record holds a default, not the only value."""
     root = tmp_path / "cache"
     CaseManager.open_local_store(root, concurrency_ceiling=7)
     store = CaseManager.open_local_store(root, concurrency_ceiling=9)
@@ -111,7 +111,7 @@ def test_watchdog_and_shutdown_policy_fields():
     assert policy.watchdog_pulse_stuck_secs is None
     assert policy.watchdog_mailbox_stale_secs is None
     assert policy.watchdog_tick_warn_secs is None
-    assert "shutdown_mailbox_subdir" in CaseManagerPolicy.tier1_field_names()
+    assert "shutdown_mailbox_subdir" in CaseManagerPolicy.layout_field_names()
     for name in (
         "watchdog_enabled",
         "watchdog_action",
@@ -119,6 +119,6 @@ def test_watchdog_and_shutdown_policy_fields():
         "watchdog_mailbox_stale_secs",
         "watchdog_tick_warn_secs",
     ):
-        assert name in CaseManagerPolicy.tier2_field_names()
-    tuned = policy.apply_tier2_overrides(watchdog_pulse_stuck_secs=2.5)
+        assert name in CaseManagerPolicy.tunables_field_names()
+    tuned = policy.apply_tunables_overrides(watchdog_pulse_stuck_secs=2.5)
     assert tuned.watchdog_pulse_stuck_secs == 2.5
