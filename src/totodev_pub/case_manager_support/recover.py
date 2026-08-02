@@ -55,6 +55,12 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     # owner takes tens of seconds and emits no heartbeat.
     manager._write_manifest(recovering=True)
 
+    # Ownership before anything else. Recovery rebuilds a pool and re-admits
+    # orphans; doing that beside another live manager is the split-brain the whole
+    # lease system exists to prevent, and it is far cheaper to refuse here than to
+    # discover it later through contended cases.
+    await manager._acquire_filespace()
+
     report.death_records_recent = log_recent_death_records(manager._manager_dir)
     report.shutdown_requests_discarded = discard_stale_requests(
         shutdown_intake_dir(manager._manager_dir, manager._policy)

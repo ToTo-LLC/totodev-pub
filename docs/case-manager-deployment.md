@@ -155,6 +155,31 @@ set. Consequence for CI: a coverage run does not exercise the real watchdog.
 1 and 2 are distinct on purpose: a probe that conflates them pages people for
 scale-downs.
 
+### One manager per cache root, enforced
+
+`recover()` claims a heartbeat lease on the filespace before it does anything
+else — the same primitive a case holds on its own folder, one scope up. A second
+manager over the same root raises `CompetingManagerError` and never starts.
+
+**Claiming can take up to ~60s after a hard kill, and that is the point.** A held
+lease is not evidence of a live owner: a SIGKILLed manager leaves one behind with
+its expiry still in the future. The two are only distinguishable over time, so
+acquisition watches for longer than one beat period and then decides:
+
+- the expiry **advanced** — an owner is alive. Fail immediately; no wait will
+  outlast a lease that is being renewed.
+- the expiry is **frozen** — a dead process's shadow. Wait for it to lapse
+  (bounded at two lease TTLs), then claim it and log that the previous owner
+  died rather than stopping cleanly.
+
+A clean `stop()` releases the lease, so an orderly restart pays none of this.
+Read-only `CaseManagerClient`s never claim it — ownership is taken by `recover()`,
+not by construction, which is what lets a client attach to a running fleet.
+
+If a manager loses the lease while running — someone else took it — the pulse
+raises `LeaseOwnershipLostError` into the loop-failure path and the manager stands
+down rather than competing.
+
 ### What recovery reports
 
 Every `recover()` logs one INFO line — what the pool restored, orphans revived,
@@ -240,10 +265,12 @@ refreshed snapshot of every case in the pool. Read it with
 
 ## Container caveats
 
-- **Run one manager per cache root.** Two processes over one root will fight over
-  leases. `recover()` detects a competing live manager, but do not rely on it as
-  a scheduling mechanism: the detection needs contended cases to notice, so two
-  managers over an idle root will both start without complaint.
+- **Run one manager per cache root.** `recover()` claims a lease on the filespace
+  and raises `CompetingManagerError` if another manager holds it, so a second
+  process refuses to start rather than corrupting shared state. Enforced, not
+  advisory — but it is a safety net, not a scheduling mechanism: two managers
+  started in the same instant can both see an unheld lease, and only the second
+  one's next heartbeat catches it.
 - **The cache root must be a real, durable, POSIX-ish filesystem.** The manager
   relies on atomic rename and on mtime-based lease expiry. Network filesystems
   with weak rename semantics or coarse mtime granularity are not supported.

@@ -74,6 +74,10 @@ from totodev_pub.case_manager_support.layout import (
     assert_case_folder_movable,
     policy_manager_dir,
 )
+from totodev_pub.case_manager_support.manager_lease import (
+    acquire_manager_lease,
+    build_manager_lease,
+)
 from totodev_pub.case_manager_support.purge import run_redundant_purge
 from totodev_pub.case_manager_support.quarantine import (
     QuarantineTicket,
@@ -107,6 +111,7 @@ from totodev_pub.folder_backed_case_support.case_type_registry import (
     CaseTypeRegistry,
     case_type_registry,
 )
+from totodev_pub.folder_backed_case_support.heartbeat_lease import LeaseOwnershipLostError
 from totodev_pub.folder_backed_case_support.seniority_case_pool_driver import SeniorityCasePoolDriver
 from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import BalancedCasePoolDriver
 
@@ -210,6 +215,9 @@ class CaseManager:
         # would silently discard the one the caller injected.
         self._driver = _first_supplied(driver, default=self._build_default_driver)
         self._notices = NoticeRegistry()
+        # One manager per cache root. Built here, claimed in recover() — construction
+        # stays cheap and side-effect-free, and claiming needs to be able to wait.
+        self._filespace_lease = build_manager_lease(self._manager_dir)
         # Attempts at tickets that cannot record their own. See ticket_attempts.
         self._ticket_attempts = TicketAttemptLedger()
         # Transport is not the fleet's business. Anything that wants to be driven
@@ -428,16 +436,48 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     async def recover(self) -> RecoverReport:
-        """Reconcile storage and rebuild the pool. Required before ``start()``.
+        """Take the filespace, reconcile storage, and rebuild the pool.
 
-        Where a crash is repaired: leases are waited out, orphans re-admitted,
-        tickets counted. It can take tens of seconds after a hard kill, by
-        design — see ``case_manager_support.readmit``.
+        Required before ``start()``, and where a crash is repaired: the filespace
+        lease is claimed, case leases are waited out, orphans re-admitted, tickets
+        counted. It can take tens of seconds after a hard kill, by design — a held
+        lease is indistinguishable from a live owner's until it has been watched
+        for longer than one beat. Raises ``CompetingManagerError`` if another
+        manager owns this cache root.
         """
         report = await recover_manager(self)
         self._recovered = True
         self.last_recover_report = report
         return report
+
+    async def _acquire_filespace(self) -> None:
+        """Claim the one-manager-per-cache-root lease. Idempotent within a session.
+
+        Re-recovering must not trip over the lease this manager already holds, so
+        an active lease is left alone rather than re-acquired.
+        """
+        if self._filespace_lease.is_active():
+            return
+        await acquire_manager_lease(self._filespace_lease)
+
+    def _beat_filespace(self) -> None:
+        """Refresh the filespace lease, surfacing a stolen one as loop failure.
+
+        ``heartbeat`` self-throttles, so calling it every pulse costs a comparison
+        on all but one tick in twenty.
+        """
+        if not self._filespace_lease.is_active():
+            return
+        self._filespace_lease.heartbeat()
+
+    def _release_filespace(self) -> None:
+        """Drop the filespace lease so the next owner need not wait it out."""
+        if not self._filespace_lease.is_active():
+            return
+        try:
+            self._filespace_lease.release()
+        except Exception:
+            logger.exception("Could not release the filespace lease; it will lapse instead")
 
     async def start(self) -> None:
         """Begin the maintenance/sweep loop and the liveness pulse.
@@ -526,6 +566,10 @@ class CaseManager:
             await self._settle_with_diagnostics()
         self._publish_fleet_status_board(force=True)
         self._write_manifest(running=False, stopped=True)
+        # Last, and only after the fleet has settled: releasing earlier would invite a
+        # successor in while this one is still writing. A clean release is also what
+        # spares that successor the lease-expiry wait a crash would have cost it.
+        self._release_filespace()
 
     async def _manager_loop(self) -> None:
         """One tick = maintenance (mailbox intake first), then the pool sweep.
@@ -578,6 +622,23 @@ class CaseManager:
         while self._running:
             now = time.monotonic()
             self._last_pulse = now
+            # Losing the filespace lease is not a pulse hiccup to log and carry on
+            # from: it means another manager is on this cache root and this one must
+            # stop touching it. Hand it to the loop-failure path, which is the seam
+            # that already knows how to take a manager down.
+            try:
+                self._beat_filespace()
+            except LeaseOwnershipLostError as exc:
+                logger.critical(
+                    "Filespace ownership lost — another manager has taken this cache root. "
+                    "Standing down rather than competing with it: %r", exc,
+                )
+                # Clearing _running also winds the manager loop down, so even a bare
+                # embedded manager with no failure callback stops driving.
+                self._running = False
+                if self._loop_failure_cb is not None:
+                    self._loop_failure_cb(exc)
+                return
             if now - self._last_heartbeat_write >= self._policy.maintenance_interval_secs:
                 try:
                     self._write_manifest(running=True)
