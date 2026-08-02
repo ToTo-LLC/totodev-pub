@@ -15,7 +15,8 @@ Typical host program:
     from totodev_pub.case_manager_support.case_manager_host import serve
     from myapp.cases import InquiryCase
 
-    manager = CaseManager.open("/data/inquiries", register_types=[InquiryCase])
+    store = CaseManager.open_local_store("/data/inquiries")
+    manager = CaseManager(store, register_types=[InquiryCase])
     asyncio.run(serve(manager))
 """
 

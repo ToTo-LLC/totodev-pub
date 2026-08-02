@@ -19,7 +19,7 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterator, Sequence, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Iterator, NamedTuple, Sequence, TYPE_CHECKING
 
 from totodev_pub.case_manager_support.adopt import AdoptResult, adopt_case_folder
 from totodev_pub.case_manager_support.case_manager_config import CaseManagerConfig
@@ -133,32 +133,82 @@ def _first_supplied(*candidates: Any, default: Callable[[], Any]) -> Any:
     return default()
 
 
+class _ResolvedPolicy(NamedTuple):
+    """A filespace's policy reconciled with what the caller supplied.
+
+    ``is_new`` says the record does not exist yet and the caller is cleared to
+    write it; every path derived here is valid either way.
+    """
+
+    policy: CaseManagerPolicy
+    policy_path: Path
+    manager_dir: Path
+    tier2_overrides: dict[str, Any]
+    is_new: bool
+
+
 class CaseManager:
     """Fleet coordinator composing cache, driver, registry, and protocol dirs."""
 
     def __init__(
         self,
-        config: CaseManagerConfig,
+        filespace: LocalCaseStore | str | Path,
         *,
-        store: LocalCaseStore | None = None,
         driver: CasePoolDriver | None = None,
+        driver_class: type | None = None,
+        driver_kwargs: dict[str, Any] | None = None,
+        registry: CaseTypeRegistry | None = None,
+        register_types: Sequence[type[FolderBackedCase]] = (),
+        **tier2_overrides: Any,
     ) -> None:
-        self._config = config
-        self._policy = config.policy
-        self._cache_root = Path(config.cache_root)
-        self._manager_dir = config.manager_dir
-        self._registry = config.registry or case_type_registry
-        if config.register_types:
-            self._registry.register_case_types(*config.register_types)
-        self._store = store if store is not None else LocalCaseStore.provision(
-            self._cache_root, self._policy
+        """Build a manager over an existing filespace.
+
+        ``filespace`` is either a ``LocalCaseStore`` or the path to a filespace
+        that has already been opened once. Construction never creates one: a path
+        with no policy record raises ``PolicyFileMissingError``, so bringing a
+        filespace into existence always means naming ``open_local_store()``.
+
+        Keyword arguments are the manager's wiring — driver, registry, case types
+        — plus any Tier 2 tunable, which is applied in memory and leaves the
+        policy record untouched. A Tier 1 field is a layout fact and cannot be
+        supplied here; one that disagrees with the record raises.
+        """
+        if isinstance(filespace, LocalCaseStore):
+            supplied_store: LocalCaseStore | None = filespace
+            root = filespace.root_dir
+            resolved = self._resolve_from_store(filespace, tier2_overrides)
+        else:
+            supplied_store = None
+            root = Path(filespace).resolve()
+            resolved = self._resolve_policy(root, None, tier2_overrides, init_if_new=False)
+
+        self._policy = resolved.policy
+        self._cache_root = root
+        self._manager_dir = resolved.manager_dir
+        self._registry = registry or case_type_registry
+        if register_types:
+            self._registry.register_case_types(*register_types)
+        # The record exists — _resolve_policy raised otherwise — so this attaches
+        # to storage rather than creating any.
+        self._store = supplied_store if supplied_store is not None else LocalCaseStore.provision(
+            root, resolved.policy
+        )
+        self._config = CaseManagerConfig(
+            cache_root=root,
+            policy=resolved.policy,
+            policy_path=resolved.policy_path,
+            manager_dir=resolved.manager_dir,
+            tier2_overrides=resolved.tier2_overrides,
+            driver=driver,
+            driver_class=driver_class,
+            driver_kwargs=driver_kwargs or {},
+            registry=registry,
+            register_types=register_types,
         )
         # Explicit `is not None`, never truthiness: a CasePoolDriver defines
         # __len__, so a freshly constructed (empty) driver is falsy and `or`
         # would silently discard the one the caller injected.
-        self._driver = _first_supplied(
-            driver, config.driver, default=self._build_default_driver
-        )
+        self._driver = _first_supplied(driver, default=self._build_default_driver)
         self._notices = NoticeRegistry()
         # Attempts at tickets that cannot record their own. See ticket_attempts.
         self._ticket_attempts = TicketAttemptLedger()
@@ -189,135 +239,152 @@ class CaseManager:
                 full_flush_interval_secs=self._policy.fleet_status_full_flush_interval_secs,
                 terminal_retention_secs=self._policy.fleet_status_terminal_retention_secs,
             )
+        self._log_startup_summary()
 
     # ------------------------------------------------------------------
-    # Construction: provision / attach / open
+    # Construction
     # ------------------------------------------------------------------
 
     @classmethod
-    def provision(
+    def open_local_store(
         cls,
         cache_root: str | Path,
         policy: CaseManagerPolicy | None = None,
+        *,
+        init_if_new: bool = True,
         **overrides: Any,
-    ) -> Path:
-        """Create a managed filespace at ``cache_root`` and persist its policy.
+    ) -> LocalCaseStore:
+        """Open the managed filespace at ``cache_root``, creating it when absent.
 
-        Idempotent against an identical policy and refuses a conflicting one, so
-        running it twice is safe and running it *differently* is loud. Returns
-        the root; use ``attach()`` to get a manager over it.
+        The filespace is the policy record, the manager's protocol namespace, and
+        the case storage taken together; this is the only thing that brings one
+        into existence. Pass the returned store to ``CaseManager`` to get a
+        manager over it. With ``init_if_new=False`` an absent policy record
+        raises ``PolicyFileMissingError`` rather than being created.
+
+        Idempotent: opening the same filespace again is a no-op, and opening it
+        with a conflicting Tier 1 layout fact is loud. Tier 2 tunables are
+        applied to the returned store's policy in memory; on the call that
+        creates the filespace they are also written into the record as its
+        durable defaults.
         """
         root = Path(cache_root).resolve()
-        cls._validate_fresh_root_for_provision(root)
+        resolved = cls._resolve_policy(root, policy, overrides, init_if_new=init_if_new)
 
-        pol = policy or CaseManagerPolicy()
-        tier1 = {k: v for k, v in overrides.items() if k in _TIER1_KWARGS}
-        tier2 = {k: v for k, v in overrides.items() if k in _TIER2_KWARGS}
-        for k, v in tier1.items():
-            setattr(pol, k, v)
-        pol = pol.apply_tier2_overrides(**tier2)
-
-        policy_path = policy_manager_dir(root, pol) / POLICY_FILENAME
-        if policy_path.exists():
-            existing = CaseManagerPolicy.load(str(policy_path), acquire_lock=False)
-            if existing.model_dump() != pol.model_dump():
-                raise PolicyMismatchError("policy", file_value="on disk", override_value="supplied")
-            return root
-
-        mgr_dir = policy_manager_dir(root, pol)
-        mgr_dir.mkdir(parents=True, exist_ok=True)
-        pol.save(str(policy_path), retain_lock=False)
-        cls._ensure_namespace_dirs(mgr_dir, pol)
-        cls.provision_local_case_store(root, pol)
-        return root
-
-    @staticmethod
-    def provision_local_case_store(
-        cache_root: str | Path, policy: CaseManagerPolicy | None = None
-    ) -> LocalCaseStore:
-        """Create (or attach to) the case storage under ``cache_root``.
-
-        A discoverability convenience — the knowledge lives on the store, and
-        this only delegates. Idempotent with validation: provisioning the same
-        layout again is harmless, provisioning a *different* one at the same root
-        raises.
-        """
-        return LocalCaseStore.provision(cache_root, policy or CaseManagerPolicy())
+        # Storage first. The manager namespace lives inside the cache root, so
+        # laying it down ahead of the cache would leave the cache adopting a
+        # non-empty root instead of initialising a clean one.
+        store = LocalCaseStore.provision(root, resolved.policy)
+        if resolved.is_new:
+            resolved.manager_dir.mkdir(parents=True, exist_ok=True)
+            resolved.policy.save(str(resolved.policy_path), retain_lock=False)
+            cls._ensure_namespace_dirs(resolved.manager_dir, resolved.policy)
+        return store
 
     @classmethod
-    def attach(cls, cache_root: str | Path, **wiring: Any) -> "CaseManager":
-        """Build a manager over an **already provisioned** root.
+    def _resolve_policy(
+        cls,
+        root: Path,
+        policy: CaseManagerPolicy | None,
+        overrides: dict[str, Any],
+        *,
+        init_if_new: bool,
+    ) -> _ResolvedPolicy:
+        """Reconcile a supplied policy and overrides against ``root``'s record.
 
-        The persisted policy wins: a Tier-1 override that disagrees with what is
-        on disk raises rather than being silently applied, because layout facts
-        the storage was built with cannot be changed by a later caller. Tier-2
-        tunables may be overridden in memory.
+        Tier 1 fields are layout facts the storage was built on: a supplied value
+        that disagrees with the record raises, naming the field. Tier 2 fields are
+        tunables, applied in memory and never compared — the record holds their
+        defaults, not their only permitted values.
         """
-        root = Path(cache_root).resolve()
+        tier1, tier2 = cls._split_overrides(overrides)
+        persisted_path = cls._find_policy_path(root)
+
+        if persisted_path is None:
+            if not init_if_new:
+                raise PolicyFileMissingError(
+                    root / CaseManagerPolicy().manager_namespace / POLICY_FILENAME
+                )
+            cls._validate_fresh_root(root)
+            fresh = policy.model_copy(deep=True) if policy is not None else CaseManagerPolicy()
+            for field, value in tier1.items():
+                setattr(fresh, field, value)
+            mgr_dir = policy_manager_dir(root, fresh)
+            return _ResolvedPolicy(
+                policy=fresh.apply_tier2_overrides(**tier2),
+                policy_path=mgr_dir / POLICY_FILENAME,
+                manager_dir=mgr_dir,
+                tier2_overrides=tier2,
+                is_new=True,
+            )
+
+        persisted = CaseManagerPolicy.load(str(persisted_path), acquire_lock=False)
+        claimed = dict(tier1)
+        if policy is not None:
+            # A whole policy object claims every layout fact it carries, not just
+            # the ones that happen to differ from the defaults.
+            for field in _TIER1_KWARGS:
+                claimed.setdefault(field, getattr(policy, field))
+        for field, value in claimed.items():
+            file_value = getattr(persisted, field)
+            if file_value != value:
+                raise PolicyMismatchError(field, file_value=file_value, override_value=value)
+
+        return _ResolvedPolicy(
+            policy=persisted.apply_tier2_overrides(**tier2),
+            policy_path=persisted_path,
+            manager_dir=policy_manager_dir(root, persisted),
+            tier2_overrides=tier2,
+            is_new=False,
+        )
+
+    @classmethod
+    def _resolve_from_store(
+        cls, store: LocalCaseStore, overrides: dict[str, Any]
+    ) -> _ResolvedPolicy:
+        """Resolve against a store's own policy rather than re-reading the record.
+
+        A store already is the filespace resolved, and its policy may carry Tier 2
+        tuning the record deliberately does not — re-reading here would discard
+        exactly what the caller opened the store to set. Tier 1 needs no check
+        against the record: the store's layout facts are what its storage was
+        built on, which is the stronger of the two claims.
+        """
+        root = store.root_dir
         policy_path = cls._find_policy_path(root)
         if policy_path is None:
-            raise PolicyFileMissingError(root / ".case_manager" / POLICY_FILENAME)
+            raise PolicyFileMissingError(root / store.policy.manager_namespace / POLICY_FILENAME)
 
-        policy = CaseManagerPolicy.load(str(policy_path), acquire_lock=False)
-        tier1_overrides = {k: v for k, v in wiring.items() if k in _TIER1_KWARGS}
-        tier2_overrides = {k: v for k, v in wiring.items() if k in _TIER2_KWARGS}
-        for field, override in tier1_overrides.items():
-            file_val = getattr(policy, field)
-            if file_val != override:
-                raise PolicyMismatchError(field, file_value=file_val, override_value=override)
+        tier1, tier2 = cls._split_overrides(overrides)
+        for field, value in tier1.items():
+            store_value = getattr(store.policy, field)
+            if store_value != value:
+                raise PolicyMismatchError(field, file_value=store_value, override_value=value)
 
-        effective = policy.apply_tier2_overrides(**tier2_overrides)
-        mgr_dir = policy_manager_dir(root, policy)
-
-        config = CaseManagerConfig(
-            cache_root=root,
-            policy=effective,
+        return _ResolvedPolicy(
+            policy=store.policy.apply_tier2_overrides(**tier2),
             policy_path=policy_path,
-            manager_dir=mgr_dir,
-            tier2_overrides=tier2_overrides,
-            driver=wiring.get("driver"),
-            driver_class=wiring.get("driver_class"),
-            driver_kwargs=wiring.get("driver_kwargs") or {},
-            registry=wiring.get("registry"),
-            register_types=wiring.get("register_types") or (),
+            manager_dir=policy_manager_dir(root, store.policy),
+            tier2_overrides=tier2,
+            is_new=False,
         )
-        manager = cls(config, store=wiring.get("store"), driver=config.driver)
-        manager._log_startup_summary()
-        return manager
 
-    @classmethod
-    def open(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
-        """Attach if the root is provisioned, provision it first if it is empty.
+    @staticmethod
+    def _split_overrides(overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Sort override names into (Tier 1, Tier 2), rejecting anything else.
 
-        The ordinary entry point. A root that exists, is *not* empty, and has no
-        policy file raises ``CacheRootStateError`` rather than being adopted —
-        provisioning over someone else's directory is not a mistake worth making
-        convenient.
+        A name that is neither is a typo or a stale field, and silently dropping
+        it would leave the caller believing a setting took effect.
         """
-        root = Path(cache_root).resolve()
-        policy_path = cls._find_policy_path(root)
-        if policy_path is not None:
-            return cls.attach(root, **overrides)
-        if not root.exists() or cls._is_empty_dir(root):
-            cls.provision(root, **overrides)
-            return cls.attach(root, **overrides)
-        raise CacheRootStateError(root)
-
-    @classmethod
-    def open_testing(cls, cache_root: str | Path, **overrides: Any) -> "CaseManager":
-        """``open()`` with the two policies that make tests slow or surprising off.
-
-        Scans the adopt-drop folder at startup (so a test can stage cases before
-        recovery) and disables the redundant purge (so a far-future clock in one
-        test cannot delete another's fixtures).
-        """
-        return cls.open(
-            cache_root,
-            startup_adopt_scan=True,
-            redundant_purge_terminal_after_secs=None,
-            redundant_purge_aberrant_after_secs=None,
-            **overrides,
-        )
+        tier1 = {k: v for k, v in overrides.items() if k in _TIER1_KWARGS}
+        tier2 = {k: v for k, v in overrides.items() if k in _TIER2_KWARGS}
+        unknown = sorted(set(overrides) - set(tier1) - set(tier2))
+        if unknown:
+            raise TypeError(
+                f"Unknown CaseManager policy field(s): {', '.join(unknown)}. "
+                "Keyword arguments must name a Tier 1 layout fact or a Tier 2 tunable."
+            )
+        return tier1, tier2
 
     # ------------------------------------------------------------------
     # Read-only lifecycle introspection (host/observability surface)
@@ -1247,8 +1314,8 @@ class CaseManager:
 
         Beat-tempo tunables (``I0``, ``EAGER_BEAT_FRACTION``, ``BEAT_YIELD_FLOOR``,
         tier multiples, ...) live on the driver's ``TierPolicy`` and are NOT part of
-        ``CaseManagerPolicy``. To override them, set ``driver_kwargs={"policy":
-        TierPolicy(...)}`` on the ``CaseManagerConfig`` — see that class's
+        ``CaseManagerPolicy``. To override them, pass ``driver_kwargs={"policy":
+        TierPolicy(...)}`` to ``CaseManager`` — see ``CaseManagerConfig``'s
         ``driver_kwargs`` field for details. Left unset, both concrete drivers run
         with ``TierPolicy()`` defaults, including the eager beat tempo enabled
         (``EAGER_BEAT_FRACTION = 0.25``)."""
@@ -1416,7 +1483,7 @@ class CaseManager:
     def _log_startup_summary(self) -> None:
         driver_name = type(self._driver).__name__
         logger.info(
-            "CaseManager attach: cache_root=%s policy=%s driver=%s types=%d handlers=%d",
+            "CaseManager ready: cache_root=%s policy=%s driver=%s types=%d handlers=%d",
             self._cache_root,
             self._config.policy_path,
             driver_name,
@@ -1488,14 +1555,17 @@ class CaseManager:
         return None
 
     @staticmethod
-    def _validate_fresh_root_for_provision(root: Path) -> None:
+    def _validate_fresh_root(root: Path) -> None:
+        """Guard the only path that can create a filespace.
+
+        Reached solely when no policy record was found, so a non-empty root here
+        is somebody else's directory: initialising over it is not a mistake worth
+        making convenient.
+        """
         if root.exists() and not CaseManager._is_empty_dir(root):
-            if CaseManager._find_policy_path(root) is None:
-                raise CacheRootStateError(root)
-        elif not root.exists():
-            parent = root.parent
-            if not parent.exists():
-                raise CacheRootStateError(root, detail="parent directory missing")
+            raise CacheRootStateError(root)
+        if not root.exists() and not root.parent.exists():
+            raise CacheRootStateError(root, detail="parent directory missing")
 
     @staticmethod
     def _is_empty_dir(path: Path) -> bool:

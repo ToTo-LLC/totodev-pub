@@ -73,7 +73,7 @@ async def load_case_bag(
     register_types: Sequence[type["FolderBackedCase"]],
     **overrides: Any,
 ) -> tuple["CaseManager", BagLoadReport]:
-    """Provision a managed root, copy every case in ``source_bag`` into it, adopt each.
+    """Open a filespace, copy every case in ``source_bag`` into it, adopt each.
 
     Returns a **recovered but not started** manager, so the caller decides how to
     run it: ``serve(manager)`` for a process, or ``start()`` / ``fire()`` for a
@@ -85,7 +85,8 @@ async def load_case_bag(
     from totodev_pub.case_manager import CaseManager
 
     bag = Path(source_bag)
-    manager = CaseManager.open(cache_root, register_types=list(register_types), **overrides)
+    store = CaseManager.open_local_store(cache_root, **overrides)
+    manager = CaseManager(store, register_types=list(register_types))
     await manager.recover()
 
     report = BagLoadReport()

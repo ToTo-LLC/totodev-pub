@@ -49,12 +49,12 @@ async def test_fire_intake_drains_fifo_by_arrival(tmp_path):
     arrival time, not filename-lexicographic. Correlation ids here are chosen in
     REVERSE lexicographic order of submission, so a name-sorted drain would try the
     triggers backwards (c from s0) and never reach s3."""
-    manager = CaseManager.open(
+    store = CaseManager.open_local_store(
         tmp_path / "cache",
-        register_types=[ChainCase],
         maintenance_interval_secs=0.01,
         enable_mailbox=True,
     )
+    manager = CaseManager(store, register_types=[ChainCase])
     staging = tmp_path / "staging"
     staging.mkdir()
     seed_detached_case(ChainCase, staging / "c1")

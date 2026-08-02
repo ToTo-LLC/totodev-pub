@@ -6,7 +6,11 @@ import pytest
 
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
-from totodev_pub.case_manager_support.exceptions import CacheRootStateError, PolicyMismatchError
+from totodev_pub.case_manager_support.exceptions import (
+    CacheRootStateError,
+    PolicyFileMissingError,
+    PolicyMismatchError,
+)
 from totodev_pub.folder_backed_case import FolderBackedCase
 
 
@@ -27,31 +31,74 @@ def test_archive_grouping_label_default(tmp_path):
     case.case_detach()
 
 
-def test_provision_fresh_root(tmp_path):
+def test_open_local_store_fresh_root(tmp_path):
     root = tmp_path / "cache"
-    CaseManager.provision(root)
+    CaseManager.open_local_store(root)
     assert (root / ".case_manager" / "case_manager_policy.yaml").exists()
     assert (root / ".cached_file_folders.json").exists()
 
 
-def test_open_idempotent(tmp_path):
-    m1 = CaseManager.open(tmp_path / "cache")
-    m2 = CaseManager.open(tmp_path / "cache")
-    assert m1._cache_root == m2._cache_root
+def test_open_local_store_idempotent(tmp_path):
+    s1 = CaseManager.open_local_store(tmp_path / "cache")
+    s2 = CaseManager.open_local_store(tmp_path / "cache")
+    assert s1.root_dir == s2.root_dir
 
 
-def test_open_rejects_foreign_data(tmp_path):
+def test_open_local_store_rejects_foreign_data(tmp_path):
     root = tmp_path / "cache"
     root.mkdir()
     (root / "foreign.txt").write_text("data")
     with pytest.raises(CacheRootStateError):
-        CaseManager.open(root)
+        CaseManager.open_local_store(root)
+
+
+def test_construction_will_not_create_a_filespace(tmp_path):
+    with pytest.raises(PolicyFileMissingError):
+        CaseManager(tmp_path / "cache")
+    assert not (tmp_path / "cache").exists()
+
+
+def test_init_if_new_false_refuses_an_absent_filespace(tmp_path):
+    with pytest.raises(PolicyFileMissingError):
+        CaseManager.open_local_store(tmp_path / "cache", init_if_new=False)
 
 
 def test_tier1_override_mismatch(tmp_path):
-    CaseManager.provision(tmp_path / "cache", live_bucket="live")
-    with pytest.raises(PolicyMismatchError):
-        CaseManager.attach(tmp_path / "cache", live_bucket="other")
+    CaseManager.open_local_store(tmp_path / "cache", live_bucket="live")
+    with pytest.raises(PolicyMismatchError) as excinfo:
+        CaseManager.open_local_store(tmp_path / "cache", live_bucket="other")
+    assert "live_bucket" in str(excinfo.value)
+
+
+def test_tier2_override_is_never_a_mismatch(tmp_path):
+    """Tier 2 is a tunable: the record holds a default, not the only value."""
+    root = tmp_path / "cache"
+    CaseManager.open_local_store(root, concurrency_ceiling=7)
+    store = CaseManager.open_local_store(root, concurrency_ceiling=9)
+    assert store.policy.concurrency_ceiling == 9
+    assert CaseManager(root, concurrency_ceiling=9)._policy.concurrency_ceiling == 9
+    # ...and the record still carries the default it was created with.
+    persisted = CaseManagerPolicy.load(
+        str(root / ".case_manager" / "case_manager_policy.yaml"), acquire_lock=False
+    )
+    assert persisted.concurrency_ceiling == 7
+
+
+def test_unknown_policy_field_is_rejected(tmp_path):
+    with pytest.raises(TypeError, match="concurency_ceiling"):
+        CaseManager.open_local_store(tmp_path / "cache", concurency_ceiling=9)
+
+
+def test_a_stores_own_tuning_survives_into_the_manager(tmp_path):
+    """A store is the filespace resolved, so its policy wins over the record.
+
+    Re-reading the record here would discard exactly the tuning the caller opened
+    the store to set.
+    """
+    root = tmp_path / "cache"
+    CaseManager.open_local_store(root)  # record keeps the default
+    tuned = CaseManager.open_local_store(root, concurrency_ceiling=9)
+    assert CaseManager(tuned)._policy.concurrency_ceiling == 9
 
 
 def test_watchdog_and_shutdown_policy_fields():

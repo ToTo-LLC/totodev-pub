@@ -35,10 +35,8 @@ from totodev_pub.case_manager_support.examples.example_cases import (
 
 
 async def main(cache_root: Path) -> None:
-    manager = CaseManager.open(
-        cache_root,
-        register_types=[InquiryCase, EscalationCase],
-    )
+    store = CaseManager.open_local_store(cache_root)
+    manager = CaseManager(store, register_types=[InquiryCase, EscalationCase])
     # serve() wants a manager that has not been recovered or started: it owns
     # that sequencing, and says so rather than quietly re-running it.
     await serve(manager)

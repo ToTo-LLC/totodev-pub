@@ -4,8 +4,8 @@
 """Health probe for a CaseManager deployment (§5).
 
 Reads the manifest file DIRECTLY — it must NOT construct a CaseManagerClient
-(whose constructor does a full CaseManager.attach()); a probe should be as dumb
-and failure-proof as possible. This is the piece Kubernetes livenessProbes and
+(whose constructor builds a full CaseManager); a probe should be as dumb and
+failure-proof as possible. This is the piece Kubernetes livenessProbes and
 monitoring hook into; it catches what no in-process mechanism can ("the process
 is gone entirely" / "the restart loop itself is failing").
 

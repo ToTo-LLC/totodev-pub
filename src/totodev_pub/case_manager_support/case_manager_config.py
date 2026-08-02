@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class CaseManagerConfig:
-    """Merged view built by attach(): persisted policy + Tier 3 wiring."""
+    """Merged view built during construction: persisted policy + Tier 3 wiring."""
 
     cache_root: Path
     policy: CaseManagerPolicy

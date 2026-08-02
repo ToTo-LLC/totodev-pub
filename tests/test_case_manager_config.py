@@ -1,7 +1,7 @@
 # Part of the totodev_pub library.
 # Repository: https://github.com/ToTo-LLC/totodev-pub
 
-"""Coverage for CaseManagerConfig, the merged policy + wiring view attach() builds."""
+"""Coverage for CaseManagerConfig, the merged policy + wiring view construction builds."""
 
 from pathlib import Path
 
@@ -65,11 +65,11 @@ def test_mutable_defaults_are_not_shared_between_instances(tmp_path):
     assert second.notice_handlers == []
 
 
-def test_attach_populates_the_config_from_policy_and_wiring(tmp_path):
+def test_construction_populates_the_config_from_policy_and_wiring(tmp_path):
     root = tmp_path / "cache"
-    CaseManager.provision(root)
+    CaseManager.open_local_store(root)
     registry = CaseTypeRegistry()
-    manager = CaseManager.attach(
+    manager = CaseManager(
         root,
         registry=registry,
         register_types=[TicketCase],

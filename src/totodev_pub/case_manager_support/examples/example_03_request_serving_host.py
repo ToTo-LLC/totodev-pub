@@ -41,10 +41,8 @@ logger = logging.getLogger("request_host")
 
 
 async def run_host(cache_root: Path) -> None:
-    manager = CaseManager.open(
-        cache_root,
-        register_types=[InquiryCase, EscalationCase],
-    )
+    store = CaseManager.open_local_store(cache_root)
+    manager = CaseManager(store, register_types=[InquiryCase, EscalationCase])
     # The one line that turns a fleet into a service.
     await serve(manager, adapter=SignalingAdapter(manager))
 

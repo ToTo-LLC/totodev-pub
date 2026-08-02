@@ -30,7 +30,7 @@ class PolicyFileMissingError(Exception):
     def __init__(self, policy_path: Path):
         super().__init__(
             f"CaseManager policy file missing or unreadable at {policy_path}. "
-            "Call CaseManager.provision() first."
+            "Call CaseManager.open_local_store() to create the filespace."
         )
         self.policy_path = policy_path
 

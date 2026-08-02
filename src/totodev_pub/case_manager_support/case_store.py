@@ -110,8 +110,8 @@ class LocalCaseStore:
         while a different grouping pattern over the same root raises from the
         cache's own manifest check. The layout facts the cache manifest does not
         carry — bucket names and the ref-path template — are validated against
-        the persisted policy file by ``CaseManager.provision()``, so they are not
-        re-recorded here.
+        the persisted policy file by ``CaseManager.open_local_store()``, so they
+        are not re-recorded here.
         """
         root = Path(root_dir).resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -128,6 +128,16 @@ class LocalCaseStore:
     @property
     def root_dir(self) -> Path:
         return self._root
+
+    @property
+    def policy(self) -> CaseManagerPolicy:
+        """The policy this store's layout was built from.
+
+        Carrying it here is what lets a store stand alone as "the filespace,
+        resolved": root plus policy is enough to derive every other path a
+        manager needs.
+        """
+        return self._policy
 
     # ------------------------------------------------------------------
     # Writes

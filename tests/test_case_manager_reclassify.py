@@ -49,12 +49,12 @@ class UnrelatedCase(FolderBackedCase):
 
 
 def provision(tmp_path, **overrides) -> CaseManager:
-    return CaseManager.open(
+    store = CaseManager.open_local_store(
         tmp_path / "cache",
-        register_types=[IntakeCase, RoutedCase, UnrelatedCase],
         maintenance_interval_secs=0.01,
         **overrides,
     )
+    return CaseManager(store, register_types=[IntakeCase, RoutedCase, UnrelatedCase])
 
 
 async def seed_parked_intake(manager: CaseManager, tmp_path):

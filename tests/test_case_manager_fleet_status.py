@@ -341,12 +341,14 @@ async def test_manager_case_ext_status_info_wiring(tmp_path):
         def case_ext_status_info(self):
             return {"from_hook": self.case_id.upper()}
 
-    manager = CaseManager.open(
+    store = CaseManager.open_local_store(
         tmp_path / "cache",
-        register_types=[TicketCase, TerminalCase, ManualCase, ExtStatusCase],
         enable_fleet_status_board=True,
         fleet_status_full_flush_interval_secs=0.0,
         maintenance_interval_secs=0.01,
+    )
+    manager = CaseManager(
+        store, register_types=[TicketCase, TerminalCase, ManualCase, ExtStatusCase]
     )
     staging = tmp_path / "staging"
     staging.mkdir()

@@ -24,9 +24,17 @@ from totodev_pub.case_manager_support.case_manager_host import serve
 from totodev_pub.case_manager_support.signaling_adapter import SignalingAdapter
 from myapp.cases import InquiryCase
 
-manager = CaseManager.open("/data/inquiries", register_types=[InquiryCase])
+store = CaseManager.open_local_store("/data/inquiries")
+manager = CaseManager(store, register_types=[InquiryCase])
 asyncio.run(serve(manager, adapter=SignalingAdapter(manager)))
 ```
+
+`open_local_store()` is the only call that brings a filespace into existence; it
+creates one on the first run and opens it on every run after. Constructing a
+manager never creates anything, so a host pointed at the wrong path fails loudly
+instead of standing up an empty fleet. Once the filespace exists, a process that
+should never create one can skip the first line and pass the path straight to the
+constructor.
 
 **Omit `adapter=` and the process serves no requests** — no fire mailbox, no
 adopt mailbox, no reclassify mailbox. That is a supported shape, not a degraded

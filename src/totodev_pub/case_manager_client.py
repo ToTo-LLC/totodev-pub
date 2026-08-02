@@ -32,7 +32,7 @@ class CaseManagerClient:
 
     def __init__(self, cache_root: str | Path) -> None:
         self._cache_root = Path(cache_root).resolve()
-        self._manager = CaseManager.attach(self._cache_root)
+        self._manager = CaseManager(self._cache_root)
         self._transport = MailboxTransport(self._manager._manager_dir, self._manager._policy)
 
     @classmethod

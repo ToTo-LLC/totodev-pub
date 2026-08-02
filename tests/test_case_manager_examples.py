@@ -87,11 +87,8 @@ async def test_a_minimal_host_serves_no_requests_but_still_stops(tmp_path):
     Shutdown still works because the host owns it — which is the whole reason
     that combination is safe to ship.
     """
-    manager = CaseManager.open(
-        tmp_path / "fleet",
-        register_types=[InquiryCase, EscalationCase],
-        maintenance_interval_secs=0.01,
-    )
+    store = CaseManager.open_local_store(tmp_path / "fleet", maintenance_interval_secs=0.01)
+    manager = CaseManager(store, register_types=[InquiryCase, EscalationCase])
     task = asyncio.ensure_future(serve(manager, stop_when=lambda: manager.is_running))
     try:
         await asyncio.wait_for(task, timeout=30.0)
@@ -111,11 +108,8 @@ async def test_the_request_serving_host_completes_the_client_round_trip(tmp_path
     root = tmp_path / "fleet"
     root.parent.mkdir(parents=True, exist_ok=True)
 
-    manager = CaseManager.open(
-        root,
-        register_types=[InquiryCase, EscalationCase],
-        maintenance_interval_secs=0.01,
-    )
+    store = CaseManager.open_local_store(root, maintenance_interval_secs=0.01)
+    manager = CaseManager(store, register_types=[InquiryCase, EscalationCase])
     # Stop by asking, not by cancelling: a cancelled serve() never reaches its
     # own teardown, which leaks the watchdog thread into every later test.
     done = {"v": False}
