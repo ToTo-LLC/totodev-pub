@@ -970,6 +970,20 @@ class CaseManager:
     def allocate_staging_folder(self) -> Path:
         """An empty scratch folder inside managed space, for building a case to adopt.
 
+        The folder comes back already created, because that is what both ways of
+        filling it want: ``create_case_in_folder()`` accepts an existing empty
+        directory, and ``copytree(..., dirs_exist_ok=True)`` copies into one. So
+        building a case for adoption is three lines with no ceremony::
+
+            staged = manager.allocate_staging_folder()
+            MyCase.create_case_in_folder(staged, external_key="K-1")
+            await manager.adopt_case(staged)
+
+        Staging sits on the same filesystem as managed storage, so the transfer
+        adopt performs is a rename rather than a copy. Adopt *consumes* what it is
+        given, which is the other reason to stage: a case assembled here is
+        expendable, where the caller's own folder is not.
+
         Sweeps abandoned staging folders as a side effect, so it is also the
         thing that keeps that space from growing.
         """

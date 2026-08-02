@@ -20,7 +20,6 @@ from totodev_pub.case_manager_support.fleet_status_watcher import FleetStatusBoa
 from totodev_pub.case_manager_support.case_store import LIVE
 from totodev_pub.case_manager_support.layout import CaseLocation, policy_manager_dir
 from totodev_pub.case_manager_support.mailbox import MailboxTransport, RequestHandle
-from totodev_pub.case_manager_support.staging import allocate_staging_folder
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.folder_backed_case import IncompatibleReclassError
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
@@ -87,9 +86,7 @@ class CaseManagerClient:
 
     def allocate_staging_folder(self, *, only_if_fresh: bool = True) -> Path:
         self._check_fresh(only_if_fresh)
-        return allocate_staging_folder(
-            self._manager._manager_dir, self._manager._policy
-        )
+        return self._manager.allocate_staging_folder()
 
     def submit_fire(
         self,

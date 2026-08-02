@@ -95,9 +95,7 @@ async def load_case_bag(
             report.skipped.append(child.name)
             continue
         staged = manager.allocate_staging_folder()
-        # copytree needs a non-existent destination; staging hands us an empty one.
-        shutil.rmtree(staged)
-        shutil.copytree(child, staged)
+        shutil.copytree(child, staged, dirs_exist_ok=True)
         result = await manager.adopt_case(staged)
         if result.status == "completed":
             report.adopted.append(result.case_id)

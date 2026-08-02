@@ -66,6 +66,12 @@ def _is_valid_adopt_source(
 
     Adopting a folder out of managed storage would mean taking a case the store
     already owns and admitting it a second time.
+
+    Staging and adopt-drop are scratch, and stay valid sources wherever the
+    manager namespace is parked. With the default layout the namespace is a
+    sibling of the storage buckets, so they would pass the ``owns_path`` test
+    below anyway; name it after a bucket and they would not, which is what the
+    check ahead of that test is for.
     """
     source = source.resolve()
     for scratch in (policy.staging_subdir, policy.adopt_drop_subdir):
