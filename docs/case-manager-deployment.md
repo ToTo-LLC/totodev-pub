@@ -155,6 +155,36 @@ set. Consequence for CI: a coverage run does not exercise the real watchdog.
 1 and 2 are distinct on purpose: a probe that conflates them pages people for
 scale-downs.
 
+### What recovery reports
+
+Every `recover()` logs one INFO line — what the pool restored, orphans revived,
+tickets still pending, adopt-drop counts — whether or not anything went wrong. A
+fleet that came back from a crash and says nothing is indistinguishable from one
+that had nothing to do.
+
+Two conditions log at ERROR instead, because each is a standing defect rather
+than a repair:
+
+- **Orphans that could not be rehydrated.** These are live cases nobody will ever
+  drive, and they will fail identically on every restart until resolved. The
+  usual cause is a build whose case classes no longer match what is on disk — a
+  renamed class, or a state removed from an FSM while cases still sit in it.
+  Watch this line after every deploy; it is the one that catches a rollout
+  stranding live work.
+- **Pooled cases the store no longer calls live.** These are evicted, with the
+  case's real status named. Under a singly-owned cache root this cannot happen,
+  so it means something else wrote to the filespace.
+
+Both are also delivered as `READMIT_ANOMALY` notices, and both are on
+`manager.last_recover_report` for a host that wants to act on them.
+
+**`strict_recovery` turns either into an exception.** Off by default: one
+unrestorable case must not ground a fleet that is otherwise healthy. Turn it on
+in dev and test, where the same case is a defect that should stop the build
+rather than scroll past — `recover()` then raises `RecoveryIntegrityError`
+carrying both lists. The detection and the logging are identical either way; only
+the landing changes.
+
 ### Restarting after a crash takes ~30 seconds, and that is correct
 
 A manager that was SIGKILLed leaves its cases' heartbeat leases held. The
@@ -212,7 +242,8 @@ refreshed snapshot of every case in the pool. Read it with
 
 - **Run one manager per cache root.** Two processes over one root will fight over
   leases. `recover()` detects a competing live manager, but do not rely on it as
-  a scheduling mechanism.
+  a scheduling mechanism: the detection needs contended cases to notice, so two
+  managers over an idle root will both start without complaint.
 - **The cache root must be a real, durable, POSIX-ish filesystem.** The manager
   relies on atomic rename and on mtime-based lease expiry. Network filesystems
   with weak rename semantics or coarse mtime granularity are not supported.

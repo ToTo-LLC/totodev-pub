@@ -73,6 +73,11 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     watchdog_pulse_stuck_secs: Optional[float] = None
     watchdog_mailbox_stale_secs: Optional[float] = None  # None → derived; 0 → disabled
     watchdog_tick_warn_secs: Optional[float] = None
+    # Recovery always logs what it could not restore. This decides whether it also
+    # refuses to hand back a manager. Off in production, where one unrestorable
+    # case must not ground a healthy fleet; on in dev and test, where the same
+    # case is a defect that should stop the build rather than scroll past.
+    strict_recovery: bool = False
 
     @classmethod
     def tier1_field_names(cls) -> frozenset[str]:
@@ -121,6 +126,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "watchdog_pulse_stuck_secs",
             "watchdog_mailbox_stale_secs",
             "watchdog_tick_warn_secs",
+            "strict_recovery",
         })
 
     def apply_tier2_overrides(self, **overrides: Any) -> "CaseManagerPolicy":

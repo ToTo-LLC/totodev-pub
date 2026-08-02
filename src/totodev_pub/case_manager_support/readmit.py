@@ -47,9 +47,9 @@ logger = logging.getLogger(__name__)
 class OrphanReadmitReport:
     readmitted: list[str] = field(default_factory=list)
     anomalies: list[str] = field(default_factory=list)
-    #: Cases the pool holds that the store no longer calls live. Under an
-    #: exclusively-owned filespace this should always be empty; it is a
-    #: consistency assertion, not a routine repair.
+    #: Cases the pool held that the store no longer calls live, now evicted. Under
+    #: an exclusively-owned filespace this should always be empty: a non-empty list
+    #: means something wrote to the filespace besides this manager.
     stale_pool_entries: list[str] = field(default_factory=list)
 
 
@@ -75,7 +75,7 @@ def readmit_orphans(
     """
     report = OrphanReadmitReport()
     live = {entry.case_id: entry for entry in store.iter_by_status(LIVE)}
-    pooled = {case.case_id for case in driver}
+    pooled = {case.case_id: case for case in driver}
 
     for case_id in live:
         if case_id in pooled:
@@ -115,13 +115,48 @@ def readmit_orphans(
                 emit_anomaly(case_id, current.case_folder, str(exc))
 
     # The reverse direction: the pool holds a case the store no longer calls live,
-    # so the pooled object is addressing a folder that has already moved.
-    for case_id in sorted(pooled - live.keys()):
+    # so the pooled object is addressing a folder that has already moved. Driving it
+    # can only fail, and failing later at tick time would report the symptom far from
+    # the cause — so it is evicted here, loudly, with its real status named.
+    for case_id in sorted(set(pooled) - live.keys()):
+        case = pooled[case_id]
+        current = store.find(case_id)
+        whereabouts = (
+            f"store reports {current.status}"
+            + (f" in {current.partition}" if current.partition else "")
+            if current is not None
+            else "no longer present in storage at all"
+        )
+        evicted = _evict(driver, case, case_id)
         report.stale_pool_entries.append(case_id)
-        logger.warning(
-            "Pool holds case %s which the store no longer reports as live", case_id
+        logger.error(
+            "Evicting pooled case %s: the store no longer calls it live (%s). Under a "
+            "singly-owned filespace this cannot happen — something else wrote here.%s",
+            case_id,
+            whereabouts,
+            "" if evicted else " Eviction itself failed; the pool entry remains.",
         )
         if emit_anomaly:
-            emit_anomaly(case_id, None, "pooled case is not live in the store")
+            emit_anomaly(case_id, case.case_folder, f"pooled case is not live: {whereabouts}")
 
     return report
+
+
+def _evict(driver: "CasePoolDriver", case: FolderBackedCase, case_id: str) -> bool:
+    """Drop a case from the pool and release the lease the pool was holding.
+
+    ``driver.remove`` deliberately leaves the lease alone, so detaching is not
+    optional here: a lease left held on a folder that has moved (or gone) makes the
+    case look owned to every later pass, including the next restart's.
+    """
+    try:
+        driver.remove(case.case_folder)
+    except Exception:
+        logger.exception("Could not evict stale pool entry %s", case_id)
+        return False
+    try:
+        if not case.case_is_detached:
+            case.case_detach()
+    except Exception:
+        logger.exception("Evicted %s but could not release its lease", case_id)
+    return True

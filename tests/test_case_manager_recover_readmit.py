@@ -10,6 +10,8 @@ archives them next tick, which is what leaves a single archive-label computation
 in the codebase rather than two that could disagree.
 """
 
+import logging
+
 import pytest
 
 from case_manager_test_utils import (
@@ -20,6 +22,7 @@ from case_manager_test_utils import (
     seed_detached_case,
 )
 from totodev_pub.case_manager_support.case_store import LIVE, TERMINATED
+from totodev_pub.case_manager_support.exceptions import RecoveryIntegrityError
 from totodev_pub.case_manager_support.quarantine import quarantine_case
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
@@ -80,7 +83,7 @@ async def test_a_terminal_orphan_is_readmitted_then_archived_next_tick(tmp_path)
 
     # A crash: the case is terminal on disk, still live in the store, undriven.
     manager2 = provision_manager(tmp_path)
-    report = await manager2.readmit_orphans()
+    report = await manager2._readmit_orphans()
     assert report.readmitted == [case_id], "terminal or not, an orphan is re-admitted"
 
     manager2._reconcile_terminal_in_pool()
@@ -100,7 +103,7 @@ async def test_a_leased_orphan_is_left_alone(tmp_path):
 
     try:
         manager2 = provision_manager(tmp_path)
-        report = await manager2.readmit_orphans()
+        report = await manager2._readmit_orphans()
         assert report.readmitted == []
         assert report.anomalies == []
     finally:
@@ -124,7 +127,7 @@ async def test_a_departing_case_is_not_readmitted(tmp_path):
     case.case_detach()
 
     manager2 = provision_manager(tmp_path)
-    report = await manager2.readmit_orphans()
+    report = await manager2._readmit_orphans()
 
     assert report.readmitted == [], "the departure ticket wins over re-admission"
     assert manager2._store.status_of(case_id) == LIVE
@@ -147,7 +150,7 @@ async def test_an_unrehydratable_orphan_escalates(tmp_path, monkeypatch):
         raise ValueError("record is unreadable")
 
     monkeypatch.setattr(manager2._registry, "rehydrate", unreadable)
-    report = await manager2.readmit_orphans()
+    report = await manager2._readmit_orphans()
 
     assert report.readmitted == []
     assert report.anomalies == [case_id]
@@ -176,7 +179,7 @@ async def test_a_failed_readmit_releases_the_lease_it_took(tmp_path, monkeypatch
         raise RuntimeError("driver said no")
 
     monkeypatch.setattr(manager2._driver, "add", rejecting_add)
-    report = await manager2.readmit_orphans()
+    report = await manager2._readmit_orphans()
     assert report.anomalies == [case_id]
 
     folder = manager2._store.find(case_id).case_folder
@@ -185,15 +188,15 @@ async def test_a_failed_readmit_releases_the_lease_it_took(tmp_path, monkeypatch
     )
 
     manager3 = provision_manager(tmp_path)
-    assert (await manager3.readmit_orphans()).readmitted == [case_id], "still reachable"
+    assert (await manager3._readmit_orphans()).readmitted == [case_id], "still reachable"
 
 
 @pytest.mark.asyncio
-async def test_a_pooled_case_the_store_no_longer_calls_live_is_reported(tmp_path):
+async def test_a_pooled_case_the_store_no_longer_calls_live_is_evicted(tmp_path, caplog):
     """The reverse direction: a pooled object addressing a folder that has moved.
 
-    Under an exclusively-owned filespace this should never happen; it is a
-    consistency assertion, not a routine repair.
+    Driving it could only fail, and failing later at tick time would report the
+    symptom far from the cause, so it is evicted here rather than merely noted.
     """
     manager = provision_manager(tmp_path)
     await manager.recover()
@@ -204,10 +207,47 @@ async def test_a_pooled_case_the_store_no_longer_calls_live_is_reported(tmp_path
     case.case_detach()
 
     await manager._store.set_status(case_id, TERMINATED, partition="2026-08")
+    assert case_id in {c.case_id for c in manager._driver}, "precondition: still pooled"
 
     notices = []
     manager.on_notice(notices.append)
-    report = await manager.readmit_orphans()
+    with caplog.at_level(logging.ERROR):
+        report = await manager._readmit_orphans()
 
     assert report.stale_pool_entries == [case_id]
+    assert case_id not in {c.case_id for c in manager._driver}, "evicted from the pool"
     assert [n.kind.value for n in notices] == ["READMIT_ANOMALY"]
+    # The status is named, not just the id — "terminated" and "gone entirely" are
+    # very different pages at 3am.
+    assert any(
+        case_id in r.getMessage() and "terminated" in r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.ERROR
+    ), caplog.text
+
+
+@pytest.mark.asyncio
+async def test_strict_recovery_raises_on_an_integrity_problem(tmp_path):
+    """Contained by default, fail-fast on request: same detection, different landing."""
+    manager = provision_manager(tmp_path, strict_recovery=True)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+    case.case_detach()
+    await manager._store.set_status(case_id, TERMINATED, partition="2026-08")
+
+    with pytest.raises(RecoveryIntegrityError) as excinfo:
+        await manager.recover()
+    assert case_id in excinfo.value.stale_pool_entries
+    assert case_id in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_recovery_always_logs_a_summary(tmp_path, caplog):
+    """A revived fleet that says nothing looks exactly like one with nothing to do."""
+    manager = provision_manager(tmp_path)
+    with caplog.at_level(logging.INFO):
+        await manager.recover()
+    assert any("Recovery complete:" in r.getMessage() for r in caplog.records), caplog.text

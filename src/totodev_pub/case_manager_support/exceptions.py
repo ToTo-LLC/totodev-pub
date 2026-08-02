@@ -192,6 +192,37 @@ class RecoverRequiredError(Exception):
         )
 
 
+class RecoveryIntegrityError(Exception):
+    """Recovery could not restore everything, and ``strict_recovery`` is on.
+
+    Both halves are already logged and already contained — orphans that would not
+    rehydrate were left where they are, and stale pool entries were evicted — so
+    this changes nothing about the filespace. It exists so a dev or test run stops
+    on a defect that production is expected to carry.
+
+    ``anomalies`` are live cases that could not be rehydrated; the usual cause is a
+    build whose case classes no longer match what is on disk, and they stay stuck
+    until that is resolved. ``stale_pool_entries`` are cases the pool held that the
+    store no longer calls live, which under an exclusively-owned filespace should
+    never happen at all."""
+
+    def __init__(self, *, anomalies: list[str], stale_pool_entries: list[str]) -> None:
+        self.anomalies = list(anomalies)
+        self.stale_pool_entries = list(stale_pool_entries)
+        parts = []
+        if self.anomalies:
+            parts.append(f"{len(self.anomalies)} orphan(s) could not be rehydrated: "
+                         f"{', '.join(self.anomalies)}")
+        if self.stale_pool_entries:
+            parts.append(f"{len(self.stale_pool_entries)} stale pool entr(ies) evicted: "
+                         f"{', '.join(self.stale_pool_entries)}")
+        super().__init__(
+            "Recovery completed with integrity problems and strict_recovery is on. "
+            + "; ".join(parts)
+            + ". Set strict_recovery=False to log these and continue instead."
+        )
+
+
 class ManagerNotRunningError(Exception):
     """``CaseManager.fire()`` requires a running manager loop (queue-only semantics).
 

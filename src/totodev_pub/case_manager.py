@@ -74,7 +74,7 @@ from totodev_pub.case_manager_support.layout import (
     assert_case_folder_movable,
     policy_manager_dir,
 )
-from totodev_pub.case_manager_support.purge import PurgeReport, run_redundant_purge
+from totodev_pub.case_manager_support.purge import run_redundant_purge
 from totodev_pub.case_manager_support.quarantine import (
     QuarantineTicket,
     pending_quarantine_tickets,
@@ -841,13 +841,16 @@ class CaseManager:
             driver_remove=self._driver.remove,
         )
 
-    async def readmit_orphans(self) -> OrphanReadmitReport:
-        """Startup orphan recovery. See ``case_manager_support.readmit``.
+    async def _readmit_orphans(self) -> OrphanReadmitReport:
+        """A phase of ``recover()``. See ``case_manager_support.readmit``.
 
         The join across pool membership, the store's status, and the type
         registry stays here rather than moving into the store: answering it needs
         the driver and the registry, and injecting those into a storage object
         would rebuild the very dependency the store exists to remove.
+
+        What it found reaches callers on the ``RecoverReport``; there is no reason
+        to run it on its own, and running it mid-flight would fight ticket replay.
         """
         return readmit_orphans(
             store=self._store,
@@ -864,13 +867,6 @@ class CaseManager:
         return (
             eject_ticket_path(self._manager_dir, case_id).exists()
             or quarantine_ticket_exists(self._manager_dir, case_id)
-        )
-
-    async def run_redundant_purge(self) -> PurgeReport:
-        """Run the ephemeral purge now instead of waiting for its tick."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: run_redundant_purge(self._store, self._policy)
         )
 
     # ------------------------------------------------------------------

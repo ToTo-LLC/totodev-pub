@@ -14,15 +14,16 @@ explicitly framed as "fix it" vs. "leave it" rather than pre-decided work.
 
 ### 1. Orphan re-admission is restart-only, by design — is that still right?
 
-`readmit_orphans()` has exactly one caller (`recover_manager()`), so a live case whose rehydration
+`_readmit_orphans()` has exactly one caller (`recover_manager()`), so a live case whose rehydration
 fails during recovery is not retried until the next restart. That was a deliberate boundary, not an
 oversight: mid-run divergence is ticket replay's job, and orphan re-admission is startup-only per the
 `CaseStore` design.
 
 Since then, the lease-leak bug that would have made a restart *not* actually revisit a failed orphan
-was fixed — so a restart now genuinely reaches it. The open question is whether restart-only cadence
-is still acceptable, or whether operators want something that revisits failed orphans without a full
-process restart.
+was fixed — so a restart now genuinely reaches it. The method has also been made private, which
+commits harder to the restart-only boundary, and failed orphans are now logged at ERROR naming each
+case (and raise under `strict_recovery`), so the operator-visibility half of the concern is covered.
+The open question is only about *cadence*: whether a stuck orphan must wait for a process restart.
 
 **Debate:** leave as-is (matches the original design boundary) vs. add a lighter-weight in-process
 retry for orphans that failed rehydration during recovery.

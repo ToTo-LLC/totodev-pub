@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from totodev_pub.case_manager_support.case_store import LIVE
+from totodev_pub.case_manager_support.exceptions import RecoveryIntegrityError
 from totodev_pub.case_manager_support.shutdown import discard_stale_requests, shutdown_intake_dir
 from totodev_pub.case_manager_support.watchdog import log_recent_death_records
 from totodev_pub.folder_backed_case_support.pool_membership_journal import (
@@ -92,8 +93,62 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     report.termination_pending = manager._count_termination_pending()
     report.eject_pending = manager._count_eject_pending()
 
-    readmit_report = await manager.readmit_orphans()
+    readmit_report = await manager._readmit_orphans()
     report.orphans_readmitted = len(readmit_report.readmitted)
     report.orphan_anomalies = list(readmit_report.anomalies)
     report.stale_pool_entries = list(readmit_report.stale_pool_entries)
+
+    _log_report(report)
+    if manager._policy.strict_recovery and (
+        report.orphan_anomalies or report.stale_pool_entries
+    ):
+        raise RecoveryIntegrityError(
+            anomalies=report.orphan_anomalies,
+            stale_pool_entries=report.stale_pool_entries,
+        )
     return report
+
+
+def _log_report(report: RecoverReport) -> None:
+    """Say what recovery did, every time, whether or not anything went wrong.
+
+    A crashed-and-revived fleet that says nothing is indistinguishable from one
+    that had nothing to do, so the summary is unconditional. The two problem
+    lists are separate and louder because each is a standing defect: an anomaly
+    is work nobody will ever pick up, and a stale entry means a second writer.
+    """
+    logger.info(
+        "Recovery complete: pool_restored=%d orphans_readmitted=%d "
+        "termination_pending=%d eject_pending=%d adopt_drop=%d/%d/%d/%d "
+        "death_records_recent=%d shutdown_requests_discarded=%d",
+        report.pool_restored,
+        report.orphans_readmitted,
+        report.termination_pending,
+        report.eject_pending,
+        report.adopt_drop_seen,
+        report.adopt_drop_admitted,
+        report.adopt_drop_rejected,
+        report.adopt_drop_skipped,
+        report.death_records_recent,
+        report.shutdown_requests_discarded,
+    )
+    if report.dropped_paths:
+        logger.warning(
+            "Recovery could not restore %d case(s) the journal listed: %s",
+            len(report.dropped_paths),
+            ", ".join(str(p) for p in report.dropped_paths),
+        )
+    if report.orphan_anomalies:
+        logger.error(
+            "Recovery left %d live case(s) undriven — they could not be rehydrated and "
+            "will fail the same way on every restart until resolved (a build whose case "
+            "classes no longer match what is on disk is the usual cause): %s",
+            len(report.orphan_anomalies),
+            ", ".join(report.orphan_anomalies),
+        )
+    if report.stale_pool_entries:
+        logger.error(
+            "Recovery evicted %d pooled case(s) the store no longer calls live: %s",
+            len(report.stale_pool_entries),
+            ", ".join(report.stale_pool_entries),
+        )
