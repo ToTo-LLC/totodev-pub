@@ -123,7 +123,6 @@ def readmit_orphans(
         current = store.find(case_id)
         whereabouts = (
             f"store reports {current.status}"
-            + (f" in {current.partition}" if current.partition else "")
             if current is not None
             else "no longer present in storage at all"
         )

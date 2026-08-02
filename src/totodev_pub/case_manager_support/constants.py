@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-POLICY_SCHEMA_VERSION = 1
+POLICY_SCHEMA_VERSION = 2
 MANIFEST_PROTOCOL_VERSION = 1
 
 # Liveness pulse: cadence of the manager's sibling pulse coroutine — the
@@ -13,12 +13,9 @@ MANIFEST_PROTOCOL_VERSION = 1
 # pulse within one interval.
 PULSE_INTERVAL_SECS = 0.5
 
-DEFAULT_GROUPING_PATTERN = "{bucket}/"
+DEFAULT_GROUPING_PATTERN = "{status}/"
 DEFAULT_LIVE_BUCKET = "live"
-DEFAULT_TERMINAL_PREFIX = "terminal"
-DEFAULT_ABERRANT_BUCKET = "aberrant"
 DEFAULT_MANAGER_NAMESPACE = ".case_manager"
-DEFAULT_CASE_REF_PATH_TEMPLATE = "cases/{case_id}.yaml"
 
 DEFAULT_STAGING_SUBDIR = "staging"
 DEFAULT_ADOPT_DROP_SUBDIR = "adopt_drop"

@@ -48,13 +48,32 @@ class UnrelatedCase(FolderBackedCase):
         pass
 
 
+class StrictRoutedCase(FolderBackedCase):
+    """Shares 'sorted' with IntakeCase but rejects the handoff via assertions."""
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["[*] --> sorted -- finish --> done --> [*]"]
+
+    def case_assert_sorted_has_route(self, ltx):
+        return "missing route"
+
+    def case_assert_sorted_has_owner(self, ltx):
+        return "missing owner"
+
+    async def perform_finish(self, tctx):
+        pass
+
+
 def provision(tmp_path, **overrides) -> CaseManager:
     store = CaseManager.open_local_store(
         tmp_path / "cache",
         maintenance_interval_secs=0.01,
         **overrides,
     )
-    return CaseManager(store, register_types=[IntakeCase, RoutedCase, UnrelatedCase])
+    return CaseManager(
+        store,
+        register_types=[IntakeCase, RoutedCase, UnrelatedCase, StrictRoutedCase],
+    )
 
 
 async def seed_parked_intake(manager: CaseManager, tmp_path):
@@ -119,6 +138,39 @@ async def test_reclassify_case_unregistered_type_rejected(tmp_path):
     case = await seed_parked_intake(manager, tmp_path)
     with pytest.raises(UnregisteredCaseTypeError):
         await manager.reclassify_case(case_id=case.case_id, target_type="NoSuchCase")
+
+
+@pytest.mark.asyncio
+async def test_reclassify_case_quarantines_when_target_assertions_fail(tmp_path):
+    from totodev_pub.case_manager_support.case_store import QUARANTINED
+    from totodev_pub.case_manager_support.quarantine import EV_QUARANTINED
+    from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+    from totodev_pub.folder_backed_case_support.exceptions import ReclassifyAssertionError
+
+    manager = provision(tmp_path)
+    await manager.recover()
+    case = await seed_parked_intake(manager, tmp_path)
+    case_id = case.case_id
+
+    with pytest.raises(ReclassifyAssertionError) as ei:
+        await manager.reclassify_case(case_id=case_id, target_type="StrictRoutedCase")
+    assert [f.name for f in ei.value.failures] == ["has_owner", "has_route"]
+
+    assert case_id not in [c.case_id for c in manager._driver]
+    assert case_id in [r.case_id for r in manager.iter_quarantine()]
+    assert manager._store.status_of(case_id) == QUARANTINED
+    loc = manager.locate(case_id=case_id)
+    assert loc is not None
+    reader = FolderBackedCaseReader(loc.case_folder)
+    assert reader.case_object_type == "StrictRoutedCase"
+    labels = [ev.label for ev in reader.case_event_journal.primitive.events()]
+    assert EV_QUARANTINED in labels
+    quarantine_ev = next(
+        ev for ev in reader.case_event_journal.primitive.events()
+        if ev.label == EV_QUARANTINED
+    )
+    assert "missing route" in quarantine_ev.value
+    assert "missing owner" in quarantine_ev.value
 
 
 @pytest.mark.asyncio

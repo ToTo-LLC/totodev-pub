@@ -41,6 +41,42 @@ def _isolate_case_registry():
 
 
 @pytest.mark.asyncio
+async def test_operator_can_request_quarantine_of_a_live_case(tmp_path):
+    """Park a live case for investigation without ejecting it from managed storage."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+
+    dest = await manager.quarantine_case(case_id, reason="operator: investigate payload")
+
+    assert dest is not None
+    assert manager._store.status_of(case_id) == QUARANTINED
+    assert case_id not in [c.case_id for c in manager._driver]
+    assert case_id in [r.case_id for r in manager.iter_quarantine()]
+    labels = [ev.label for ev in CaseEventJournalView.for_folder(dest).primitive.events()]
+    assert EV_QUARANTINED in labels
+
+    await manager.reopen_case(case_id)
+    assert manager.get_live(case_id).case_id == case_id
+
+
+@pytest.mark.asyncio
+async def test_operator_quarantine_requires_a_reason(tmp_path):
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+
+    with pytest.raises(ValueError, match="reason"):
+        await manager.quarantine_case(case.case_id, reason="   ")
+
+
+@pytest.mark.asyncio
 async def test_a_released_case_is_quarantined_immediately(tmp_path):
     manager = provision_manager(tmp_path)
     await manager.recover()

@@ -222,14 +222,12 @@ class CaseManagerClient:
         self,
         source_folder: Path,
         *,
-        expected_case_id: str | None = None,
         correlation_id: str | None = None,
         only_if_fresh: bool = True,
     ) -> RequestHandle:
         self._check_fresh(only_if_fresh)
         return self._transport.submit_adopt(
             source_folder=source_folder,
-            expected_case_id=expected_case_id,
             correlation_id=correlation_id,
         )
 

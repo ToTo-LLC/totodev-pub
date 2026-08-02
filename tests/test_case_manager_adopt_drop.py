@@ -14,7 +14,7 @@ async def test_adopt_drop_scan(tmp_path):
         # redundant purge from reaping this test's fixtures.
         startup_adopt_scan=True,
         redundant_purge_terminal_after_secs=None,
-        redundant_purge_aberrant_after_secs=None,
+        redundant_purge_quarantined_after_secs=None,
     )
     manager = CaseManager(store, register_types=[TicketCase])
     drop = manager._manager_dir / manager._policy.adopt_drop_subdir

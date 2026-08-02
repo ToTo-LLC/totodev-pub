@@ -33,8 +33,16 @@ def sweep_staging(
 ) -> int:
     """Reclaim abandoned staging folders. Returns the count removed.
 
-    Lazy rather than scheduled: staging is only swept when something new is
-    allocated, so an idle manager does no work here at all."""
+    Rules (age from directory ``ctime``):
+
+    - heartbeat absent/expired and age >= ``staging_min_age_secs`` → delete
+    - heartbeat still active and age >= ``staging_stale_lease_secs`` → delete
+      (builder presumed wedged; logged)
+    - otherwise leave alone (in-flight assemble)
+
+    Lazy rather than scheduled: only runs from ``allocate_staging_folder``, so
+    an idle manager never sweeps on its own.
+    """
     now = clock if clock is not None else time.time()
     removed = 0
     if not staging.exists():

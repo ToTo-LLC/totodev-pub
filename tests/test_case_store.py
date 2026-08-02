@@ -9,6 +9,7 @@ its lookups cost in reads, and the point-in-time nature of everything it hands
 back.
 """
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,6 @@ from totodev_pub.case_manager_support.case_store import (
 from totodev_pub.case_manager_support.exceptions import (
     CaseLeaseHeldError,
     CaseNotInStoreError,
-    UnknownCaseStatusError,
 )
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
@@ -122,27 +122,44 @@ async def test_a_new_case_starts_live(store, tmp_path):
     folder = await store.create_location("c-1")
     entry = store.find("c-1")
     assert entry is not None
-    assert (entry.status, entry.partition) == (LIVE, None)
+    assert entry.status == LIVE
+    assert "partition" not in entry.__dataclass_fields__
     assert entry.case_folder == folder
-
-
-@pytest.mark.asyncio
-async def test_terminated_requires_a_partition(store, tmp_path):
-    await _seed_live(store, tmp_path)
-    with pytest.raises(ValueError, match="partition"):
-        await store.set_status("c-1", TERMINATED)
 
 
 @pytest.mark.asyncio
 async def test_set_status_moves_the_folder_and_reports_the_new_one(store, tmp_path):
     old = await _seed_live(store, tmp_path)
-    new = await store.set_status("c-1", TERMINATED, partition="2026-08")
+    new = await store.set_status("c-1", TERMINATED)
 
     assert new != old, "location is the projection of status; it must move"
     assert not old.exists()
     assert (new / "case_record.yaml").exists(), "case content came along"
     entry = store.find("c-1")
-    assert (entry.status, entry.partition) == (TERMINATED, "2026-08")
+    assert entry.status == TERMINATED
+    assert entry.activity_at is not None
+    # Non-live path encodes YYYY-MM/YYYY-MM-DD under the status grouping.
+    assert TERMINATED in new.parts
+    rel = new.relative_to(store.root_dir / TERMINATED)
+    assert len(rel.parts) >= 2
+    assert rel.parts[0].count("-") == 1  # YYYY-MM
+
+
+@pytest.mark.asyncio
+async def test_quarantined_uses_quarantined_bucket(store, tmp_path):
+    await _seed_live(store, tmp_path)
+    new = await store.set_status("c-1", QUARANTINED)
+    assert (store.root_dir / "quarantined").is_dir()
+    assert "quarantined" in new.parts
+    assert not (store.root_dir / "aberrant").exists()
+
+
+@pytest.mark.asyncio
+async def test_unknown_non_live_status_gets_timed_layout(store, tmp_path):
+    await _seed_live(store, tmp_path)
+    new = await store.set_status("c-1", "hibernating")
+    assert store.status_of("c-1") == "hibernating"
+    assert "hibernating" in new.parts
 
 
 @pytest.mark.asyncio
@@ -157,13 +174,6 @@ async def test_set_status_is_idempotent(store, tmp_path):
 async def test_set_status_on_an_unknown_case_raises(store):
     with pytest.raises(CaseNotInStoreError):
         await store.set_status("nobody", QUARANTINED)
-
-
-@pytest.mark.asyncio
-async def test_set_status_rejects_a_status_it_cannot_address(store, tmp_path):
-    await _seed_live(store, tmp_path)
-    with pytest.raises(UnknownCaseStatusError):
-        await store.set_status("c-1", "hibernating")
 
 
 # ------------------------------------------------------------------- the lease
@@ -210,7 +220,7 @@ async def test_export_refuses_while_the_lease_is_held(store, tmp_path):
 async def test_find_locates_a_case_at_every_status(store, tmp_path):
     await _seed_live(store, tmp_path)
     assert store.find("c-1").status == LIVE
-    await store.set_status("c-1", TERMINATED, partition="2026-08")
+    await store.set_status("c-1", TERMINATED)
     assert store.find("c-1").status == TERMINATED
     await store.set_status("c-1", QUARANTINED)
     assert store.find("c-1").status == QUARANTINED
@@ -277,15 +287,125 @@ def test_case_id_at_ignores_an_unmanaged_case_folder(store, tmp_path):
 async def test_iterators_partition_the_fleet_by_status(store, tmp_path):
     for n in range(3):
         await _seed_live(store, tmp_path, f"c-{n}")
-    await store.set_status("c-0", TERMINATED, partition="2026-07")
-    await store.set_status("c-1", TERMINATED, partition="2026-08")
+    await store.set_status("c-0", TERMINATED)
+    await store.set_status("c-1", TERMINATED)
     await store.set_status("c-2", QUARANTINED)
 
-    terminated = {e.case_id: e.partition for e in store.iter_by_status(TERMINATED)}
-    assert terminated == {"c-0": "2026-07", "c-1": "2026-08"}, "all partitions, one status"
+    terminated = {e.case_id for e in store.iter_by_status(TERMINATED)}
+    assert terminated == {"c-0", "c-1"}
     assert [e.case_id for e in store.iter_by_status(QUARANTINED)] == ["c-2"]
     assert list(store.iter_by_status(LIVE)) == []
     assert {e.case_id for e in store.iter_all()} == {"c-0", "c-1", "c-2"}
+
+
+@pytest.mark.asyncio
+async def test_live_iter_orders_by_case_id_oldest_first(store, tmp_path):
+    for case_id in ("c-2", "c-0", "c-1"):
+        await _seed_live(store, tmp_path, case_id)
+    assert [e.case_id for e in store.iter_by_status(LIVE)] == ["c-0", "c-1", "c-2"]
+    assert [e.case_id for e in store.iter_by_status(LIVE, reverse=True)] == [
+        "c-2",
+        "c-1",
+        "c-0",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_live_iter_orders_by_timed_ref(store, tmp_path, monkeypatch):
+    await _seed_live(store, tmp_path, "c-early")
+    await _seed_live(store, tmp_path, "c-late")
+
+    base = datetime(2026, 8, 2, 10, 0, 0)
+    times = {"c-early": base, "c-late": base + timedelta(hours=2)}
+
+    real_activity = LocalCaseStore._activity_at
+
+    def fake_activity(self, folder):
+        entry = None
+        for e in self.iter_by_status(LIVE):
+            if e.case_folder.resolve() == Path(folder).resolve():
+                entry = e
+                break
+        if entry is not None and entry.case_id in times:
+            return times[entry.case_id]
+        return real_activity(self, folder)
+
+    monkeypatch.setattr(LocalCaseStore, "_activity_at", fake_activity)
+    await store.set_status("c-early", TERMINATED)
+    await store.set_status("c-late", TERMINATED)
+
+    assert [e.case_id for e in store.iter_by_status(TERMINATED)] == ["c-early", "c-late"]
+    assert [e.case_id for e in store.iter_by_status(TERMINATED, reverse=True)] == [
+        "c-late",
+        "c-early",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_date_bounds_filter_non_live(store, tmp_path, monkeypatch):
+    await _seed_live(store, tmp_path, "c-old")
+    await _seed_live(store, tmp_path, "c-new")
+    times = {
+        "c-old": datetime(2026, 7, 1, 12, 0, 0),
+        "c-new": datetime(2026, 8, 15, 12, 0, 0),
+    }
+    real_activity = LocalCaseStore._activity_at
+
+    def fake_activity(self, folder):
+        for e in list(self.iter_by_status(LIVE)) + list(self.iter_by_status(TERMINATED)):
+            if e.case_folder.resolve() == Path(folder).resolve() and e.case_id in times:
+                return times[e.case_id]
+        return real_activity(self, folder)
+
+    monkeypatch.setattr(LocalCaseStore, "_activity_at", fake_activity)
+    await store.set_status("c-old", TERMINATED)
+    await store.set_status("c-new", TERMINATED)
+
+    ids = [e.case_id for e in store.iter_by_status(
+        TERMINATED, after=datetime(2026, 8, 1), before=datetime(2026, 8, 31, 23, 59)
+    )]
+    assert ids == ["c-new"]
+
+
+@pytest.mark.asyncio
+async def test_date_bounds_filter_live(store, tmp_path, monkeypatch):
+    await _seed_live(store, tmp_path, "c-old")
+    await _seed_live(store, tmp_path, "c-new")
+    times = {
+        "c-old": datetime(2026, 7, 1, 12, 0, 0),
+        "c-new": datetime(2026, 8, 15, 12, 0, 0),
+    }
+    real_activity = LocalCaseStore._activity_at
+
+    def fake_activity(self, folder):
+        case_id = store.case_id_at(folder)
+        if case_id in times:
+            return times[case_id]
+        return real_activity(self, folder)
+
+    monkeypatch.setattr(LocalCaseStore, "_activity_at", fake_activity)
+    ids = [e.case_id for e in store.iter_by_status(
+        LIVE, after=datetime(2026, 8, 1), before=datetime(2026, 8, 31, 23, 59)
+    )]
+    assert ids == ["c-new"]
+
+
+def test_inverted_date_bounds_raise(store):
+    with pytest.raises(ValueError, match="after"):
+        list(store.iter_by_status(
+            LIVE,
+            after=datetime(2026, 8, 10),
+            before=datetime(2026, 8, 1),
+        ))
+
+
+@pytest.mark.asyncio
+async def test_populated_statuses(store, tmp_path):
+    assert "live" in store.populated_statuses()
+    await _seed_live(store, tmp_path)
+    await store.set_status("c-1", QUARANTINED)
+    statuses = store.populated_statuses()
+    assert "quarantined" in statuses
 
 
 # ---------------------------------------------------------------------- export

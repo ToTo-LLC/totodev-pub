@@ -40,7 +40,6 @@ class AdoptRejectReason(str, Enum):
     UNREGISTERED_TYPE = "unregistered_type"
     MALFORMED_RECORD = "malformed_record"
     INVALID_SOURCE = "invalid_source"
-    EXPECTED_CASE_ID_MISMATCH = "expected_case_id_mismatch"
 
 
 class AdoptResult(BaseModel, FileMappedPydanticMixin):
@@ -90,7 +89,6 @@ def validate_adopt_source(
     policy: "CaseManagerPolicy",
     manager_dir: Path,
     registry: CaseTypeRegistry,
-    expected_case_id: str | None,
     case_id_exists: Callable[[str], bool],
 ) -> tuple[str | None, AdoptRejectReason | None, str | None]:
     source = Path(source_folder).resolve()
@@ -106,8 +104,6 @@ def validate_adopt_source(
     case_id = read_case_id_from_folder(source)
     if not case_id:
         return None, AdoptRejectReason.MALFORMED_RECORD, "case_id unreadable"
-    if expected_case_id is not None and expected_case_id != case_id:
-        return None, AdoptRejectReason.EXPECTED_CASE_ID_MISMATCH, "expected_case_id mismatch"
     if case_id_exists(case_id):
         return None, AdoptRejectReason.DUPLICATE_CASE_ID, "duplicate case_id"
     try:
@@ -144,7 +140,6 @@ async def adopt_case_folder(
     case_id_exists: Callable[[str], bool],
     quarantine: Callable[..., Awaitable[Path | None]],
     correlation_id: str | None = None,
-    expected_case_id: str | None = None,
 ) -> AdoptResult:
     corr = correlation_id or str(uuid.uuid4())
     source = Path(source_folder).resolve()
@@ -155,7 +150,6 @@ async def adopt_case_folder(
         policy=policy,
         manager_dir=manager_dir,
         registry=registry,
-        expected_case_id=expected_case_id,
         case_id_exists=case_id_exists,
     )
     if reject_reason is not None:

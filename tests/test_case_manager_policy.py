@@ -16,19 +16,14 @@ from totodev_pub.folder_backed_case import FolderBackedCase
 
 def test_policy_defaults():
     p = CaseManagerPolicy()
+    assert p.schema_version == 2
     assert p.live_bucket == "live"
-    assert p.terminal_prefix == "terminal"
+    assert p.grouping_pattern == "{status}/"
     assert p.concurrency_ceiling == 50
-
-
-def test_archive_grouping_label_default(tmp_path):
-    import re
-    from case_manager_test_utils import TicketCase
-
-    case = TicketCase.create_case_in_folder(tmp_path / "c")
-    label = case.archive_grouping_label()
-    assert re.match(r"^\d{4}-\d{2}$", label)
-    case.case_detach()
+    assert not hasattr(p, "terminal_prefix")
+    assert not hasattr(p, "aberrant_bucket")
+    assert not hasattr(p, "case_ref_path_template")
+    assert "redundant_purge_quarantined_after_secs" in CaseManagerPolicy.tunables_field_names()
 
 
 def test_open_local_store_fresh_root(tmp_path):

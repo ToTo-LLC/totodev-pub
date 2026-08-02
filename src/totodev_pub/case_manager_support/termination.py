@@ -42,10 +42,6 @@ class TerminationState(str, Enum):
 class TerminationTicket(BaseModel, FileMappedPydanticMixin):
     case_id: str
     case_folder: str
-    # The archive partition the case is bound for, decided once at enqueue time
-    # from the case's own archive label. Deciding it again at move time would let
-    # a restart across a month boundary file the same case under two labels.
-    destination_partition: str
     enqueued_at: str
     state: TerminationState = TerminationState.PENDING
     retry_count: int = 0
@@ -105,14 +101,12 @@ def begin_termination(
     case_id = case.case_id
     if ticket_exists(manager_dir, case_id):
         return False
-    partition = case.archive_grouping_label()
     folder = case.case_folder
     driver_remove(folder)
     case.case_detach()
     ticket = TerminationTicket(
         case_id=case_id,
         case_folder=str(folder),
-        destination_partition=partition,
         enqueued_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     write_ticket(ticket, ticket_path(manager_dir, case_id))
@@ -162,12 +156,10 @@ async def process_pending_ticket(
     ticket.state = TerminationState.MOVING
     write_ticket(ticket, ticket_file)
     try:
-        archived = await store.set_status(
-            case_id, TERMINATED, partition=ticket.destination_partition
-        )
+        archived = await store.set_status(case_id, TERMINATED)
         ticket_file.unlink(missing_ok=True)
         if emit_notice:
-            emit_notice("CASE_TERMINATED", case_id, archived, ticket.destination_partition)
+            emit_notice("CASE_TERMINATED", case_id, archived)
     except Exception as exc:
         ticket.retry_count += 1
         ticket.last_error = str(exc)

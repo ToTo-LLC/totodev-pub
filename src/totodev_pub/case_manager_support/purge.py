@@ -46,7 +46,7 @@ def run_redundant_purge(
 
     windows = (
         (TERMINATED, policy.redundant_purge_terminal_after_secs),
-        (QUARANTINED, policy.redundant_purge_aberrant_after_secs),
+        (QUARANTINED, policy.redundant_purge_quarantined_after_secs),
     )
     for status, min_age_secs in windows:
         if min_age_secs is None:

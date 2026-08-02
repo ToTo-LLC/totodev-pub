@@ -206,7 +206,7 @@ async def test_a_pooled_case_the_store_no_longer_calls_live_is_evicted(tmp_path,
     case_id = case.case_id
     case.case_detach()
 
-    await manager._store.set_status(case_id, TERMINATED, partition="2026-08")
+    await manager._store.set_status(case_id, TERMINATED)
     assert case_id in {c.case_id for c in manager._driver}, "precondition: still pooled"
 
     notices = []
@@ -236,7 +236,7 @@ async def test_strict_recovery_raises_on_an_integrity_problem(tmp_path):
     case = await adopt_into_live(manager, staging)
     case_id = case.case_id
     case.case_detach()
-    await manager._store.set_status(case_id, TERMINATED, partition="2026-08")
+    await manager._store.set_status(case_id, TERMINATED)
 
     with pytest.raises(RecoveryIntegrityError) as excinfo:
         await manager.recover()

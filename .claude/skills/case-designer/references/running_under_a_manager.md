@@ -67,9 +67,10 @@ stops being driven; it is not deleted, and `reopen_case()` brings it back. A cas
 type that can fail in an interesting way is easier to diagnose if its failure
 path writes something to the journal too.
 
-**`archive_grouping_label()`.** Decides which dated bucket a finished case lands
-in — by default the month it closed. Override it if your domain partitions
-archives differently (tenant, fiscal period), and the manager will honor it.
+**Archive layout.** Finished cases are stored under the ``terminated`` status
+with a datetime-encoded path derived from last activity time. Operators filter
+archives by time bounds on ``iter_terminal()`` / the store; case types do not
+choose archive bucket labels.
 
 ## Questions worth asking the developer
 
@@ -81,4 +82,3 @@ Step 7 patterns:
 - Does any step call something with a concurrency limit? (chokes)
 - After this case closes, what still has to be readable in its folder a month
   later? (keep rules)
-- Is there a natural partition for the archive other than close month?

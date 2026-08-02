@@ -61,7 +61,8 @@ from totodev_pub.folder_backed_case_support.case_id_generation import (
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
     CaseTypeMismatchError, RecordTypeMismatchError,
-    IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
+    IncompatibleReclassError, ReclassifyAssertionError, MissingFsmError,
+    FsmChainParseError, FsmBindingError,
     AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError, MissingTriggerChokesError,
     CaseTransitionInFlightError, CaseInvokedProcessError, PerformParamsError,
 )
@@ -100,7 +101,8 @@ __all__ = [
     "AdvanceResult",
     "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
-    "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
+    "RecordTypeMismatchError", "IncompatibleReclassError", "ReclassifyAssertionError",
+    "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
     "PerformParamsError",
     "CaseInvokedProcessError",
@@ -760,14 +762,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return self._fsm.trigger_timeouts.get(trigger, DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS)
 
 
-    def archive_grouping_label(self) -> str:
-        """Destination archive grouping when this case closes. Default: the month the
-        case actually closed (``YYYY-MM``), read from the record's terminal stamp so
-        the label does not drift with when archiving happens to run. Falls back to now
-        for a case that has not reached terminal. Override to key on creation date,
-        fiscal period, tenant, etc."""
-        return (self.case_record().terminal or _utcnow()).strftime("%Y-%m")
-
     # ---- reclassify ("call an audible" to a different subclass) ----
 
     def case_reclassify_to(
@@ -780,6 +774,12 @@ class FolderBackedCase(FolderBackedCaseInterface):
           Use when a case must change its TYPE mid-life (e.g. a generic intake becomes a
           specialized workflow) while keeping its folder, id, and history. The current
           state must be a valid state of `new_cls` or IncompatibleReclassError is raised.
+
+        After the type switch commits, assertions for the preserved state are swept under
+        the NEW class. Failures raise ``ReclassifyAssertionError`` (type stamp stays;
+        ``exc.case`` is the rebound instance). Assertion ``ltx`` is still
+        ``last_transition()`` — the real prior CASE_STATE_ENTERED that put the case in
+        this state, not a synthetic reclassify transition.
 
         Maintainer notes:
           Two-phase commit (crash-atomic):
@@ -806,6 +806,16 @@ class FolderBackedCase(FolderBackedCaseInterface):
         )
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
         type(fresh)._seed_keep_rules(fresh._keep_manifest)
+        # Post-commit safety check: new class's invariants for the preserved state.
+        sweep = fresh._assertion_runner.sweep(fresh.case_state)
+        if sweep.failed:
+            raise ReclassifyAssertionError(
+                case_id=fresh.case_id,
+                target_type=new_cls.__name__,
+                state=fresh.case_state,
+                failures=sweep.failures,
+                case=fresh,
+            )
         return fresh
 
     # =======================================================================
@@ -856,7 +866,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "case_ext_status_info",
         # runtime seams & rare operations
         "trigger_warn_secs",
-        "archive_grouping_label",
         "case_reclassify_to",
         # lease-machinery peeks (fleet observers / recovery sweeps, not owners —
         # the owner's facility is case_heartbeat, on the interface)

@@ -26,7 +26,7 @@ it, a restart re-admits a live-status case that quarantine had already given up
 on, which for the pathological case puts the thing that raises on every
 interaction straight back into the pool.
 
-``quarantined`` is the status; *aberrant* is one reason for reaching it.
+``quarantined`` is the frozen status; the reason string explains why.
 """
 
 from __future__ import annotations

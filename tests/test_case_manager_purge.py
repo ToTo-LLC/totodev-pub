@@ -81,7 +81,7 @@ async def test_purge_disabled_by_policy_does_nothing(tmp_path):
     manager = provision_manager(
         tmp_path,
         redundant_purge_terminal_after_secs=None,
-        redundant_purge_aberrant_after_secs=None,
+        redundant_purge_quarantined_after_secs=None,
     )
     await manager.recover()
     folder = await _quarantined_case(manager, tmp_path, "c")

@@ -77,7 +77,6 @@ class AdoptRequest(BaseModel, FileMappedPydanticMixin):
     correlation_id: str
     requested_at: str
     source_folder: str
-    expected_case_id: str | None = None
 
 
 class ReclassifyRequest(BaseModel, FileMappedPydanticMixin):
@@ -228,7 +227,6 @@ class MailboxTransport:
         self,
         *,
         source_folder: Path,
-        expected_case_id: str | None = None,
         correlation_id: str | None = None,
     ) -> RequestHandle:
         corr = correlation_id or str(uuid.uuid4())
@@ -237,7 +235,6 @@ class MailboxTransport:
                 correlation_id=corr,
                 requested_at=_utc_stamp(),
                 source_folder=str(Path(source_folder).resolve()),
-                expected_case_id=expected_case_id,
             ),
             self.adopt_intake(),
             corr,

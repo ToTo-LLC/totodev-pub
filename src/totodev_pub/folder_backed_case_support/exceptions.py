@@ -166,6 +166,39 @@ class IncompatibleReclassError(Exception):
         )
 
 
+class ReclassifyAssertionError(Exception):
+    """Raised when ``case_reclassify_to`` commits the type switch but the new class's
+    assertions for the preserved state fail the post-commit sweep.
+
+    The reclassify is NOT rolled back: ``case`` is the rebound instance (still
+    bound / lease-held). Failures are observational on the ordinary transition
+    path; only reclassify escalates them into this exception.
+    """
+
+    def __init__(
+        self,
+        *,
+        case_id: str,
+        target_type: str,
+        state: str,
+        failures: list,
+        case,
+    ):
+        self.case_id = case_id
+        self.target_type = target_type
+        self.state = state
+        self.failures = list(failures)
+        self.case = case
+        lines = [
+            f"Reclassify to {target_type!r} committed at state {state!r}, but "
+            f"{len(self.failures)} assertion(s) failed:"
+        ]
+        for f in self.failures:
+            label = f"{state}.{f.name}" if f.name else f.source
+            lines.append(f"  - {label} ({f.source}): {f.msg}")
+        super().__init__("\n".join(lines))
+
+
 class AutoAdvanceBlocked(Exception):
     """A case is OPEN but no auto-advance edge can fire from the current state — now OR
     ever, by the mere passage of time. Every auto candidate's guard declined this pass and

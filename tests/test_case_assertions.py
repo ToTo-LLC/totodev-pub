@@ -279,7 +279,7 @@ def test_sweep_runs_class_assertions_and_journals(tmp_path):
     case = _make_swept_case(tmp_path)
     try:
         runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
-        runner.sweep("open")
+        result = runner.sweep("open")
 
         fails = case._journal.assert_failures(state="open")
         assert {f.value for f in fails} == {"open.fails", "open.raises"}
@@ -298,6 +298,17 @@ def test_sweep_runs_class_assertions_and_journals(tmp_path):
         }
         # the on_assertion_failed hook fired once per failure
         assert sorted(n for _, n, _ in case.hook_calls) == ["fails", "raises"]
+
+        # In-process return mirrors this sweep (no journal archaeology needed).
+        assert result.state == "open"
+        assert result.ran == 3
+        assert result.failed == 2
+        assert result.mode == "full"
+        assert [(f.name, f.source, f.msg) for f in result.failures] == [
+            ("fails", "method", "totals do not balance"),
+            ("raises", "method", "kaboom"),
+        ]
+        assert result.failures[1].error == "ValueError"
     finally:
         case.case_detach()
 
@@ -319,13 +330,15 @@ def test_sweep_skip_mode_writes_summary_only(tmp_path):
     try:
         set_case_assertion_mode(AssertionMode.SKIP)
         runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
-        runner.sweep("open")
+        result = runner.sweep("open")
         assert case._journal.assert_failures() == []
         summaries = list(case._journal.primitive.events(label_glob=EV_ASSERTED))
         assert len(summaries) == 1
         assert summaries[0].contents().as_dict() == {
             "ran": 0, "failed": 0, "mode": "skip",
         }
+        assert result.ran == 0 and result.failed == 0 and result.failures == []
+        assert result.mode == "skip"
     finally:
         case.case_detach()
 
@@ -503,7 +516,10 @@ def test_vanished_assertion_file_is_journaled_not_raised(tmp_path):
         runner = _CaseAssertionRunner(case, type(case)._fsm, case._journal)
         ghost = case.case_folder / ASSERTS_DIR_NAME / "ghost.py"
         # simulate the glob-to-stat race: the path is enumerable no longer
-        assert runner._load_module(ghost, "open") is None      # must not raise
+        module, failure = runner._load_module(ghost, "open")   # must not raise
+        assert module is None
+        assert failure is not None
+        assert failure.source == "file:ghost.py"
         fails = case._journal.assert_failures(state="open")
         ghost_fail = [f for f in fails if f.value == "ghost.py"]
         assert len(ghost_fail) == 1

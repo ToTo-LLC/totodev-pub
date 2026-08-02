@@ -11,10 +11,8 @@ from pydantic import BaseModel, Field
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.constants import (
-    DEFAULT_ABERRANT_BUCKET,
     DEFAULT_ADOPT_DROP_SUBDIR,
     DEFAULT_ADOPT_MAILBOX_SUBDIR,
-    DEFAULT_CASE_REF_PATH_TEMPLATE,
     DEFAULT_FIRE_MAILBOX_SUBDIR,
     DEFAULT_GROUPING_PATTERN,
     DEFAULT_RECLASSIFY_MAILBOX_SUBDIR,
@@ -22,7 +20,6 @@ from totodev_pub.case_manager_support.constants import (
     DEFAULT_LIVE_BUCKET,
     DEFAULT_MANAGER_NAMESPACE,
     DEFAULT_STAGING_SUBDIR,
-    DEFAULT_TERMINAL_PREFIX,
     POLICY_SCHEMA_VERSION,
 )
 
@@ -35,9 +32,6 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     # Layout — fixed once the filespace exists
     grouping_pattern: str = DEFAULT_GROUPING_PATTERN
     live_bucket: str = DEFAULT_LIVE_BUCKET
-    terminal_prefix: str = DEFAULT_TERMINAL_PREFIX
-    aberrant_bucket: str = DEFAULT_ABERRANT_BUCKET
-    case_ref_path_template: str = DEFAULT_CASE_REF_PATH_TEMPLATE
     manager_namespace: str = DEFAULT_MANAGER_NAMESPACE
     staging_subdir: str = DEFAULT_STAGING_SUBDIR
     adopt_drop_subdir: str = DEFAULT_ADOPT_DROP_SUBDIR
@@ -59,7 +53,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     termination_max_retries: int = 3
     eject_max_retries: int = 3
     redundant_purge_terminal_after_secs: Optional[int] = 86400
-    redundant_purge_aberrant_after_secs: Optional[int] = 86400
+    redundant_purge_quarantined_after_secs: Optional[int] = 86400
     escalation_fail_threshold: Optional[int] = None
     escalation_stall_secs: Optional[float] = None
     escalation_blocked: bool = False
@@ -85,9 +79,6 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "schema_version",
             "grouping_pattern",
             "live_bucket",
-            "terminal_prefix",
-            "aberrant_bucket",
-            "case_ref_path_template",
             "manager_namespace",
             "staging_subdir",
             "adopt_drop_subdir",
@@ -112,7 +103,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "termination_max_retries",
             "eject_max_retries",
             "redundant_purge_terminal_after_secs",
-            "redundant_purge_aberrant_after_secs",
+            "redundant_purge_quarantined_after_secs",
             "escalation_fail_threshold",
             "escalation_stall_secs",
             "escalation_blocked",

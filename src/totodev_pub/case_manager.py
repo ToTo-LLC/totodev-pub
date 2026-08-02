@@ -34,13 +34,14 @@ Running and advancing
     execution alongside automatic advances.
 
 Failure isolation and recovery
-    Cases that misbehave (for example by raising repeatedly) are
-    quarantined so they cannot harm the rest of the pool. Resolving a
-    quarantined case is an owner responsibility — typically fix the root
-    cause and reopen it. The manager is bound to a working directory that
-    holds the cases and protocol state as a persistent asset; on restart
-    that directory is inspected and recovery is attempted so interrupted
-    fleets can resume rather than start from scratch.
+    When fleet machinery cannot handle a case safely, the manager stops
+    driving it and parks it in quarantine (see the class docstring for
+    what triggers that). Resolving a quarantined case is an owner
+    responsibility — typically fix the root cause and ``reopen_case()``.
+    The manager is bound to a working directory that holds the cases and
+    protocol state as a persistent asset; on restart that directory is
+    inspected and recovery is attempted so interrupted fleets can resume
+    rather than start from scratch.
 
 Hosts and integration
     Companion helpers make it straightforward to build case-processing
@@ -61,6 +62,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, NamedTuple, Sequence, TYPE_CHECKING
 
@@ -141,7 +143,11 @@ from totodev_pub.case_manager_support.termination import (
     termination_dir,
     ticket_exists,
 )
-from totodev_pub.folder_backed_case import FolderBackedCase, IncompatibleReclassError
+from totodev_pub.folder_backed_case import (
+    FolderBackedCase,
+    IncompatibleReclassError,
+    ReclassifyAssertionError,
+)
 from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
@@ -198,8 +204,42 @@ class _ResolvedPolicy(NamedTuple):
 class CaseManager:
     """Pool coordinator for FolderBackedCase-derived workflows.
 
+    From a caller's point of view, managed cases sit in one of three places:
+
+    **Live pool.** Cases the manager is actively advancing. You adopt a
+    detached case folder into managed storage; it joins the pool and is
+    driven toward a terminal FSM state under shared concurrency and choke
+    limits. Most of a case's productive life is spent here.
+
+    **Terminated.** Cases that finished their lifecycle. When a pooled case
+    reaches a terminal FSM state, the manager archives it out of the live
+    pool into terminal storage (datetime-encoded under the ``terminated``
+    status). These are kept for retention and inspection; they are not driven
+    again.
+
+    **Quarantine.** A holding area for cases the manager has *stopped*
+    driving but kept in managed storage. This is not a normal lifecycle
+    outcome. A case lands here when fleet machinery cannot finish admit /
+    archive / control-ticket work safely, or when an operator parks it via
+    ``quarantine_case()`` for investigation. Typical automatic causes:
+
+    - adopt fails after the case has already been partially taken into
+      managed storage (the residue is parked rather than left half-live);
+    - archiving a finished case cannot be verified, or the folder move
+      keeps failing, past the configured retry budget;
+    - a durable control ticket (terminate, eject, or quarantine) is
+      corrupt or otherwise unprocessable past that same retry budget.
+
+    Quarantined cases remain on disk; a ``MANAGER_QUARANTINED`` reason is
+    recorded on the case journal when possible. Inspect with
+    ``iter_quarantine()``, fix the underlying problem, then
+    ``reopen_case()`` to return the case to the live pool. Repeated
+    transition failures and stalls are surfaced as operator notices; they
+    do not by themselves move a case into quarantine.
+
     Composes case storage, pool driver, type registry, and the manager's
-    control directory under a working directory. See the module docstring.
+    control directory under a working directory. See the module docstring
+    for construction, scale, and hosting.
     """
 
     # ------------------------------------------------------------------
@@ -475,10 +515,15 @@ class CaseManager:
     async def adopt_case(
         self,
         source_folder: Path,
-        *,
-        expected_case_id: str | None = None,
     ) -> AdoptResult:
         """Take a detached case folder into managed storage and the live pool.
+
+        ``source_folder`` need not be under staging — any path outside managed
+        storage is accepted (staging / adopt-drop are just convenient scratch).
+        On success the source is consumed: its contents are moved into the new
+        managed location and the emptied source directory is removed. Prefer
+        ``allocate_staging_folder()`` when the tree is expendable and you want
+        a same-filesystem rename rather than a cross-device copy.
 
         No correlation id — de-duplicating re-delivered requests is transport's job.
         """
@@ -491,7 +536,6 @@ class CaseManager:
             driver_add=self._driver.add,
             case_id_exists=self._store.contains,
             quarantine=self._quarantine,
-            expected_case_id=expected_case_id,
         )
         if result.status == "rejected":
             self._notices.emit_simple(
@@ -504,18 +548,27 @@ class CaseManager:
         return result
 
     def allocate_staging_folder(self) -> Path:
-        """Create an empty scratch folder in managed space for building a case to adopt.
+        """Allocate same-filesystem scratch for assembling a case before adopt.
 
-        Returned already created so both ``create_case_in_folder()`` and
-        ``copytree(..., dirs_exist_ok=True)`` can fill it::
+        Purpose: cases built here adopt cheaply — contents can be renamed into
+        managed storage instead of copied across devices. The folder is
+        expendable; ``adopt_case`` consumes it. Returned already created so
+        both ``create_case_in_folder()`` and ``copytree(..., dirs_exist_ok=True)``
+        can fill it::
 
             staged = manager.allocate_staging_folder()
             MyCase.create_case_in_folder(staged, external_key="K-1")
             await manager.adopt_case(staged)
 
-        Staging is on the same filesystem as managed storage so adopt can rename
-        rather than copy, and the staged tree is expendable. Also removes abandoned
-        staging folders.
+        Abandoned staging is reclaimed on each allocate (lazy GC):
+
+        - no / expired lease and older than ``staging_min_age_secs`` (default 5 min)
+          → removed
+        - still-leased but older than ``staging_stale_lease_secs`` (default 24 h)
+          → removed (stale builder presumed dead)
+
+        In-flight builds younger than those thresholds are left alone. Sweep does
+        not run on a timer — only when something allocates again.
         """
         return allocate_staging_folder(self._manager_dir, self._policy)
 
@@ -566,10 +619,47 @@ class CaseManager:
                 raise EjectTimeoutError(case_id=case_id, stuck=stuck)
         return await fut
 
-    async def reopen_case(self, case_id: str) -> None:
-        """Return a case that left the pool to the live pool again.
+    async def quarantine_case(
+        self,
+        case_id: str,
+        *,
+        reason: str,
+        timeout: float | None = None,
+    ) -> Path | None:
+        """Park a live pooled case in quarantine for operator investigation.
 
-        Re-resolves the folder after the move (the path changes).
+        Stops driving the case but keeps it in managed storage (unlike
+        ``eject_from_pool``, which exports it out). Requires a non-empty
+        ``reason``; that text is recorded on the case journal. Halts any
+        in-flight advance first so the case can leave the pool cleanly.
+
+        Returns the quarantined folder path, or ``None`` if the folder move
+        was deferred behind a still-held lease (the maintenance tick finishes
+        it). Resume later with ``reopen_case()``.
+        """
+        if not reason or not reason.strip():
+            raise ValueError("quarantine_case requires a non-empty reason")
+        case = self.get_live(case_id)
+        await self._halt_and_settle(case.case_folder, case_id=case_id, timeout=timeout)
+        try:
+            removed = self._driver.remove(case.case_folder)
+        except KeyError:
+            raise LiveCaseNotFoundError(case_id) from None
+        removed.case_detach()
+        return await self._quarantine(case_id, removed.case_folder, reason.strip())
+
+    async def reopen_case(self, case_id: str) -> None:
+        """Return a quarantined case to the live pool after the owner has fixed it
+        or it is believed to be able to resume.  Note that an aberrant case may
+        be pushed back into quarantine if it misbehaves.
+
+        Quarantine is a holding pattern: the manager stopped driving the case
+        but kept it. Primary use is to resume lifecycle once the fault is
+        remedied (bad asset repaired, poison ticket cleared, etc.).
+
+        Do not use this to "undo" termination — a case already in a terminal
+        FSM state will just be reconciled out of the pool again. Re-resolves
+        the folder after the status move (the path changes).
         """
         loc = self.locate(case_id=case_id)
         if loc is None or loc.in_pool:
@@ -582,15 +672,59 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     def get_live(self, case_id: str) -> FolderBackedCase:
-        """Return the managed live case object for work outside the pool's normal
-        advance scheduling.
+        """Return the pooled case object — use sparingly; this is a sharp edge.
 
-        Prefer ``fire()`` unless you specifically need direct access to the case.
+        The returned instance is the same object the pool still owns. While the
+        manager is running, the driver may call ``advance()`` on it at any await
+        boundary. The process is single-threaded, but interleaved pool advances
+        can still race your own calls on that object and produce odd errors or
+        half-applied side effects.
+
+        Prefer safer surfaces:
+
+        - ``fire()`` to invoke triggers under pool scheduling
+        - ``reader()`` for read-only inspection (no live case object)
+
+        Reach for this only when you truly need the live ``FolderBackedCase``
+        (e.g. manager-internal halt/eject/quarantine paths, or a deliberate
+        out-of-band step you accept is outside pool bookkeeping).
         """
         for case in self._driver:
             if case.case_id == case_id:
                 return case
         raise LiveCaseNotFoundError(case_id)
+
+    def reader(
+        self,
+        *,
+        case_id: str | None = None,
+        external_key: str | None = None,
+        case_folder: Path | None = None,
+    ) -> FolderBackedCaseReader:
+        """A read-only view of one case, addressed any of three ways.
+
+        Takes no lease and never rehydrates, so it is safe while another process
+        drives the case. ``external_key`` raises if ambiguous; the other forms
+        address exactly one case.
+        """
+        if external_key is not None:
+            hits = self.locate_all(external_key=external_key)
+            if not hits:
+                raise FileNotFoundError(f"No case with external_key {external_key!r}")
+            if len(hits) > 1:
+                raise AmbiguousExternalKeyError(
+                    external_key, case_ids=[h.case_id for h in hits]
+                )
+            return FolderBackedCaseReader(hits[0].case_folder)
+        loc = self._resolve_single(case_id=case_id, case_folder=case_folder)
+        if loc is None:
+            raise FileNotFoundError("case not found")
+        return FolderBackedCaseReader(loc.case_folder)
+
+    def readers_by_external_key(self, external_key: str) -> list[FolderBackedCaseReader]:
+        """Every case carrying ``external_key`` — ambiguity-tolerant ``reader()``.
+        """
+        return [FolderBackedCaseReader(loc.case_folder) for loc in self.locate_all(external_key=external_key)]
 
     async def fire(
         self,
@@ -646,7 +780,7 @@ class CaseManager:
         )
         return await fut
 
-    def attach_fire(
+    def queue_fire(
         self,
         case_folder: Path,
         trigger: str | None,
@@ -655,12 +789,18 @@ class CaseManager:
         on_launch: Callable[[], None] | None = None,
         on_complete: Callable[[AdvanceResult | None, BaseException | None], None] | None = None,
     ) -> None:
-        """Queue an advance (or manual action) on a pooled case and return immediately.
+        """Queue a fire and return immediately — use when you cannot await the result.
 
-        Callback counterpart to ``fire()`` when the caller reports the outcome
-        elsewhere (e.g. a transport result file). Callbacks run on the event-loop
-        thread: ``on_launch`` when the run loop starts the step, ``on_complete``
-        when it finishes. Prefer this over calling into ``manager._driver``.
+        Same pool scheduling as ``fire()`` (shared queue, concurrency/chokes), but
+        does not block the caller. Prefer ``fire()`` when your coroutine can
+        ``await`` the ``AdvanceResult``. Prefer this when completion must be
+        handled elsewhere — typically a mailbox/transport that writes a result
+        file, or any intake loop that must keep draining requests without
+        waiting for each case step to finish.
+
+        Optional callbacks run on the event-loop thread: ``on_launch`` when the
+        run loop starts the step, ``on_complete`` when it finishes (success or
+        error). Prefer this over calling into ``manager._driver``.
         """
         self._driver.attach_fire(
             case_folder,
@@ -691,6 +831,9 @@ class CaseManager:
             UnregisteredCaseTypeError: ``target_type`` is not registered.
             IncompatibleReclassError: current state is not a state of the target
                 class (checked before the pool membership is changed).
+            ReclassifyAssertionError: type switch committed but the new class's
+                assertions for the preserved state failed; the case is quarantined
+                under the new type, then this exception is re-raised.
             CaseInFlightError: a step is mid-advance (from ``driver.remove()``);
                 retry after it finishes.
         """
@@ -711,9 +854,17 @@ class CaseManager:
         if case.case_state not in target_cls.case_type_spec().fsm.states:
             raise IncompatibleReclassError(case.case_state, target_cls.__name__)
         folder = case.case_folder
+        case_id_resolved = case.case_id
         self._driver.remove(folder)      # raises CaseInFlightError if a step is running
         try:
             fresh = case.case_reclassify_to(target_cls)
+        except ReclassifyAssertionError as exc:
+            # Type switch already committed — do NOT re-admit the old object.
+            # Park under the new class with a durable reason, then re-raise.
+            await self._quarantine_after_reclassify_assertion_failure(
+                case_id_resolved, folder, exc,
+            )
+            raise
         except BaseException:
             # The slot is already gone, so the case would fall out of management
             # entirely if we just propagated. Re-admit, then raise the ORIGINAL
@@ -761,38 +912,6 @@ class CaseManager:
                 hits.append(self._to_location(entry))
         return hits
 
-    def reader(
-        self,
-        *,
-        case_id: str | None = None,
-        external_key: str | None = None,
-        case_folder: Path | None = None,
-    ) -> FolderBackedCaseReader:
-        """A read-only view of one case, addressed any of three ways.
-
-        Takes no lease and never rehydrates, so it is safe while another process
-        drives the case. ``external_key`` raises if ambiguous; the other forms
-        address exactly one case.
-        """
-        if external_key is not None:
-            hits = self.locate_all(external_key=external_key)
-            if not hits:
-                raise FileNotFoundError(f"No case with external_key {external_key!r}")
-            if len(hits) > 1:
-                raise AmbiguousExternalKeyError(
-                    external_key, case_ids=[h.case_id for h in hits]
-                )
-            return FolderBackedCaseReader(hits[0].case_folder)
-        loc = self._resolve_single(case_id=case_id, case_folder=case_folder)
-        if loc is None:
-            raise FileNotFoundError("case not found")
-        return FolderBackedCaseReader(loc.case_folder)
-
-    def readers_by_external_key(self, external_key: str) -> list[FolderBackedCaseReader]:
-        """Every case carrying ``external_key`` — ambiguity-tolerant ``reader()``.
-        """
-        return [FolderBackedCaseReader(loc.case_folder) for loc in self.locate_all(external_key=external_key)]
-
     def iter_live_pool(self) -> Iterator[FolderBackedCaseReader]:
         """Readers over cases the pool is actively driving.
 
@@ -807,11 +926,18 @@ class CaseManager:
         """
         yield from self._readers_at(LIVE)
 
-    def iter_terminal(self, *, partition: str | None = None) -> Iterator[FolderBackedCaseReader]:
-        """Archived cases, optionally narrowed to one archive partition."""
-        for entry in self._store.iter_by_status(TERMINATED):
-            if partition is None or entry.partition == partition:
-                yield FolderBackedCaseReader(entry.case_folder)
+    def iter_terminal(
+        self,
+        *,
+        reverse: bool = False,
+        after: datetime | date | None = None,
+        before: datetime | date | None = None,
+    ) -> Iterator[FolderBackedCaseReader]:
+        """Archived cases, optionally filtered by activity-time bounds."""
+        for entry in self._store.iter_by_status(
+            TERMINATED, reverse=reverse, after=after, before=before
+        ):
+            yield FolderBackedCaseReader(entry.case_folder)
 
     def iter_quarantine(self) -> Iterator[FolderBackedCaseReader]:
         """Cases the manager has stopped driving. See ``support.quarantine``."""
@@ -1226,7 +1352,7 @@ class CaseManager:
                         "eject", ticket_file, self._advance_eject_ticket
                     )
         if self._policy.redundant_purge_terminal_after_secs is not None or (
-            self._policy.redundant_purge_aberrant_after_secs is not None
+            self._policy.redundant_purge_quarantined_after_secs is not None
         ):
             with self._isolated_tick_item("redundant purge", self._manager_dir):
                 await loop.run_in_executor(
@@ -1593,6 +1719,42 @@ class CaseManager:
         except Exception:
             logger.exception(
                 "reclassify_case: failed to re-admit %s after reclassify error", folder
+            )
+
+    async def _quarantine_after_reclassify_assertion_failure(
+        self,
+        case_id: str,
+        folder: Path,
+        exc: ReclassifyAssertionError,
+    ) -> None:
+        """Park a post-commit reclassify whose new-class assertions failed.
+
+        The type switch already stuck; detach the rebound instance (so the lease
+        does not block relocation) and quarantine with a reason covering every
+        failure. Best-effort: quarantine problems are logged, never substituted
+        for the original ``ReclassifyAssertionError``.
+        """
+        parts = []
+        for f in exc.failures:
+            label = f"{exc.state}.{f.name}" if f.name else f.source
+            parts.append(f"{label}: {f.msg}")
+        reason = (
+            f"reclassify to {exc.target_type} at {exc.state}: assertion failures: "
+            + "; ".join(parts)
+        )
+        try:
+            if not exc.case.case_is_detached:
+                exc.case.case_detach()
+        except Exception:
+            logger.exception(
+                "reclassify_case: failed to detach %s before quarantine", case_id,
+            )
+        try:
+            await self._quarantine(case_id, folder, reason)
+        except Exception:
+            logger.exception(
+                "reclassify_case: failed to quarantine %s after assertion failure",
+                case_id,
             )
 
     # ------------------------------------------------------------------

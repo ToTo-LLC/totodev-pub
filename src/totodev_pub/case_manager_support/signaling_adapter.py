@@ -227,7 +227,7 @@ class SignalingAdapter:
                     firing.unlink(missing_ok=True)
                     pending.unlink(missing_ok=True)
 
-            self._manager.attach_fire(
+            self._manager.queue_fire(
                 loc.case_folder,
                 req.trigger,
                 req.trigger_kwargs or {},
@@ -325,9 +325,7 @@ class SignalingAdapter:
             pending.unlink(missing_ok=True)
             return
 
-        result = await self._manager.adopt_case(
-            Path(req.source_folder), expected_case_id=req.expected_case_id
-        )
+        result = await self._manager.adopt_case(Path(req.source_folder))
         result = result.model_copy(update={"correlation_id": req.correlation_id})
         self._transport.publish_result(req.correlation_id, result)
         pending.unlink(missing_ok=True)
