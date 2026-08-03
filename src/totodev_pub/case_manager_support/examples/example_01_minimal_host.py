@@ -32,11 +32,13 @@ from totodev_pub.case_manager_support.examples.example_cases import (
     EscalationCase,
     InquiryCase,
 )
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
 
 async def main(cache_root: Path) -> None:
     store = CaseManager.open_local_store(cache_root)
-    manager = CaseManager(store, register_types=[InquiryCase, EscalationCase])
+    case_type_registry.register_case_types(InquiryCase, EscalationCase)
+    manager = CaseManager(store)
     # serve() wants a manager that has not been recovered or started: it owns
     # that sequencing, and says so rather than quietly re-running it.
     await serve(manager)

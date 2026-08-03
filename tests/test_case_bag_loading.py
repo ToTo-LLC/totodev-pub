@@ -19,13 +19,17 @@ from totodev_pub.case_manager_support.bag_loading import (
     load_case_bag,
     make_case_bag_fixture,
 )
-from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
+from totodev_pub.folder_backed_case_support.case_type_registry import (
+    CaseTypeRegistry,
+    case_type_registry,
+)
 from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
 
 
 @pytest.fixture(autouse=True)
 def _isolate_case_registry():
     saved = dict(case_type_registry._registry)
+    case_type_registry._registry.clear()
     try:
         yield
     finally:
@@ -34,7 +38,7 @@ def _isolate_case_registry():
 
 
 case_bag = make_case_bag_fixture(
-    register_types=[TicketCase, TerminalCase], maintenance_interval_secs=0.01
+    case_types=[TicketCase, TerminalCase], maintenance_interval_secs=0.01
 )
 
 
@@ -73,9 +77,8 @@ def test_a_missing_bag_yields_nothing_rather_than_raising(tmp_path):
 async def test_a_bag_becomes_a_recovered_manager_holding_every_case(tmp_path):
     bag = _bag_of(tmp_path, 3)
 
-    manager, report = await load_case_bag(
-        bag, tmp_path / "cache", register_types=[TicketCase]
-    )
+    case_type_registry.register_case_types(TicketCase)
+    manager, report = await load_case_bag(bag, tmp_path / "cache")
 
     assert len(report.adopted) == 3
     assert report.all_adopted
@@ -90,7 +93,8 @@ async def test_the_source_bag_is_left_untouched(tmp_path):
     bag = _bag_of(tmp_path, 2)
     before = {p.name: sorted(q.name for q in p.iterdir()) for p in case_folders_in(bag)}
 
-    await load_case_bag(bag, tmp_path / "cache", register_types=[TicketCase])
+    case_type_registry.register_case_types(TicketCase)
+    await load_case_bag(bag, tmp_path / "cache")
 
     after = {p.name: sorted(q.name for q in p.iterdir()) for p in case_folders_in(bag)}
     assert after == before, "adopt moves; the loader must copy first"
@@ -101,12 +105,9 @@ async def test_loading_the_same_bag_twice_gives_two_independent_fleets(tmp_path)
     """The point of leaving the bag alone: the experiment can be run again."""
     bag = _bag_of(tmp_path, 2)
 
-    first, first_report = await load_case_bag(
-        bag, tmp_path / "run1", register_types=[TicketCase]
-    )
-    second, second_report = await load_case_bag(
-        bag, tmp_path / "run2", register_types=[TicketCase]
-    )
+    case_type_registry.register_case_types(TicketCase)
+    first, first_report = await load_case_bag(bag, tmp_path / "run1")
+    second, second_report = await load_case_bag(bag, tmp_path / "run2")
 
     assert sorted(first_report.adopted) == sorted(second_report.adopted)
     assert first._store.root_dir != second._store.root_dir
@@ -118,9 +119,8 @@ async def test_non_cases_are_reported_not_silently_dropped(tmp_path):
     (bag / "scratch").mkdir()
     (bag / "logs").mkdir()
 
-    _manager, report = await load_case_bag(
-        bag, tmp_path / "cache", register_types=[TicketCase]
-    )
+    case_type_registry.register_case_types(TicketCase)
+    _manager, report = await load_case_bag(bag, tmp_path / "cache")
 
     assert len(report.adopted) == 1
     assert sorted(report.skipped) == ["logs", "scratch"]
@@ -138,9 +138,11 @@ async def test_a_rejected_case_names_itself_and_the_reason(tmp_path):
         bag / "unregistered" / RECORD_NAME
     )
 
-    _manager, report = await load_case_bag(
-        bag, tmp_path / "cache", register_types=[TicketCase]
-    )
+    # Private catalog: only TicketCase is known, so TerminalCase must be rejected
+    # even if the process-global registry has been polluted by other tests.
+    registry = CaseTypeRegistry()
+    registry.register_case_types(TicketCase)
+    _manager, report = await load_case_bag(bag, tmp_path / "cache", registry=registry)
 
     assert len(report.adopted) == 2
     assert [name for name, _why in report.rejected] == ["unregistered"]
@@ -151,9 +153,8 @@ async def test_a_rejected_case_names_itself_and_the_reason(tmp_path):
 async def test_an_empty_bag_is_a_clean_load_of_nothing(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
-    manager, report = await load_case_bag(
-        empty, tmp_path / "cache", register_types=[TicketCase]
-    )
+    case_type_registry.register_case_types(TicketCase)
+    manager, report = await load_case_bag(empty, tmp_path / "cache")
     assert report.adopted == [] and report.all_adopted
     assert len(manager._driver) == 0
 

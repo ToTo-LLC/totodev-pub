@@ -28,11 +28,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
 from totodev_pub.case_manager_support.layout import read_case_id_from_folder
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
 
 if TYPE_CHECKING:
     from totodev_pub.case_manager import CaseManager
     from totodev_pub.folder_backed_case import FolderBackedCase
+    from totodev_pub.folder_backed_case_support.case_type_registry import CaseTypeRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +72,7 @@ async def load_case_bag(
     source_bag: str | Path,
     cache_root: str | Path,
     *,
-    register_types: Sequence[type["FolderBackedCase"]],
+    registry: "CaseTypeRegistry | None" = None,
     **overrides: Any,
 ) -> tuple["CaseManager", BagLoadReport]:
     """Open a filespace, copy every case in ``source_bag`` into it, adopt each.
@@ -80,13 +82,14 @@ async def load_case_bag(
     test or an experiment. Recovery has already happened because adoption needs
     the manager namespace to exist.
 
-    ``source_bag`` is left exactly as it was found.
+    Register needed case types on ``registry`` (or the process-global catalog)
+    before calling. ``source_bag`` is left exactly as it was found.
     """
     from totodev_pub.case_manager import CaseManager
 
     bag = Path(source_bag)
     store = CaseManager.open_local_store(cache_root, **overrides)
-    manager = CaseManager(store, register_types=list(register_types))
+    manager = CaseManager(store, registry=registry)
     await manager.recover()
 
     report = BagLoadReport()
@@ -109,7 +112,8 @@ async def load_case_bag(
 
 def make_case_bag_fixture(
     *,
-    register_types: Sequence[type["FolderBackedCase"]],
+    case_types: Sequence[type["FolderBackedCase"]],
+    registry: "CaseTypeRegistry | None" = None,
     **default_overrides: Any,
 ):
     """Build a pytest fixture that loads case bags and cleans up after itself.
@@ -118,7 +122,7 @@ def make_case_bag_fixture(
     test while the wiring does not::
 
         from myapp.cases import InquiryCase
-        case_bag = make_case_bag_fixture(register_types=[InquiryCase])
+        case_bag = make_case_bag_fixture(case_types=[InquiryCase])
 
         async def test_the_batch_completes(case_bag, tmp_path):
             manager, report = await case_bag(FIXTURES / "inquiries")
@@ -126,10 +130,11 @@ def make_case_bag_fixture(
             await manager.start()
             ...
 
-    Every manager the loader creates is stopped at teardown, so a test that
-    raises mid-run does not leave a live pool holding leases on ``tmp_path``.
-    Each load gets its own root under ``tmp_path``, so one test may load several
-    bags without them colliding.
+    ``case_types`` are registered on ``registry`` (or the process-global catalog)
+    before each load. Every manager the loader creates is stopped at teardown,
+    so a test that raises mid-run does not leave a live pool holding leases on
+    ``tmp_path``. Each load gets its own root under ``tmp_path``, so one test
+    may load several bags without them colliding.
     """
     # pytest-asyncio runs in strict mode, where an async fixture declared with a
     # bare @pytest.fixture is silently not awaited. Imported here rather than at
@@ -143,11 +148,13 @@ def make_case_bag_fixture(
         async def _load(
             source_bag: str | Path, **overrides: Any
         ) -> tuple["CaseManager", BagLoadReport]:
+            target = case_type_registry if registry is None else registry
+            target.register_case_types(*case_types)
             root = tmp_path / f"case_bag_{len(created)}"
             manager, report = await load_case_bag(
                 source_bag,
                 root,
-                register_types=register_types,
+                registry=registry,
                 **{**default_overrides, **overrides},
             )
             created.append(manager)

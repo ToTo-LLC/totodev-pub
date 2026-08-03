@@ -10,7 +10,10 @@ from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.exceptions import LiveCaseNotFoundError
 from totodev_pub.case_manager_support.mailbox import RequestHandle, ReclassifyResult
 from totodev_pub.folder_backed_case import FolderBackedCase, IncompatibleReclassError
-from totodev_pub.folder_backed_case_support.case_type_registry import CaseTypeRegistry
+from totodev_pub.folder_backed_case_support.case_type_registry import (
+    CaseTypeRegistry,
+    case_type_registry,
+)
 from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
 from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import Tier
 
@@ -70,10 +73,10 @@ def provision(tmp_path, **overrides) -> CaseManager:
         maintenance_interval_secs=0.01,
         **overrides,
     )
-    return CaseManager(
-        store,
-        register_types=[IntakeCase, RoutedCase, UnrelatedCase, StrictRoutedCase],
+    case_type_registry.register_case_types(
+        IntakeCase, RoutedCase, UnrelatedCase, StrictRoutedCase
     )
+    return CaseManager(store)
 
 
 async def seed_parked_intake(manager: CaseManager, tmp_path):

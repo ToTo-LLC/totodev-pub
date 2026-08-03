@@ -36,13 +36,15 @@ from totodev_pub.case_manager_support.examples.example_cases import (
     InquiryCase,
 )
 from totodev_pub.case_manager_support.signaling_adapter import SignalingAdapter
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
 logger = logging.getLogger("request_host")
 
 
 async def run_host(cache_root: Path) -> None:
     store = CaseManager.open_local_store(cache_root)
-    manager = CaseManager(store, register_types=[InquiryCase, EscalationCase])
+    case_type_registry.register_case_types(InquiryCase, EscalationCase)
+    manager = CaseManager(store)
     # The one line that turns a fleet into a service.
     await serve(manager, adapter=SignalingAdapter(manager))
 

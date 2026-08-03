@@ -4,6 +4,7 @@ import pytest
 
 from totodev_pub.case_manager import CaseManager
 from case_manager_test_utils import TicketCase, provision_manager, seed_detached_case
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
 
 @pytest.mark.asyncio
@@ -16,7 +17,8 @@ async def test_adopt_drop_scan(tmp_path):
         redundant_purge_terminal_after_secs=None,
         redundant_purge_quarantined_after_secs=None,
     )
-    manager = CaseManager(store, register_types=[TicketCase])
+    case_type_registry.register_case_types(TicketCase)
+    manager = CaseManager(store)
     drop = manager._manager_dir / manager._policy.adopt_drop_subdir
     case_dir = drop / "fixture1"
     case_dir.mkdir(parents=True)

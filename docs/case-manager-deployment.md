@@ -22,10 +22,12 @@ import asyncio
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_support.case_manager_host import serve
 from totodev_pub.case_manager_support.signaling_adapter import SignalingAdapter
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from myapp.cases import InquiryCase
 
 store = CaseManager.open_local_store("/data/inquiries")
-manager = CaseManager(store, register_types=[InquiryCase])
+case_type_registry.register_case_types(InquiryCase)
+manager = CaseManager(store)
 asyncio.run(serve(manager, adapter=SignalingAdapter(manager)))
 ```
 

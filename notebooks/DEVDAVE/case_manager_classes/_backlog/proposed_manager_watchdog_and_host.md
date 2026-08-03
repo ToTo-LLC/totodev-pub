@@ -293,7 +293,8 @@ from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_host import serve
 from myapp.cases import InquiryCase
 
-manager = CaseManager.open("/data/inquiries", register_types=[InquiryCase])
+case_type_registry.register_case_types(InquiryCase)
+manager = CaseManager("/data/inquiries")
 asyncio.run(serve(manager))
 ```
 
@@ -315,10 +316,8 @@ instead has four concrete benefits:
   including its `PolicyMismatchError` validation); everything `serve()` itself accepts
   is a process-hosting concern. No reader has to know which bucket a given kwarg falls
   into by memory.
-- **`register_types` was always construction-time anyway** — `CaseManager.__init__`
-  calls `registry.register_case_types(...)` immediately, before `serve()` would ever
-  see the object. This shape makes that ordering explicit instead of tunneling it
-  through a second layer.
+- **Case-type registration is construction-time** — register types on the catalog
+  before building the manager, so `serve()` never sees registration as a host concern.
 - **Watchdog policy needs no `serve()`-side parameters at all.** `watchdog_enabled` and
   the `watchdog_*_secs` values are Tunables policy fields (§3), so they already live on
   `manager._policy` by the time `serve()` receives the manager. `serve()` just reads

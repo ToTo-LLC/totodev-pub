@@ -49,19 +49,14 @@ def test_bindings_fields_default_to_empty(tmp_path):
     config = _minimal(tmp_path)
     assert config.tunables_overrides == {}
     assert config.driver is None
-    assert config.driver_class is None
-    assert config.driver_kwargs == {}
     assert config.registry is None
-    assert config.register_types == ()
     assert config.notice_handlers == []
 
 
 def test_mutable_defaults_are_not_shared_between_instances(tmp_path):
     first = _minimal(tmp_path)
     second = _minimal(tmp_path)
-    first.driver_kwargs["policy"] = TierPolicy()
     first.notice_handlers.append(lambda e: None)
-    assert second.driver_kwargs == {}
     assert second.notice_handlers == []
 
 
@@ -69,11 +64,12 @@ def test_construction_populates_the_config_from_policy_and_bindings(tmp_path):
     root = tmp_path / "cache"
     CaseManager.open_local_store(root)
     registry = CaseTypeRegistry()
+    registry.register_case_types(TicketCase)
+    driver = SeniorityCasePoolDriver()
     manager = CaseManager(
         root,
         registry=registry,
-        register_types=[TicketCase],
-        driver_class=SeniorityCasePoolDriver,
+        driver=driver,
         concurrency_ceiling=7,
     )
     config = manager._config
@@ -82,36 +78,32 @@ def test_construction_populates_the_config_from_policy_and_bindings(tmp_path):
     assert config.manager_dir == root / ".case_manager"
     assert config.policy_path.exists()
     assert config.registry is registry
-    assert list(config.register_types) == [TicketCase]
-    assert config.driver_class is SeniorityCasePoolDriver
+    assert config.driver is driver
     # Tunables overrides are applied to the in-memory policy and recorded as-is.
     assert config.tunables_overrides == {"concurrency_ceiling": 7}
     assert config.policy.concurrency_ceiling == 7
 
 
-def test_driver_class_selects_the_driver(tmp_path):
-    manager = provision_manager(tmp_path, driver_class=SeniorityCasePoolDriver)
-    assert isinstance(manager._driver, SeniorityCasePoolDriver)
-
-
-def test_default_driver_is_balanced(tmp_path):
+def test_default_driver_is_seniority(tmp_path):
     manager = provision_manager(tmp_path)
-    assert type(manager._driver) is BalancedCasePoolDriver
-
-
-def test_driver_kwargs_reach_the_driver(tmp_path):
-    """The documented escape hatch for beat-tempo tunables."""
-    tempo = TierPolicy(I0=0.5)
-    manager = provision_manager(tmp_path, driver_kwargs={"policy": tempo})
-    assert manager._driver._policy is tempo
-    # concurrency_ceiling/choke_limits still default from CaseManagerPolicy.
+    assert type(manager._driver) is SeniorityCasePoolDriver
     assert manager._driver._ceiling == manager._policy.concurrency_ceiling
 
 
-def test_an_explicit_driver_instance_wins_over_driver_class(tmp_path):
+def test_an_explicit_driver_instance_is_kept_even_when_empty(tmp_path):
     """An injected driver is empty, and a CasePoolDriver defines __len__ -- so a
     truthiness-based selection would silently build a default one instead."""
-    driver = SeniorityCasePoolDriver()
+    driver = BalancedCasePoolDriver(policy=TierPolicy(I0=0.5))
     assert not driver, "precondition: a fresh driver is falsy"
-    manager = provision_manager(tmp_path, driver=driver, driver_class=BalancedCasePoolDriver)
+    manager = provision_manager(tmp_path, driver=driver)
     assert manager._driver is driver
+
+
+def test_an_empty_registry_instance_is_kept(tmp_path):
+    """Same truthiness trap as the driver: CaseTypeRegistry defines __len__."""
+    root = tmp_path / "cache"
+    CaseManager.open_local_store(root)
+    registry = CaseTypeRegistry()
+    assert not registry, "precondition: an empty registry is falsy"
+    manager = CaseManager(root, registry=registry)
+    assert manager._registry is registry

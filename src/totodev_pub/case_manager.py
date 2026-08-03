@@ -10,14 +10,14 @@ interruption, isolation of cases that keep failing, and a place for hosts to
 observe and intervene. CaseManager exists for that aggregate problem.
 
 Typical use
-    Application code creates case folders externally, then adds them to a
+    Users of CaseManager provision cases externally, then adds them to a
     CaseManager. From there, most or all of each case's remaining life is
     spent in the manager's pool, being advanced toward a terminal state.
     The manager owns storage layout, archiving, recovery, and related
     housekeeping so callers do not have to invent that fleet machinery.
 
 Scale and tuning
-    Defaults aim for hundreds to low thousands of live cases. Past that,
+    Performs best with hundreds to low thousands of live cases. Past that,
     this may not be the right manager. Behavior is highly adjustable via
     persisted policy (Layout and Tunables) and via Bindings such as the pool
     driver (how work is paced and choke resources are shared), the case-type
@@ -35,13 +35,12 @@ Running and advancing
 
 Failure isolation and recovery
     When fleet machinery cannot handle a case safely, the manager stops
-    driving it and parks it in quarantine (see the class docstring for
-    what triggers that). Resolving a quarantined case is an owner
-    responsibility — typically fix the root cause and ``reopen_case()``.
-    The manager is bound to a working directory that holds the cases and
-    protocol state as a persistent asset; on restart that directory is
-    inspected and recovery is attempted so interrupted fleets can resume
-    rather than start from scratch.
+    driving it and parks it in quarantine. Resolving a quarantined case
+    is an owner responsibility — typically fix the root cause and
+    ``reopen_case()``. The manager is bound to a working directory that
+    holds the cases and protocol state as a persistent asset; on restart
+    that directory is inspected and recovery is attempted so interrupted
+    fleets can resume rather than start from scratch.
 
 Hosts and integration
     Companion helpers make it straightforward to build case-processing
@@ -64,7 +63,7 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterator, NamedTuple, Sequence, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Iterator, NamedTuple, TYPE_CHECKING
 
 from totodev_pub.case_manager_support.adopt import AdoptResult, adopt_case_folder
 from totodev_pub.case_manager_support.case_manager_config import CaseManagerConfig
@@ -162,7 +161,6 @@ from totodev_pub.folder_backed_case_support.case_type_registry import (
 )
 from totodev_pub.folder_backed_case_support.heartbeat_lease import LeaseOwnershipLostError
 from totodev_pub.folder_backed_case_support.seniority_case_pool_driver import SeniorityCasePoolDriver
-from totodev_pub.folder_backed_case_support.balanced_case_pool_driver import BalancedCasePoolDriver
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +202,10 @@ class _ResolvedPolicy(NamedTuple):
 class CaseManager:
     """Pool coordinator for FolderBackedCase-derived workflows.
 
-    From a caller's point of view, managed cases sit in one of three places:
+    A case is considered "managed" when it has been copied into the disk
+    space maintained by the manager using the ``adopt_case`` method.
+    From a caller's point of view, managed cases sit in one of three
+    execution statuses: Live, Terminated, and Quarantined.
 
     **Live pool.** Cases the manager is actively advancing. You adopt a
     detached case folder into managed storage; it joins the pool and is
@@ -221,21 +222,12 @@ class CaseManager:
     driving but kept in managed storage. This is not a normal lifecycle
     outcome. A case lands here when fleet machinery cannot finish admit /
     archive / control-ticket work safely, or when an operator parks it via
-    ``quarantine_case()`` for investigation. Typical automatic causes:
-
-    - adopt fails after the case has already been partially taken into
-      managed storage (the residue is parked rather than left half-live);
-    - archiving a finished case cannot be verified, or the folder move
-      keeps failing, past the configured retry budget;
-    - a durable control ticket (terminate, eject, or quarantine) is
-      corrupt or otherwise unprocessable past that same retry budget.
-
-    Quarantined cases remain on disk; a ``MANAGER_QUARANTINED`` reason is
-    recorded on the case journal when possible. Inspect with
-    ``iter_quarantine()``, fix the underlying problem, then
-    ``reopen_case()`` to return the case to the live pool. Repeated
-    transition failures and stalls are surfaced as operator notices; they
-    do not by themselves move a case into quarantine.
+    ``quarantine_case()`` for investigation. Quarantined cases remain on
+    disk; a ``MANAGER_QUARANTINED`` reason is recorded on the case journal
+    when possible. Inspect with ``iter_quarantine()``, fix the underlying
+    problem, then ``reopen_case()`` to return the case to the live pool.
+    Repeated transition failures and stalls are surfaced as operator
+    notices; they do not by themselves move a case into quarantine.
 
     Composes case storage, pool driver, type registry, and the manager's
     control directory under a working directory. See the module docstring
@@ -251,10 +243,7 @@ class CaseManager:
         filespace: LocalCaseStore | str | Path,
         *,
         driver: CasePoolDriver | None = None,
-        driver_class: type | None = None,
-        driver_kwargs: dict[str, Any] | None = None,
         registry: CaseTypeRegistry | None = None,
-        register_types: Sequence[type[FolderBackedCase]] = (),
         **tunables_overrides: Any,
     ) -> None:
         """Build a manager over an existing working directory.
@@ -264,9 +253,13 @@ class CaseManager:
         ``open_local_store()`` for that. A path with no policy record raises
         ``PolicyFileMissingError``.
 
-        Keyword arguments are Bindings (driver, registry, case types) plus Tunables
-        applied in memory without changing the policy record. Layout fields cannot
-        be overridden here; a disagreement with the record raises.
+        ``driver`` is an already-built pool driver, or ``None`` to use a
+        ``SeniorityCasePoolDriver`` wired from this manager's policy.
+        ``registry`` is an already-populated type catalog, or ``None`` for the
+        process-global ``case_type_registry`` (register types on it before
+        construction). Other keyword arguments are Tunables applied in memory
+        without changing the policy record. Layout fields cannot be overridden
+        here; a disagreement with the record raises.
         """
         if isinstance(filespace, LocalCaseStore):
             supplied_store: LocalCaseStore | None = filespace
@@ -280,9 +273,9 @@ class CaseManager:
         self._policy = resolved.policy
         self._cache_root = root
         self._manager_dir = resolved.manager_dir
-        self._registry = registry or case_type_registry
-        if register_types:
-            self._registry.register_case_types(*register_types)
+        # Identity, not truthiness: CaseTypeRegistry defines __len__, so an empty
+        # injected registry is falsy and `or` would discard it for the global.
+        self._registry = case_type_registry if registry is None else registry
         # The record exists — _resolve_policy raised otherwise — so this attaches
         # to storage rather than creating any.
         self._store = supplied_store if supplied_store is not None else LocalCaseStore.provision(
@@ -295,10 +288,7 @@ class CaseManager:
             manager_dir=resolved.manager_dir,
             tunables_overrides=resolved.tunables_overrides,
             driver=driver,
-            driver_class=driver_class,
-            driver_kwargs=driver_kwargs or {},
             registry=registry,
-            register_types=register_types,
         )
         # Explicit `is not None`, never truthiness: a CasePoolDriver defines
         # __len__, so a freshly constructed (empty) driver is falsy and `or`
@@ -524,6 +514,9 @@ class CaseManager:
         managed location and the emptied source directory is removed. Prefer
         ``allocate_staging_folder()`` when the tree is expendable and you want
         a same-filesystem rename rather than a cross-device copy.
+
+        If adopt fails after the case has already been partially taken into
+        managed storage, the residue is quarantined rather than left half-live.
 
         No correlation id — de-duplicating re-delivered requests is transport's job.
         """
@@ -1087,19 +1080,15 @@ class CaseManager:
         return layout, tunables
 
     def _build_default_driver(self) -> CasePoolDriver:
-        """Construct the driver from ``self._config`` (``driver_class`` / ``driver_kwargs``).
+        """Build the default ``SeniorityCasePoolDriver`` from this manager's policy.
 
-        Beat-tempo settings (``I0``, ``EAGER_BEAT_FRACTION``, ``BEAT_YIELD_FLOOR``,
-        …) live on the driver's ``TierPolicy``, not ``CaseManagerPolicy``. Override
-        via ``driver_kwargs={"policy": TierPolicy(...)}``. Defaults use
-        ``TierPolicy()`` (eager beat tempo on, ``EAGER_BEAT_FRACTION = 0.25``).
+        Callers that need a different driver class, or a custom ``TierPolicy``
+        for beat tempo, construct the instance themselves and pass ``driver=``.
         """
-        cls = self._config.driver_class or BalancedCasePoolDriver
-        kwargs = dict(self._config.driver_kwargs)
-        if cls in (BalancedCasePoolDriver, SeniorityCasePoolDriver):
-            kwargs.setdefault("concurrency_ceiling", self._policy.concurrency_ceiling)
-            kwargs.setdefault("choke_limits", self._policy.choke_limits)
-        return cls(**kwargs)
+        return SeniorityCasePoolDriver(
+            concurrency_ceiling=self._policy.concurrency_ceiling,
+            choke_limits=self._policy.choke_limits,
+        )
 
     def _ensure_namespace(self) -> None:
         self._ensure_namespace_dirs(self._manager_dir, self._policy)
@@ -1375,7 +1364,9 @@ class CaseManager:
         Unparseable tickets cannot update their own ``retry_count``; without an
         external ledger they would retry every tick forever. Below the threshold
         this re-raises so isolation can log/notice and the next tick can retry.
-        At the threshold the ticket is retired.
+        Past the retry budget, a corrupt or otherwise unprocessable ticket is
+        retired and the named case is quarantined (see
+        ``_retire_unprocessable_ticket``).
         """
         try:
             await advance(ticket_file)

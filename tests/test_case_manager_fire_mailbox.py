@@ -17,6 +17,7 @@ from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.exceptions import ManagerNotRunningError
 from totodev_pub.folder_backed_case import FolderBackedCase
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
 
 @pytest.mark.asyncio
@@ -54,7 +55,8 @@ async def test_fire_intake_drains_fifo_by_arrival(tmp_path):
         maintenance_interval_secs=0.01,
         enable_mailbox=True,
     )
-    manager = CaseManager(store, register_types=[ChainCase])
+    case_type_registry.register_case_types(ChainCase)
+    manager = CaseManager(store)
     staging = tmp_path / "staging"
     staging.mkdir()
     seed_detached_case(ChainCase, staging / "c1")

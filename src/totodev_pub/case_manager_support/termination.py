@@ -128,6 +128,10 @@ async def process_pending_ticket(
     Re-drivable by construction: a ticket that dies mid-move is replayed next
     tick, and the store's status change is idempotent, so the second attempt
     either finishes the move or finds it already done.
+
+    Past ``termination_max_retries``, a case whose archive cannot be verified
+    or whose folder move keeps failing is quarantined rather than retried
+    forever.
     """
     case_id = ticket.case_id
 

@@ -21,6 +21,7 @@ from totodev_pub.case_manager_support.constants import (
 )
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.case_manager_support.fleet_status import (
     FleetStatusBoardWriter,
     build_live_row,
@@ -347,9 +348,10 @@ async def test_manager_case_ext_status_info_wiring(tmp_path):
         fleet_status_full_flush_interval_secs=0.0,
         maintenance_interval_secs=0.01,
     )
-    manager = CaseManager(
-        store, register_types=[TicketCase, TerminalCase, ManualCase, ExtStatusCase]
+    case_type_registry.register_case_types(
+        TicketCase, TerminalCase, ManualCase, ExtStatusCase
     )
+    manager = CaseManager(store)
     staging = tmp_path / "staging"
     staging.mkdir()
     seed_detached_case(ExtStatusCase, staging / "c1")

@@ -19,6 +19,7 @@ from totodev_pub.folder_backed_case_support.case_type_registry import case_type_
 @pytest.fixture(autouse=True)
 def _isolate_case_registry():
     saved = dict(case_type_registry._registry)
+    case_type_registry._registry.clear()
     try:
         yield
     finally:
@@ -55,19 +56,22 @@ def run(coro):
     return asyncio.run(coro)
 
 
-_BINDING_KEYS = {"driver", "driver_class", "driver_kwargs", "registry", "register_types"}
+_BINDING_KEYS = {"driver", "registry"}
 
 
 def provision_manager(tmp_path: Path, **overrides) -> CaseManager:
     """Open a fresh filespace under ``tmp_path`` and return a manager over it.
 
     Policy overrides go into the record as it is created, bindings go to the
-    manager; the caller passes both as one flat set of keywords.
+    manager; the caller passes both as one flat set of keywords. Common test
+    case types are registered on the effective registry before construction.
     """
     bindings = {k: overrides.pop(k) for k in list(overrides) if k in _BINDING_KEYS}
     overrides.setdefault("maintenance_interval_secs", 0.01)
-    bindings.setdefault("register_types", [TicketCase, TerminalCase, ManualCase])
     store = CaseManager.open_local_store(tmp_path / "cache", **overrides)
+    registry = bindings.get("registry")
+    target = case_type_registry if registry is None else registry
+    target.register_case_types(TicketCase, TerminalCase, ManualCase)
     return CaseManager(store, **bindings)
 
 

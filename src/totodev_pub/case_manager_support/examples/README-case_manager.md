@@ -71,7 +71,7 @@ manager it created at teardown:
 from totodev_pub.case_manager_support.bag_loading import make_case_bag_fixture
 from myapp.cases import InquiryCase
 
-case_bag = make_case_bag_fixture(register_types=[InquiryCase])
+case_bag = make_case_bag_fixture(case_types=[InquiryCase])
 
 async def test_the_batch_completes(case_bag):
     manager, report = await case_bag(FIXTURES / "inquiries")

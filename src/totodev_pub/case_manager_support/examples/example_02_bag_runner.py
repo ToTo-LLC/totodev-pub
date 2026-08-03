@@ -34,6 +34,7 @@ from pathlib import Path
 from totodev_pub.case_manager_support.bag_loading import load_case_bag
 from totodev_pub.case_manager_support.case_manager_host import serve
 from totodev_pub.case_manager_support.examples.example_cases import InquiryCase
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 
 logger = logging.getLogger("bag_runner")
 
@@ -49,10 +50,10 @@ def seed_bag(bag: Path, count: int = 5) -> Path:
 
 async def main(bag: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="bag_run_") as work:
+        case_type_registry.register_case_types(InquiryCase)
         manager, report = await load_case_bag(
             bag,
             Path(work) / "fleet",
-            register_types=[InquiryCase],
         )
         logger.info(
             "Loaded %d case(s); %d rejected, %d skipped",
