@@ -356,9 +356,10 @@ class ManagerWatchdog:
             else self._stop_grace_secs
         )
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                self._manager.stop(timeout=grace), self._loop
-            )
+            # stop() has no timeout — aborting mid-teardown is unsafe. Bound only
+            # how long this thread waits before hard-exiting; the coroutine is
+            # abandoned with the process.
+            fut = asyncio.run_coroutine_threadsafe(self._manager.stop(), self._loop)
             fut.result(timeout=grace + 5.0)
         except Exception:
             pass

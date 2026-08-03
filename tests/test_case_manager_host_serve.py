@@ -319,17 +319,13 @@ async def test_three_loop_failures_exit_70_without_a_watchdog(
 async def test_stop_that_will_not_settle_exits_70(
     tmp_path, monkeypatch, hard_exit_recorder, watchdogs
 ):
-    """A deliberate stop that times out is a liveness failure, not a clean exit."""
-    from totodev_pub.case_manager_support.exceptions import CaseManagerStopTimeoutError
-
+    """A deliberate stop the host's grace cannot wait out is a liveness failure."""
     manager = provision_manager(tmp_path)
 
-    async def timing_out_stop(*, timeout=None):
-        raise CaseManagerStopTimeoutError(
-            timeout_secs=timeout or 0.0, stuck=[], detail={}
-        )
+    async def hanging_stop():
+        await asyncio.Future()  # never completes; host grace must hard-exit
 
-    monkeypatch.setattr(manager, "stop", timing_out_stop)
+    monkeypatch.setattr(manager, "stop", hanging_stop)
 
     with pytest.raises(_HardExit) as excinfo:
         await asyncio.wait_for(

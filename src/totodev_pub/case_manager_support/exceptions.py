@@ -121,7 +121,13 @@ class StuckTrigger:
 
 
 class CaseManagerStopTimeoutError(Exception):
-    """stop(timeout=…) expired before all in-flight triggers settled."""
+    """Host grace expired while awaiting ``CaseManager.stop()``.
+
+    Raised by ``case_manager_host.await_manager_stop`` when the stop call has
+    not finished within the host's grace period. ``stop()`` itself has no
+    timeout — aborting it mid-teardown is unsafe — so the host logs stuck
+    triggers from this error and hard-exits rather than cancelling stop.
+    """
 
     def __init__(
         self,

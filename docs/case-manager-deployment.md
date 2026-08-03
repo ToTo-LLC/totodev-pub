@@ -99,9 +99,11 @@ Two properties worth knowing:
 
 ### Grace periods must nest
 
-`serve(stop_grace_secs=...)` (default 30s) bounds how long a stop may take.
-**The orchestrator's kill timeout must be larger**, or it will SIGKILL the
-process mid-drain and you lose the clean exit:
+`serve(stop_grace_secs=...)` (default 30s) bounds how long the *host* will wait
+for `CaseManager.stop()` to finish. Stop itself has no timeout — aborting it
+mid-teardown is unsafe — so a grace expiry is a process-level hard exit, not a
+cancelled stop. **The orchestrator's kill timeout must be larger**, or it will
+SIGKILL the process mid-drain and you lose the clean exit:
 
 - Docker: `stop_grace_period` > `stop_grace_secs`
 - Kubernetes: `terminationGracePeriodSeconds` > `stop_grace_secs`

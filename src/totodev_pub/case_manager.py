@@ -102,7 +102,6 @@ from totodev_pub.case_manager_support.fleet_status import (
 from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
     CacheRootStateError,
-    CaseManagerStopTimeoutError,
     EjectAbandonedError,
     EjectTimeoutError,
     InvalidAddressingError,
@@ -306,6 +305,7 @@ class CaseManager:
         self._maintenance_cbs: list[Callable[[], Awaitable[None]]] = []
         self._running = False
         self._stopping = False
+        self._stop_completed = False
         self._run_task: asyncio.Task[None] | None = None
         self._loop_failure_cb: Callable[[BaseException], None] | None = None
         self._terminated_handle: Any = None
@@ -420,6 +420,7 @@ class CaseManager:
             raise RecoverRequiredError()
         self._running = True
         self._stopping = False
+        self._stop_completed = False
         self._terminated_handle = self._driver.case_event_subscribe(
             CasePoolEventNames.TERMINATED,
             self._on_terminated_event,
@@ -442,12 +443,18 @@ class CaseManager:
         self._run_task = asyncio.create_task(self._manager_loop())
         self._pulse_task = asyncio.create_task(self._pulse_loop())
 
-    async def stop(self, *, timeout: float | None = None) -> None:
-        """Leave run mode and wait until active advances finish.
+    async def stop(self) -> None:
+        """Leave run mode, wait until active advances finish, and release the filespace.
 
-        With ``timeout`` set, an overrun raises ``CaseManagerStopTimeoutError``
-        carrying any triggers still running.
+        Idempotent: a second call after a completed ``stop()`` is a no-op.
+        There is no timeout here — aborting mid-teardown leaves the manager
+        half-stopped with no safe resume short of process restart. Hosts that
+        need a grace bound (``serve``, the watchdog) await this call with their
+        own deadline and hard-exit if it has not finished; see
+        ``case_manager_host.await_manager_stop``.
         """
+        if self._stop_completed:
+            return
         self._stopping = True
         self._running = False
         if self._pulse_task is not None:
@@ -481,22 +488,14 @@ class CaseManager:
                 logger.exception("Manager loop task had already died; continuing stop()")
             self._run_task = None
         await self._driver.stop()
-        if timeout is not None:
-            try:
-                await asyncio.wait_for(self._settle_with_diagnostics(), timeout=timeout)
-            except asyncio.TimeoutError:
-                stuck = self._collect_stuck_triggers()
-                raise CaseManagerStopTimeoutError(
-                    timeout_secs=timeout, stuck=stuck, detail={"pool_size": len(self._driver)}
-                )
-        else:
-            await self._settle_with_diagnostics()
+        await self._settle_with_diagnostics()
         self._publish_fleet_status_board(force=True)
         self._write_manifest(running=False, stopped=True)
         # Last, and only after the fleet has settled: releasing earlier would invite a
         # successor in while this one is still writing. A clean release is also what
         # spares that successor the lease-expiry wait a crash would have cost it.
         self._release_filespace()
+        self._stop_completed = True
 
     # ------------------------------------------------------------------
     # Case pool API — add & remove
@@ -608,7 +607,7 @@ class CaseManager:
             try:
                 return await asyncio.wait_for(fut, timeout=timeout)
             except asyncio.TimeoutError:
-                stuck = self._collect_stuck_triggers()
+                stuck = self.collect_stuck_triggers()
                 raise EjectTimeoutError(case_id=case_id, stuck=stuck)
         return await fut
 
@@ -1633,7 +1632,7 @@ class CaseManager:
                     await asyncio.wait_for(settled, timeout=timeout)
                 except asyncio.TimeoutError:
                     raise EjectTimeoutError(
-                        case_id=case_id, stuck=self._collect_stuck_triggers()
+                        case_id=case_id, stuck=self.collect_stuck_triggers()
                     ) from None
         finally:
             try:
@@ -1770,7 +1769,8 @@ class CaseManager:
         if hasattr(self._driver, "settle"):
             await self._driver.settle()
 
-    def _collect_stuck_triggers(self) -> list[StuckTrigger]:
+    def collect_stuck_triggers(self) -> list[StuckTrigger]:
+        """In-flight triggers still running — for host shutdown diagnostics."""
         stuck: list[StuckTrigger] = []
         for case in self._driver.in_flight_cases():
             active = FolderBackedCaseReader(case.case_folder).case_active_trigger

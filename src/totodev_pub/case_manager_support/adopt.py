@@ -141,6 +141,13 @@ async def adopt_case_folder(
     quarantine: Callable[..., Awaitable[Path | None]],
     correlation_id: str | None = None,
 ) -> AdoptResult:
+    """Validate, transfer, and admit a detached case folder.
+
+    Prefer ``CaseManager.adopt_case()`` for ordinary use. That method wires
+    this helper to a live manager (store, registry, driver, quarantine) and
+    emits adopt notices. Call this only when you need to supply those
+    dependencies yourself — typically tests or other support code.
+    """
     corr = correlation_id or str(uuid.uuid4())
     source = Path(source_folder).resolve()
 

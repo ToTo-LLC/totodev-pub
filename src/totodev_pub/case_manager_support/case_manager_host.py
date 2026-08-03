@@ -99,6 +99,32 @@ def _hard_exit(code: int) -> None:
     os._exit(code)
 
 
+async def await_manager_stop(
+    manager: "CaseManager",
+    *,
+    grace_secs: float,
+) -> None:
+    """Await ``manager.stop()`` up to ``grace_secs`` without cancelling it.
+
+    ``CaseManager.stop()`` must run to completion (settle, manifest, lease
+    release). Aborting it mid-flight leaves a half-stopped manager with no
+    safe resume short of process restart. This helper starts stop as its own
+    task and only *waits* up to the grace bound; on expiry it raises
+    ``CaseManagerStopTimeoutError`` carrying stuck-trigger diagnostics while
+    leaving the stop task running for the host to abandon via hard exit.
+    """
+    stop_task = asyncio.create_task(manager.stop())
+    done, _pending = await asyncio.wait({stop_task}, timeout=grace_secs)
+    if stop_task in done:
+        await stop_task  # propagate unexpected stop() failures
+        return
+    raise CaseManagerStopTimeoutError(
+        timeout_secs=grace_secs,
+        stuck=manager.collect_stuck_triggers(),
+        detail={"pool_size": len(manager._driver)},
+    )
+
+
 async def serve(
     manager: "CaseManager",
     *,
@@ -120,7 +146,9 @@ async def serve(
     hosting requires a recovered manager (see ``bag_loading.load_case_bag``), so
     "already recovered" is a legitimate state to arrive in rather than an error.
     ``stop_grace_secs`` is host binding, not deployment policy: Docker's
-    ``stop_grace_period`` must exceed it.
+    ``stop_grace_period`` must exceed it. The host awaits ``manager.stop()``
+    up to that grace via ``await_manager_stop``; if stop has not finished, the
+    process hard-exits rather than cancelling teardown mid-flight.
 
     ``adapter`` is the request transport, if there is one. A manager with no
     adapter is driven entirely through its own methods — which is the normal
@@ -302,7 +330,7 @@ async def serve(
 
     if cause["kind"] in ("signal", "stop_when"):
         try:
-            await manager.stop(timeout=stop_grace_secs)
+            await await_manager_stop(manager, grace_secs=stop_grace_secs)
         except CaseManagerStopTimeoutError:
             logger.exception(
                 "Deliberate stop failed to settle within %.1fs; exiting hard.",
@@ -319,7 +347,7 @@ async def serve(
         # Ack before the drain so poll_result/wait_result resolve normally.
         write_shutdown_ack(_results_dir(manager), directive)
         try:
-            await manager.stop(timeout=stop_grace_secs)
+            await await_manager_stop(manager, grace_secs=stop_grace_secs)
         except CaseManagerStopTimeoutError:
             logger.exception(
                 "Requested drain failed to settle within %.1fs.", stop_grace_secs
