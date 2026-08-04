@@ -36,6 +36,11 @@ aws_rootkey_confidential.csv
 # Python package build artifacts
 *.egg-info/
 *.egg-info/*
+# Root-anchored: these are what `python -m build` / `uv build` create at the repo
+# root. Anchoring keeps them from masking a source directory named build/ nested
+# somewhere in the tree.
+/build/
+/dist/
 
 # Accidental nested git metadata (must never be part of the package tree)
 src/totodev_pub/.git/
