@@ -594,14 +594,17 @@ class FileMappedPydanticMixin:
         start_time = time.time()
         lock_acquired = False
         
-        # Log initial state
-        logger.info(f"Attempting to acquire lock for {file_path}")
-        logger.info(f"Lock file path: {lock_file}")
+        # Lock tracing is DEBUG, not INFO: taking an uncontended lock is a step,
+        # not an event, and it happens often enough on idle housekeeping paths
+        # (manifest heartbeats and the like) to bury anything worth reading.
+        # Everything actionable below -- orphan reaping, cleanup failures, and
+        # timeouts -- stays at WARNING/ERROR.
+        logger.debug("Attempting to acquire lock for %s (lock file %s)", file_path, lock_file)
         if os.path.exists(lock_file):
             lock_stat = os.stat(lock_file)
             lock_age = time.time() - lock_stat.st_mtime
-            logger.info(f"Lock file exists and is {lock_age:.2f} seconds old")
-            
+            logger.debug("Lock file exists and is %.2f seconds old", lock_age)
+
             # Check if lock file is orphaned (older than ORPHANED_LOCKFILE_SECONDS)
             if lock_age > ORPHANED_LOCKFILE_SECONDS:
                 logger.warning(f"Found orphaned lock file ({lock_age:.2f}s old). Removing it.")
@@ -611,8 +614,8 @@ class FileMappedPydanticMixin:
                 except Exception as e:
                     logger.error(f"Failed to remove orphaned lock file: {e}")
         else:
-            logger.info("Lock file does not exist")
-        
+            logger.debug("Lock file does not exist")
+
         # Try to acquire lock until timeout
         attempt_count = 0
         while time.time() - start_time < max_retry_secs:
@@ -621,13 +624,19 @@ class FileMappedPydanticMixin:
                 # Try to create the lock file
                 with open(lock_file, 'x') as f:
                     lock_acquired = True
-                    logger.info(f"Successfully acquired lock on file: {file_path} after {attempt_count} attempts")
+                    logger.debug(
+                        "Successfully acquired lock on file: %s after %d attempts",
+                        file_path, attempt_count,
+                    )
                     return True, None
             except FileExistsError:
                 # Lock file exists, wait with random backoff and retry
                 backoff = random.uniform(0.1, 0.4)  # Random backoff between 0.1 and 0.4 seconds
                 elapsed = time.time() - start_time
-                logger.info(f"Lock attempt {attempt_count} failed after {elapsed:.2f}s, retrying after {backoff:.2f}s")
+                logger.debug(
+                    "Lock attempt %d failed after %.2fs, retrying after %.2fs",
+                    attempt_count, elapsed, backoff,
+                )
                 time.sleep(backoff)
             except Exception as e:
                 # If we created the lock file but something else failed, clean up
@@ -654,7 +663,7 @@ class FileMappedPydanticMixin:
         try:
             if os.path.exists(lock_file):
                 os.remove(lock_file)
-                logger.debug(f"Released lock on file: {file_path}")
+                logger.debug("Released lock on file: %s", file_path)
         except Exception as e:
             logger.error(f"Error releasing lock on {file_path}: {e}")
     
