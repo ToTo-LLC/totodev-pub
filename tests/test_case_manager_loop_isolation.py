@@ -132,3 +132,69 @@ async def test_escalation_detection_failure_does_not_abort_the_tick(tmp_path, mo
     assert manager._last_tick_completed is not None, "the tick still completed"
     assert [n.kind.value for n in notices] == ["MAINTENANCE_ITEM_FAILED"]
     assert "condition detection" in notices[0].detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_on_tick_completed_runs_after_maintenance(tmp_path):
+    """Tail seam fires after maintenance on each successful loop iteration."""
+    import asyncio
+
+    manager = provision_manager(tmp_path, enable_fleet_status_board=False)
+    await manager.recover()
+
+    order: list[str] = []
+
+    async def maintenance_cb():
+        order.append("maintenance")
+
+    async def tick_done_cb():
+        order.append("tick_completed")
+
+    manager.on_maintenance(maintenance_cb)
+    manager.on_tick_completed(tick_done_cb)
+    await manager.start()
+    try:
+        for _ in range(50):
+            if order.count("tick_completed") >= 1 and order.count("maintenance") >= 1:
+                break
+            await asyncio.sleep(0.05)
+        assert "maintenance" in order and "tick_completed" in order
+        first_maint = order.index("maintenance")
+        first_done = order.index("tick_completed")
+        assert first_maint < first_done
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_on_tick_completed_raise_is_isolated(tmp_path):
+    """A raising tick-completed callback does not kill the manager loop."""
+    import asyncio
+
+    manager = provision_manager(tmp_path, enable_fleet_status_board=False)
+    await manager.recover()
+
+    calls = {"boom": 0, "ok": 0}
+    notices = []
+    manager.subscribe_notices(notices.append)
+
+    async def boom():
+        calls["boom"] += 1
+        raise RuntimeError("tick observer exploded")
+
+    async def ok():
+        calls["ok"] += 1
+
+    manager.on_tick_completed(boom)
+    manager.on_tick_completed(ok)
+    await manager.start()
+    try:
+        for _ in range(50):
+            if calls["ok"] >= 1 and calls["boom"] >= 1:
+                break
+            await asyncio.sleep(0.05)
+        assert calls["boom"] >= 1 and calls["ok"] >= 1
+        assert any(n.kind.value == "MAINTENANCE_ITEM_FAILED" for n in notices)
+        assert manager.is_running
+    finally:
+        await manager.stop()

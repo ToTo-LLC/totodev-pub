@@ -336,6 +336,7 @@ class CaseManager:
         # by the tick registers here; the manager knows only that it is a
         # coroutine. See case_manager_support/signaling_adapter.py.
         self._maintenance_cbs: list[Callable[[], Awaitable[None]]] = []
+        self._tick_completed_cbs: list[Callable[[], Awaitable[None]]] = []
         self._running = False
         self._stopping = False
         self._stop_completed = False
@@ -1091,6 +1092,19 @@ class CaseManager:
         """
         self._maintenance_cbs.append(callback)
 
+    def on_tick_completed(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register async work to run at the tail of every successful loop iteration.
+
+        Fires after maintenance, ``driver.advance``, and terminal reconcile — when
+        the fleet picture is as clean as that loop can make it. Use this for
+        observers (e.g. fleet status), not for intake (use ``on_maintenance``).
+
+        Multiple callbacks are supported (append order). Each is isolated — a raise
+        is logged and noticed, and the rest continue. There is no unregister API
+        today (same as ``on_maintenance``).
+        """
+        self._tick_completed_cbs.append(callback)
+
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
@@ -1373,6 +1387,11 @@ class CaseManager:
                 await self._maintenance_tick()
                 await self._driver.advance(suggested_interval_secs=interval)
                 self._reconcile_terminal_in_pool()
+                for callback in self._tick_completed_cbs:
+                    with self._isolated_tick_item(
+                        "tick-completed callback", self._manager_dir
+                    ):
+                        await callback()
                 consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
