@@ -359,7 +359,7 @@ class _CaseAssertionRunner:
         folder = self._case.case_folder / ASSERTS_DIR_NAME
         if not folder.is_dir():
             return 0, []
-        from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+        from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
         reader = FolderBackedCaseReader(self._case.case_folder)
         ran = 0
         failures: list[AssertionFailure] = []

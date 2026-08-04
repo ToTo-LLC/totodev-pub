@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case import FolderBackedCase
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.exceptions import (
     AssetNotTrustedInStateError,

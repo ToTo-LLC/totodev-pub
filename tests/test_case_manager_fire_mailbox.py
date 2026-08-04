@@ -14,7 +14,7 @@ from case_manager_test_utils import (
     seed_detached_case,
 )
 from totodev_pub.case_manager import CaseManager
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.exceptions import ManagerNotRunningError
 from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry

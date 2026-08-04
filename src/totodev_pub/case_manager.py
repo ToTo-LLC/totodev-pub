@@ -50,8 +50,15 @@ Hosts and integration
         from totodev_pub.case_manager_support.case_manager_host import serve
 
     See that module for process ownership, signals, exit codes, and
-    watchdog behavior. The manager also exposes an aggregated view of
-    notable pool activity for observers.
+    watchdog behavior. When the manager runs in its own process, the
+    out-of-process observe/submit surface is ``CaseManagerClient``::
+
+        from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
+
+    Use it for lease-free reads, mailbox submits (fire/adopt/reclassify/
+    shutdown), and fleet-status observation — not as a substitute for
+    embedding a ``CaseManager`` in-process. The manager also exposes an
+    aggregated view of notable pool activity for observers.
 """
 
 from __future__ import annotations
@@ -141,7 +148,7 @@ from totodev_pub.folder_backed_case import (
     IncompatibleReclassError,
     ReclassifyAssertionError,
 )
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.advance_result import AdvanceResult
 from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
 from totodev_pub.folder_backed_case_support.case_pool_driver import (
@@ -194,7 +201,8 @@ class _ResolvedPolicy(NamedTuple):
 
 
 class CaseManager:
-    """Pool coordinator for FolderBackedCase-derived workflows.
+    """Helps to manage a large collection of FolderBackedCase-derived objects
+    coordinating their disk-storage and progressing their lifecycle progression.
 
     A case is considered "managed" when it has been copied into the disk
     space maintained by the manager using the ``adopt_case`` method.
@@ -235,7 +243,8 @@ class CaseManager:
     the event loop, so a busy fleet competes with the UI for it; a crash on
     either side takes the other down; and restart-and-recover is far simpler for
     a process whose only job is the fleet. Split, the manager side is
-    ``case_manager_host.serve()`` and the UI side is ``CaseManagerClient`` over
+    ``case_manager_host.serve()`` and the UI side is
+    ``case_manager_support.case_manager_client.CaseManagerClient`` over
     the file-drop protocol — a hosting change, not an API change.
 
     The whole lifecycle, driven by hand::

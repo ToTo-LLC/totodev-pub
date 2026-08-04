@@ -16,7 +16,7 @@ import time
 import pytest
 
 from case_manager_test_utils import provision_manager
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.manager_lease import (
     CompetingManagerError,
     acquire_manager_lease,

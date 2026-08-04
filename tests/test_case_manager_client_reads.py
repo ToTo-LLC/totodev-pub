@@ -3,7 +3,7 @@
 import pytest
 
 from case_manager_test_utils import TicketCase, adopt_into_live, provision_manager, seed_detached_case
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 
 
 @pytest.mark.asyncio

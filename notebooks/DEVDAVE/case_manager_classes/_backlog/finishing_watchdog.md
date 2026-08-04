@@ -21,7 +21,7 @@ The approved proposal is implemented end-to-end:
 | Liveness pulse | `case_manager.py`, `constants.py` | Heartbeat decoupled from tick duration |
 | Watchdog | `case_manager_support/watchdog.py` | Daemon thread, kill ladder, death records |
 | Host entry point | `case_manager_host.py` | `serve()`, exit codes 0 / 70 / 75 |
-| Shutdown mailbox | `shutdown.py`, `mailbox/processor.py`, `case_manager_client.py` | Shared parser, dual pickup paths |
+| Shutdown mailbox | `shutdown.py`, `mailbox/processor.py`, `case_manager_support/case_manager_client.py` | Shared parser, dual pickup paths |
 | Recover surfacing | `recover.py` | Death-record log lines; stale shutdown discard |
 | Health probe | `cli/manager_health.py` | `totodev-manager-health`, manifest-only |
 | Self-completion | `serve(stop_when=..., stop_when_empty=True)` | Job-manager hosts exit 0 when idle |

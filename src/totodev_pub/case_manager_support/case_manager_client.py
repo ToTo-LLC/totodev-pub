@@ -22,7 +22,7 @@ from totodev_pub.case_manager_support.layout import CaseLocation, policy_manager
 from totodev_pub.case_manager_support.mailbox import MailboxTransport, RequestHandle
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.folder_backed_case import IncompatibleReclassError
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.exceptions import UnregisteredCaseTypeError
 
 

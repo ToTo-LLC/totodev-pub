@@ -24,7 +24,7 @@ from totodev_pub.case_manager_support.fleet_status_events import (
     diff_rows,
     diff_snapshots,
 )
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 
 __all__ = [
     "FleetEvent",

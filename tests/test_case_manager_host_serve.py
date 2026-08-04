@@ -9,7 +9,7 @@ import threading
 import pytest
 
 from case_manager_test_utils import provision_manager
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support import case_manager_host
 from totodev_pub.case_manager_support.case_manager_host import (
     EXIT_RESTART_REQUESTED,

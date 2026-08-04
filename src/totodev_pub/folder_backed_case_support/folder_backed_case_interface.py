@@ -44,7 +44,7 @@ from totodev_pub.folder_backed_case_support.constants import (
 )
 
 if TYPE_CHECKING:
-    from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+    from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 
 
 def _raises_when_detached(fn):
@@ -897,16 +897,17 @@ class FolderBackedCaseInterface(ABC):
         That also makes it safe to hand across process/thread boundaries —
         unlike a live case object, which is bound to one owner's lease.
 
-        The returned ``FolderBackedCaseReader`` mirrors the read-only surface
-        above (``case_id``, ``case_state``, ``case_is_terminal``,
-        ``case_dwell_secs``, ``case_assets``, ``case_load_asset()``,
-        ``case_event_journal``, plus lease-aware extras like
-        ``case_lease_secs_left`` and ``case_active_trigger``) as thin wrappers
-        over the same ``peek_*`` static methods on this class. Each access
-        re-reads its source of truth (record, event journal, or filesystem) rather
-        than caching, so expect more I/O cost per read than the equivalent
-        in-memory property on a live case — a reasonable trade for
-        correctness when you can't or don't want to hold the lease.
+        The returned ``FolderBackedCaseReader`` (in
+        ``folder_backed_case_support.folder_backed_case_reader``) mirrors the
+        read-only surface above (``case_id``, ``case_state``,
+        ``case_is_terminal``, ``case_dwell_secs``, ``case_assets``,
+        ``case_load_asset()``, ``case_event_journal``, plus lease-aware extras
+        like ``case_lease_secs_left`` and ``case_active_trigger``) as thin
+        wrappers over the same ``peek_*`` static methods on this class. Each
+        access re-reads its source of truth (record, event journal, or
+        filesystem) rather than caching, so expect more I/O cost per read than
+        the equivalent in-memory property on a live case — a reasonable trade
+        for correctness when you can't or don't want to hold the lease.
 
         Cannot trigger transitions or otherwise mutate the case — for that you
         need a live, lease-holding instance (see ``create_case_in_folder()`` /

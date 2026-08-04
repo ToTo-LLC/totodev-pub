@@ -6,7 +6,7 @@ import pytest
 
 from case_manager_test_utils import transport_for,  attach_adapter, adopt_into_live, seed_detached_case
 from totodev_pub.case_manager import CaseManager
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.exceptions import LiveCaseNotFoundError
 from totodev_pub.case_manager_support.mailbox import RequestHandle, ReclassifyResult
 from totodev_pub.folder_backed_case import FolderBackedCase, IncompatibleReclassError
@@ -147,7 +147,7 @@ async def test_reclassify_case_unregistered_type_rejected(tmp_path):
 async def test_reclassify_case_quarantines_when_target_assertions_fail(tmp_path):
     from totodev_pub.case_manager_support.case_store import QUARANTINED
     from totodev_pub.case_manager_support.quarantine import EV_QUARANTINED
-    from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+    from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
     from totodev_pub.folder_backed_case_support.exceptions import ReclassifyAssertionError
 
     manager = provision(tmp_path)

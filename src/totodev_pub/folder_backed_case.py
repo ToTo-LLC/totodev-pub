@@ -22,6 +22,9 @@ CaseEventJournalView    — read-only facade over the case event-journal protoco
 CaseAssets              — working-file playground (assets/); retention-blind.
 FolderBackedCaseInterface — basic-usage contract (read this first).
 FolderBackedCase        — ABC you subclass to define a case type.
+FolderBackedCaseReader  — lock-free read-only view of a case folder (no lease);
+                          returned by ``get_case_reader()`` / manager iterators;
+                          import from folder_backed_case_support.folder_backed_case_reader.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
 case_briefing.generate_case_briefing — static Markdown report for a case type (lifecycle diagram + tables); import from folder_backed_case_support.case_briefing.
 """
@@ -529,7 +532,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
 
     @staticmethod
     def get_case_reader(folder: Path) -> "FolderBackedCaseReader":
-        from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+        from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
         return FolderBackedCaseReader(Path(folder))
 
     # =======================================================================

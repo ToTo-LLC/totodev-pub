@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 from totodev_pub.case_manager import CaseManager
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.case_manager_host import serve
 from totodev_pub.case_manager_support.examples.example_cases import (
     EscalationCase,

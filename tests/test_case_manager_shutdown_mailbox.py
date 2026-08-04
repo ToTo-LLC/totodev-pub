@@ -3,7 +3,7 @@
 import pytest
 
 from case_manager_test_utils import transport_for,  provision_manager
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.shutdown import ShutdownRequest
 
 

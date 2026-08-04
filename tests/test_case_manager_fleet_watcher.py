@@ -12,7 +12,7 @@ from case_manager_test_utils import (
     provision_manager,
     seed_detached_case,
 )
-from totodev_pub.case_manager_client import CaseManagerClient
+from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
 from totodev_pub.case_manager_support.fleet_status_events import (

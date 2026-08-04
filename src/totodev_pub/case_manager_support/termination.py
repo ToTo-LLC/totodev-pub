@@ -21,7 +21,7 @@ from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.case_store import TERMINATED
 from totodev_pub.case_manager_support.constants import TERMINATION_SUBDIR
 from totodev_pub.folder_backed_case import FolderBackedCase
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 
 if TYPE_CHECKING:
     from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
