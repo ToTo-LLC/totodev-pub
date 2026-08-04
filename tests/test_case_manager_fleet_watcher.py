@@ -16,10 +16,12 @@ from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME
 from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
-from totodev_pub.case_manager_support.fleet_status_watcher import (
-    FleetStatusBoardWatcher,
+from totodev_pub.case_manager_support.fleet_status_events import (
     FleetEventKind,
     diff_snapshots,
+)
+from totodev_pub.case_manager_support.fleet_status_watcher import (
+    FleetStatusBoardWatcher,
 )
 
 

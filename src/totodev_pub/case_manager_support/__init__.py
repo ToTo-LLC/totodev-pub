@@ -38,10 +38,14 @@ from totodev_pub.case_manager_support.exceptions import (
 )
 from totodev_pub.case_manager_support.layout import CaseLocation
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
-from totodev_pub.case_manager_support.fleet_status_watcher import (
-    FleetStatusBoardWatcher,
+from totodev_pub.case_manager_support.fleet_status_events import (
     FleetEvent,
     FleetEventKind,
+    diff_rows,
+    diff_snapshots,
+)
+from totodev_pub.case_manager_support.fleet_status_watcher import (
+    FleetStatusBoardWatcher,
 )
 
 __all__ = [
@@ -81,4 +85,6 @@ __all__ = [
     "FleetEvent",
     "FleetEventKind",
     "FleetStatusRow",
+    "diff_rows",
+    "diff_snapshots",
 ]
