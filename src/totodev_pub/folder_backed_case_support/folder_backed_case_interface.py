@@ -401,7 +401,10 @@ class FolderBackedCaseInterface(ABC):
         returned instance when you are done with it.
 
         ``case_id`` may be a literal id string, a ``CaseIDGenerator`` to mint one
-        from, or omitted to use ``cls.case_id_generator``.
+        from, or omitted to use ``cls.case_id_generator``. The default generator is
+        unique only *within one process*, so when several processes mint cases into
+        one shared tree (an API tier staging cases for a worker's store, say), set
+        ``case_id_generator = UUIDCaseIDGenerator()`` on the case class.
 
         Subclass overrides should call ``super().create_case_in_folder(...)``
         first so the folder and base structures exist before custom init.
@@ -747,6 +750,25 @@ class FolderBackedCaseInterface(ABC):
         Before touching disk, checks that the current FSM state is one where
         ``alias`` is trustworthy (per the spec's ``trust_states``), raising
         ``AssetNotTrustedInStateError`` if not.
+
+        **Reading an asset from inside the step that produces it.** A
+        ``perform_`` hook runs *before* the transition commits, so the case is
+        still in the SOURCE state while the hook executes. An asset that only
+        becomes complete when the step finishes is therefore — correctly — not
+        yet trusted, and this accessor will refuse it. That is the gate working,
+        not a mistake to design around: do **not** widen ``trust_states`` to
+        include the source state just to get the read through, or arrival in the
+        destination state stops meaning the asset is loadable.
+
+        Writing is never trust-checked, so producing the asset needs nothing
+        special. For the read half of a read-modify-write (updating a manifest as
+        a conversion progresses, appending to a partial-progress record so a
+        retry can resume), use the ungated equivalents on ``case_assets``, which
+        resolve the same alias and apply the same loader::
+
+            self.case_assets.load_dataclass("manifest")      # cf. case_load_asset
+            self.case_assets.load_dataclasses("pages")       # cf. case_load_assets
+            self.case_assets.dataclass_paths("pages")        # paths only
 
         For ``many=True`` aliases use ``case_load_assets``. For assets not
         declared in ``asset_aliases`` use ``case_assets`` to find/load manually.

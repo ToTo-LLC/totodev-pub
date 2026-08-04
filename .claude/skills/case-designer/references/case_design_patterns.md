@@ -211,6 +211,14 @@ partial progress to an asset and check that asset on entry, so a retry (#3)
 *resumes* rather than redoing completed work. Trades implementation complexity
 for not paying twice on a mid-step failure.
 
+Read that progress asset with `case_assets.load_dataclass(alias)`, not
+`case_load_asset(alias)`. A `perform_` hook runs before the transition commits,
+so the case is still in the source state and the trust-checked accessor will
+raise `AssetNotTrustedInStateError` for an asset whose `trust_states` starts at
+the destination — which is the correct declaration. Widening `trust_states` to
+silence it is the wrong fix; it would make arrival in the destination state stop
+meaning the asset is complete. Writing needs no special handling either way.
+
 ### 10. Run summary / outcome asset
 
 A `keep=True` structured asset written on entering a terminal state (or in

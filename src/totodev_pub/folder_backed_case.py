@@ -736,7 +736,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # itself a CaseIDGenerator, overriding this for just that call). Override on a
     # subclass to share one generator across case types, run multiple namespaces, or
     # encode limited type info into the id. Default: short, sortable, base-36
-    # millisecond time slug (in-process monotonic).
+    # millisecond time slug (in-process monotonic) -- so for cases minted from more
+    # than one process into one tree, set UUIDCaseIDGenerator() instead.
     case_id_generator: CaseIDGenerator = DEFAULT_CASE_ID_GENERATOR
 
     # Lease timing (TTL, beat throttle, in-flight pulse cadence) is a single FIXED policy in

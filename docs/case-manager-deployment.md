@@ -57,11 +57,25 @@ something is nonzero, even when it shuts down cleanly.
 | **0** | Deliberate, final stop: SIGTERM/SIGINT, or a `stop_when` predicate returned True. | No |
 | **70** | In-process liveness failure: a watchdog detection, a stop that would not settle, or three consecutive manager-loop failures with no watchdog running. | Yes, with backoff |
 | **75** | A shutdown was requested through the shutdown mailbox. | Yes, promptly |
+| **1** | Startup refused: an unhandled exception before the fleet was running. In practice almost always `CompetingManagerError` — another manager already owns this cache root. | Yes, with backoff |
 
 70 and 75 are deliberately distinct. 75 means "please come back" — it is the
 normal outcome of an operator-initiated restart. 70 means the process could not
 keep itself healthy; restarting is right, but a *loop* of 70s is an incident, not
 a retry.
+
+1 is Python's own exit code for an exception that escaped `serve()`, not a code
+the host chooses. It is listed because it is *reachable in normal operation* and
+a supervisor must not treat it as unexpected-and-unrecoverable. The way to reach
+it is to point two workers at one cache root: the lease refuses the second one
+before it can touch anything (see "One manager per cache root, enforced"), and
+refusing to start is the containment. Restarting with backoff is correct — the
+incumbent may be a corpse whose lease has yet to lapse, in which case a later
+attempt succeeds — but a sustained loop of 1s means two workers are genuinely
+configured against the same directory, which no amount of restarting fixes.
+
+Anything else nonzero is a bug; report it rather than tuning a restart policy
+around it.
 
 Exits at 70 and 75 go through `os._exit()`, bypassing Python cleanup by design:
 that path has to work even when the interpreter is too wedged for a clean
@@ -72,6 +86,8 @@ shutdown. Do not rely on `atexit` hooks or context-manager teardown running.
 - Always restart on 70 and 75. **Use backoff on 70** — a crash-looping manager
   writes a death record per minute (below) and hammers whatever wedged it.
 - Do not restart on 0. That is a scale-down or a completed job.
+- Restart on 1 with backoff, and alert on a sustained loop of them: a manager
+  that cannot claim its cache root will not start no matter how often it tries.
 - `totodev-manager-health` (below) is the liveness probe; the exit code is the
   post-mortem.
 
