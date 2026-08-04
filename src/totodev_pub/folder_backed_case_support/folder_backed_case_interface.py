@@ -412,13 +412,17 @@ class FolderBackedCaseInterface(ABC):
         """
         ...
 
-    def case_detach(self) -> None:
+    def case_detach(self) -> Path:
         """Unbinds this object from its folder: release the lease and mark detached.
 
         Call this when you are done acting on a live case (scripts, tests, handoff
         to ``CaseManager``, after harvesting a terminated case). After detach,
         mutating use raises ``DetachedCaseError``. Does not move or archive the
         folder.
+
+        Returns the case folder path so create→detach→handoff can be fluent
+        (``adopt_case(create(...).case_detach())``) without keeping a separate
+        handle. Also returned on idempotent re-calls.
 
         If you forget, the lease self-expires after a crash-recovery window;
         explicit detach is still preferred so other owners need not wait.

@@ -113,6 +113,17 @@ def test_create_and_basic_properties(tmp_path):
         case.case_detach()
 
 
+def test_case_detach_returns_folder(tmp_path):
+    """Detach returns the folder path so create→detach→handoff can be fluent."""
+    folder = tmp_path / "case-detach-path"
+    case = SimpleCase.create_case_in_folder(folder)
+    returned = case.case_detach()
+    assert returned == folder
+    assert isinstance(returned, Path)
+    # Idempotent re-call still returns the folder (handy after an earlier detach).
+    assert case.case_detach() == folder
+
+
 def test_second_open_raises(tmp_path):
     folder = tmp_path / "case-003"
     first = SimpleCase.create_case_in_folder(folder)

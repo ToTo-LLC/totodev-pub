@@ -291,7 +291,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # re-opening WITHOUT knowing the class is case_type_registry.rehydrate(folder). Both
     # are documented in SECTION 4 (__init__) and the CaseTypeRegistry, respectively.
 
-    def case_detach(self) -> None:
+    def case_detach(self) -> Path:
         # Guarded on is_active() (not just "is not None"), so this runs exactly ONCE per
         # live attach — idempotent against a repeat explicit call, __del__ calling it
         # again, or mid-reclassify's internal call. Banner + tee-disable happen BEFORE
@@ -304,10 +304,14 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # its own attach banner — so pretending detach could "reseal" a purged file was
         # already false. Keeping both bookends symmetric and unconditional is simpler and
         # doesn't claim a guarantee ("never touched again") the code can't actually make.
+        #
+        # Returns the folder path (including on idempotent re-calls) so create→detach→
+        # handoff can be fluent without retaining a separate path handle.
         if self._lease is not None and self._lease.is_active():
             write_detach_banner(self.log)
             disable_case_file_tee(self.log)
             self._lease.release()
+        return self._folder
 
     @_raises_when_detached
     async def case_advance(
