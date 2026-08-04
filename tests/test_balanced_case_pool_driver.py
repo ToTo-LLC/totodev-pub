@@ -256,6 +256,47 @@ def test_admission_terminal_case_is_dormant(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# active_cases — still-schedulable pool membership
+# ---------------------------------------------------------------------------
+
+def test_active_cases_includes_schedulable(tmp_path):
+    driver = BalancedCasePoolDriver()
+    case = _make(GuardedCase, tmp_path, "active")
+    try:
+        driver.add(case)
+        assert driver.active_cases() == [case]
+    finally:
+        case.case_detach()
+
+
+def test_active_cases_excludes_halt_requested(tmp_path):
+    driver = BalancedCasePoolDriver()
+    case = _make(GuardedCase, tmp_path, "halted")
+    try:
+        driver.add(case)
+        driver.request_halt(case.case_folder)
+        assert case in list(driver)
+        assert driver.active_cases() == []
+    finally:
+        case.case_detach()
+
+
+def test_active_cases_excludes_terminal(tmp_path):
+    async def body():
+        driver = BalancedCasePoolDriver()
+        case = _make(AutoCase, tmp_path, "term_active")
+        await case.case_advance()
+        await case.case_advance()
+        assert case.case_is_terminal
+        driver.add(case)
+        assert case in list(driver)
+        assert driver.active_cases() == []
+        case.case_detach()
+
+    _run(body())
+
+
+# ---------------------------------------------------------------------------
 # Tier reclassification (driven via fire(None), deterministic)
 # ---------------------------------------------------------------------------
 

@@ -350,6 +350,14 @@ class CasePoolDriver(ABC):
         """Cases awaiting HALTED after request_halt()."""
 
     @abstractmethod
+    def active_cases(self) -> list[FolderBackedCase]:
+        """Pooled cases still eligible to be scheduled.
+
+        Excludes halt-requested and terminal slots — both remain in the pool
+        until ``remove()``, but the driver will not schedule them again.
+        """
+
+    @abstractmethod
     def in_flight_cases(self) -> list[FolderBackedCase]:
         """Cases with an advance currently in progress."""
 

@@ -850,6 +850,12 @@ class BalancedCasePoolDriver(CasePoolDriver):
             if slot.halt_requested and not slot.halt_settled
         ]
 
+    def active_cases(self) -> list[FolderBackedCase]:
+        return [
+            slot.case for slot in self._by_folder.values()
+            if not slot.halt_requested and not slot.terminal
+        ]
+
     def in_flight_cases(self) -> list[FolderBackedCase]:
         return [slot.case for slot in self._by_folder.values() if slot.in_flight]
 
