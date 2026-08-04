@@ -44,3 +44,6 @@ pypi_token
 
 # Git worktrees used for isolated agent-driven implementation work
 .worktrees/
+
+# Working design docs from agent-driven planning (kept local, not shipped)
+docs/superpowers/
