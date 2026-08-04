@@ -833,6 +833,10 @@ class BalancedCasePoolDriver(CasePoolDriver):
     def find(self, case_folder: Path) -> FolderBackedCase:
         return self._by_folder[case_folder].case
 
+    def get_by_case_id(self, case_id: str) -> FolderBackedCase | None:
+        slot = self._by_case_id.get(case_id)
+        return None if slot is None else slot.case
+
     def find_by_external_key(self, key: str) -> list[FolderBackedCase]:
         """Cases whose record carries ``external_key == key`` (not unique -> list).
         Extension: lives on the derived class, not the ABC."""

@@ -416,9 +416,11 @@ class SignalingAdapter:
         return {"case_folder": Path(case_folder) if case_folder else None}
 
     def _locate_for(self, case_id: str | None, case_folder: str | None):
-        if not case_id and not case_folder:
-            raise ValueError("fire request names neither case_id nor case_folder")
-        return self._manager.locate(**self._address_of(case_id, case_folder))
+        if case_id:
+            return self._manager.locate(case_id)
+        if case_folder:
+            return self._manager._resolve_single(case_folder=Path(case_folder))
+        raise ValueError("fire request names neither case_id nor case_folder")
 
     @staticmethod
     def _dead_letter(path: Path, destination: Path) -> None:

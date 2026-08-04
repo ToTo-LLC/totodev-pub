@@ -664,7 +664,8 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     def get_live(self, case_id: str) -> FolderBackedCase:
-        """Return the pooled case object — use sparingly; this is a sharp edge.
+        """Return the pooled case object — use cautiously due to risk of race
+        conditions.
 
         The returned instance is the same object the pool still owns. While the
         manager is running, the driver may call ``advance()`` on it at any await
@@ -681,10 +682,10 @@ class CaseManager:
         (e.g. manager-internal halt/eject/quarantine paths, or a deliberate
         out-of-band step you accept is outside pool bookkeeping).
         """
-        for case in self._driver:
-            if case.case_id == case_id:
-                return case
-        raise LiveCaseNotFoundError(case_id)
+        case = self._driver.get_by_case_id(case_id)
+        if case is None:
+            raise LiveCaseNotFoundError(case_id)
+        return case
 
     def reader(
         self,
@@ -869,29 +870,30 @@ class CaseManager:
     # Case pool API — lookup & iteration
     # ------------------------------------------------------------------
 
-    def locate(
-        self,
-        *,
-        case_id: str | None = None,
-        case_folder: Path | None = None,
-    ) -> CaseLocation | None:
-        """Find a case at any status. Exactly one of ``case_id`` / ``case_folder``.
+    def locate(self, case_id: str) -> CaseLocation | None:
+        """Find a case at any status by ``case_id``.
 
-        Both directions are index lookups, not pool-wide scans.
+        Pooled (live) cases resolve via the driver's case-id index. Anything
+        not in this process's pool falls through to the store — live-but-not-
+        pooled, terminated, quarantined, or missing.
         """
-        if (case_id is None) == (case_folder is None):
-            raise InvalidAddressingError()
-        if case_folder is not None:
-            case_id = self._store.case_id_at(case_folder)
-            if case_id is None:
-                return None
+        case = self._driver.get_by_case_id(case_id)
+        if case is not None:
+            return CaseLocation(
+                case_id=case.case_id,
+                external_key=case.case_external_key,
+                case_folder=case.case_folder,
+                status=self._store.live_status,
+                in_pool=True,
+                terminal=case.case_is_terminal,
+            )
         entry = self._store.find(case_id)
         return None if entry is None else self._to_location(entry)
 
     def locate_all(self, *, external_key: str) -> list[CaseLocation]:
         """Every case carrying ``external_key``.
 
-        Full scan (external keys are not indexed). Prefer ``locate(case_id=…)``
+        Full scan (external keys are not indexed). Prefer ``locate(case_id)``
         on hot paths.
         """
         hits: list[CaseLocation] = []
@@ -1495,7 +1497,7 @@ class CaseManager:
     # ------------------------------------------------------------------
 
     def _fleet_locate(self) -> Callable[[str], Any]:
-        return lambda cid: self.locate(case_id=cid)
+        return lambda cid: self.locate(cid)
 
     def _notify_fleet_board(self, case: FolderBackedCase, *, force: bool = False) -> None:
         if self._fleet_board is None:
@@ -1676,7 +1678,7 @@ class CaseManager:
             external_key=reader.case_external_key,
             case_folder=entry.case_folder,
             status=entry.status,
-            in_pool=any(c.case_id == entry.case_id for c in self._driver),
+            in_pool=self._driver.get_by_case_id(entry.case_id) is not None,
             terminal=reader.case_is_terminal,
         )
 
@@ -1688,7 +1690,11 @@ class CaseManager:
     ) -> CaseLocation | None:
         if (case_id is None) == (case_folder is None):
             raise InvalidAddressingError()
-        return self.locate(case_id=case_id, case_folder=case_folder)
+        if case_folder is not None:
+            case_id = self._store.case_id_at(case_folder)
+            if case_id is None:
+                return None
+        return self.locate(case_id)
 
     def _emit_notice(
         self, kind: str, case_id: str, folder: Path | None, detail: str | None = None

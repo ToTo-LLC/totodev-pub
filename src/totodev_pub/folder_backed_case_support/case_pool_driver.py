@@ -29,8 +29,8 @@ subclass ``SeniorityCasePoolDriver`` are the reference for what honoring it look
 1. Identity. A case's folder path is the sole key across container access
    (``__contains__``, ``__getitem__``, ``find``), membership (``add``, ``remove``,
    ``request_halt``), and manual driving (``fire``, ``boost``). It must not change while
-   the case is in the pool. Extra indexes (case_id, external_key, queue order, ...) are
-   conveniences layered over the folder-keyed store, never a replacement for it.
+   the case is in the pool. ``get_by_case_id`` (and other indexes such as external_key)
+   are conveniences layered over the folder-keyed store, never a replacement for it.
 
 2. Admission is not rehydration. ``add()`` accepts only an already-live, lease-held
    object. A detached case handed to ``add()`` is a caller error — reject it (e.g.
@@ -334,6 +334,14 @@ class CasePoolDriver(ABC):
     @abstractmethod
     def find(self, case_folder: Path) -> FolderBackedCase:
         """Look up a case by folder path. Raises KeyError if not present."""
+
+    @abstractmethod
+    def get_by_case_id(self, case_id: str) -> FolderBackedCase | None:
+        """Look up a pooled case by ``case_id``, or ``None`` if not in the pool.
+
+        Folder path remains the driver's identity key for membership and driving;
+        this is an indexed convenience over that store.
+        """
 
     # -- Queries -----------------------------------------------------------
 

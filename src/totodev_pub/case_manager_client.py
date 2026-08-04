@@ -57,8 +57,8 @@ class CaseManagerClient:
             if age > manifest.manifest_stale_secs:
                 raise ManagerNotFreshError(heartbeat_at=manifest.heartbeat_at)
 
-    def locate(self, *, case_id: str | None = None, case_folder: Path | None = None) -> CaseLocation | None:
-        return self._manager.locate(case_id=case_id, case_folder=case_folder)
+    def locate(self, case_id: str) -> CaseLocation | None:
+        return self._manager.locate(case_id)
 
     def locate_all(self, *, external_key: str) -> list[CaseLocation]:
         return self._manager.locate_all(external_key=external_key)
@@ -79,9 +79,9 @@ class CaseManagerClient:
 
     def list_live_pool(self) -> list[CaseLocation]:
         return [
-            self._manager.locate(case_id=r.case_id)
+            self._manager.locate(r.case_id)
             for r in self._manager.iter_live_pool()
-            if self._manager.locate(case_id=r.case_id) is not None
+            if self._manager.locate(r.case_id) is not None
         ]
 
     def allocate_staging_folder(self, *, only_if_fresh: bool = True) -> Path:
@@ -171,7 +171,10 @@ class CaseManagerClient:
         # OWN CaseManager/driver (a separate, unsynced in-memory pool from whatever
         # process is actually running the fleet), so in_pool would read as False for
         # every case, always. Status is a disk fact and needs no driver.
-        loc = self._manager.locate(case_id=case_id, case_folder=case_folder)
+        loc = self._manager.locate(case_id) if case_id else (
+            self._manager._resolve_single(case_folder=case_folder)
+            if case_folder is not None else None
+        )
         if loc is None or loc.status != LIVE:
             raise LiveCaseNotFoundError(case_id or (loc.case_id if loc else str(case_folder)))
         target_cls = self._manager._registry.resolve_case_type(target_type_name)

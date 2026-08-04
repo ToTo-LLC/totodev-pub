@@ -197,6 +197,8 @@ def test_add_contains_len_get_find(tmp_path):
         assert case.case_folder in driver
         assert driver[case.case_folder] is case
         assert driver.find(case.case_folder) is case
+        assert driver.get_by_case_id("c1") is case
+        assert driver.get_by_case_id("missing") is None
         assert list(iter(driver)) == [case]
     finally:
         case.case_detach()
