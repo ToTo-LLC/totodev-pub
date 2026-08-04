@@ -22,6 +22,7 @@ from case_manager_test_utils import (
     transport_for,
 )
 from totodev_pub.case_manager_support.mailbox import (
+    AdoptRequest,
     MailboxTransport,
     ReclassifyResult,
     RequestHandle,
@@ -317,6 +318,180 @@ async def test_recovery_settles_a_reclassify_caught_mid_execution(tmp_path):
     result = transport.poll_result(handle)
     assert isinstance(result, ReclassifyResult)
     assert result.status == "error" and "dead-letter" in result.error
+
+
+# ------------------------------------------------------- interrupted adopt
+#
+# Adopt is the one request whose outcome recovery cannot assume: it consumes its
+# source, so "the source is gone" means either "already adopted" or "adopted and
+# then rolled back", and the request alone cannot tell them apart. The stamped
+# case id is what makes the difference decidable — these pin both branches, plus
+# the ordering that makes the stamp worth anything.
+
+
+def _pending_adopt(transport, corr: str, source_folder: Path, case_id: str | None):
+    """A request parked in adopt/pending/, i.e. one a crash caught mid-adopt."""
+    handle = transport.submit_adopt(source_folder=source_folder, correlation_id=corr)
+    intake = transport.adopt_intake() / f"{corr}.yaml"
+    req = AdoptRequest.load(str(intake), acquire_lock=False)
+    req.case_id = case_id
+    pending = transport.adopt_stage("pending")
+    pending.mkdir(parents=True, exist_ok=True)
+    req.save(str(pending / f"{corr}.yaml"), retain_lock=False)
+    intake.unlink()
+    return handle
+
+
+@pytest.mark.asyncio
+async def test_the_source_case_id_is_stamped_before_the_transfer_starts(tmp_path, monkeypatch):
+    """Ordering is the whole point: stamped after the move would stamp nothing.
+
+    Adopt removes the source folder it consumes, so the id has to be read and
+    recorded while that folder still exists.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    transport = transport_for(manager)
+    transport.ensure_dirs()
+    adapter = SignalingAdapter(manager, transport)
+
+    staged = tmp_path / "inbound"
+    case = seed_detached_case(TicketCase, staged)
+    transport.submit_adopt(source_folder=staged, correlation_id="stamped")
+
+    real_adopt = manager.adopt_case
+    seen: dict[str, str | None] = {}
+
+    async def spy_adopt(source_folder):
+        parked = transport.adopt_stage("pending") / "stamped.yaml"
+        seen["case_id"] = AdoptRequest.load(str(parked), acquire_lock=False).case_id
+        return await real_adopt(source_folder)
+
+    monkeypatch.setattr(manager, "adopt_case", spy_adopt)
+    await adapter.maintenance_tick()
+
+    assert seen["case_id"] == case.case_id, "the id was on file before adopt ran"
+
+
+@pytest.mark.asyncio
+async def test_recovery_reports_an_interrupted_adopt_that_landed_as_completed(tmp_path):
+    """The crash fell between admitting the case and publishing its result.
+
+    Telling this submitter "error" would be a lie about a case that is live right
+    now, and would invite them to re-upload it as a duplicate.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    transport = transport_for(manager)
+    transport.ensure_dirs()
+
+    landed = await adopt_into_live(
+        manager, seed_detached_case(TicketCase, tmp_path / "inbound").case_folder
+    )
+    handle = _pending_adopt(
+        transport, "landed", tmp_path / "inbound", case_id=landed.case_id
+    )
+
+    report = SignalingAdapter(manager, transport).recover()
+
+    assert report.adopt_settled == 1
+    result = transport.poll_result(handle)
+    assert isinstance(result, AdoptResult)
+    assert result.status == "completed"
+    assert result.case_id == landed.case_id
+    assert Path(result.case_folder) == landed.case_folder
+
+
+@pytest.mark.asyncio
+async def test_recovery_dead_letters_an_interrupted_adopt_that_never_landed(tmp_path):
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    transport = transport_for(manager)
+    transport.ensure_dirs()
+
+    handle = _pending_adopt(
+        transport, "lost", tmp_path / "gone", case_id="never-adopted"
+    )
+
+    report = SignalingAdapter(manager, transport).recover()
+
+    assert report.adopt_settled == 1
+    result = transport.poll_result(handle)
+    assert isinstance(result, AdoptResult)
+    assert result.status == "error"
+    assert "never reached managed storage" in result.rejection_reason
+
+
+@pytest.mark.asyncio
+async def test_recovery_admits_it_cannot_tell_when_no_case_id_was_stamped(tmp_path):
+    """An unstamped request is answered honestly rather than guessed at.
+
+    Reachable when the source's record was unreadable at stamp time. "Unknown"
+    is a worse answer than "completed" and a better one than a wrong verdict.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    transport = transport_for(manager)
+    transport.ensure_dirs()
+
+    handle = _pending_adopt(transport, "blank", tmp_path / "gone", case_id=None)
+
+    report = SignalingAdapter(manager, transport).recover()
+
+    assert report.adopt_settled == 1
+    result = transport.poll_result(handle)
+    assert result is not None and result.status == "error"
+    assert "outcome unknown" in result.rejection_reason
+
+
+@pytest.mark.asyncio
+async def test_recovery_leaves_an_already_published_adopt_result_alone(tmp_path):
+    """The crash landed between publishing and cleanup; the published answer wins."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    transport = transport_for(manager)
+    transport.ensure_dirs()
+
+    handle = _pending_adopt(transport, "answered", tmp_path / "gone", case_id="c-9")
+    transport.publish_result(
+        "answered",
+        AdoptResult(
+            status="completed",
+            case_id="c-9",
+            case_folder=str(tmp_path / "managed" / "c-9"),
+            source_folder=str(tmp_path / "gone"),
+            correlation_id="answered",
+        ),
+    )
+
+    report = SignalingAdapter(manager, transport).recover()
+
+    assert report.adopt_settled == 0, "nothing to settle; it was already answered"
+    result = transport.poll_result(handle)
+    assert result is not None and result.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_recovery_never_leaves_an_adopt_request_in_pending(tmp_path):
+    """The invariant behind all of the above: pending/ is empty afterwards.
+
+    A request left here is one no later tick looks at, so its submitter polls a
+    result path that will never be written for as long as the fleet runs.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    transport = transport_for(manager)
+    transport.ensure_dirs()
+
+    _pending_adopt(transport, "a", tmp_path / "gone", case_id="x-1")
+    _pending_adopt(transport, "b", tmp_path / "gone", case_id=None)
+    (transport.adopt_stage("pending") / "c.yaml").write_text(
+        "this is not yaml: [", encoding="utf-8"
+    )
+
+    SignalingAdapter(manager, transport).recover()
+
+    assert list(transport.adopt_stage("pending").rglob("*.yaml")) == []
 
 
 # --------------------------------------------------------------- backlog age

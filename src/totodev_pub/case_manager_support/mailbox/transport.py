@@ -73,10 +73,20 @@ class FireRequest(BaseModel, FileMappedPydanticMixin):
 
 
 class AdoptRequest(BaseModel, FileMappedPydanticMixin):
+    """Ask the manager to take a detached case folder into managed storage.
+
+    ``case_id`` is not supplied by the submitter — the adapter stamps it on the
+    ``pending/`` copy, read off the source's own record, before the transfer
+    starts. Adopt *consumes* its source, so after a crash the request alone
+    cannot say whether the case landed; the stamped id is what lets recovery ask
+    the store instead of guessing. See ``SignalingAdapter._settle_adopt_pending``.
+    """
+
     protocol_version: int = MAILBOX_PROTOCOL_VERSION
     correlation_id: str
     requested_at: str
     source_folder: str
+    case_id: str | None = None
 
 
 class ReclassifyRequest(BaseModel, FileMappedPydanticMixin):

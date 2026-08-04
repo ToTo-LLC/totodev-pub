@@ -41,7 +41,9 @@ from totodev_pub.case_manager_support.advance_result_serializable import (
     AdvanceResultSerializable,
 )
 from totodev_pub.case_manager_support.adopt import AdoptResult
+from totodev_pub.case_manager_support.case_store import LIVE
 from totodev_pub.case_manager_support.exceptions import LiveCaseNotFoundError
+from totodev_pub.case_manager_support.layout import read_case_id_from_folder
 from totodev_pub.case_manager_support.mailbox.transport import (
     AdoptRequest,
     FireRequest,
@@ -63,7 +65,7 @@ class AdapterRecoverReport:
     """What startup found in the transport, separate from the fleet's own recovery."""
 
     fire_replayed: int = 0
-    adopt_pending: int = 0
+    adopt_settled: int = 0
     reclassify_dead_lettered: int = 0
 
 
@@ -99,11 +101,18 @@ class SignalingAdapter:
         Recovery is a two-party sequence now: the fleet recovers its own storage
         and pool, and the adapter separately settles requests that were in flight
         when the process died. Neither knows how to do the other's half.
+
+        Call order matters: the fleet must have rebuilt its pool first, because
+        settling an interrupted adopt means asking the manager whether the case
+        is there.
+
+        Every in-flight request leaves here with a published result or a requeue.
+        Nothing is left for a later tick to notice, because nothing later looks.
         """
         self._transport.ensure_dirs()
         return AdapterRecoverReport(
             fire_replayed=self._replay_fire(),
-            adopt_pending=self._count_adopt_pending(),
+            adopt_settled=self._settle_adopt_pending(),
             reclassify_dead_lettered=self._dead_letter_reclassify(),
         )
 
@@ -326,10 +335,37 @@ class SignalingAdapter:
             pending.unlink(missing_ok=True)
             return
 
+        self._stamp_source_case_id(req, pending)
         result = await self._manager.adopt_case(Path(req.source_folder))
         result = result.model_copy(update={"correlation_id": req.correlation_id})
         self._transport.publish_result(req.correlation_id, result)
         pending.unlink(missing_ok=True)
+
+    def _stamp_source_case_id(self, req: AdoptRequest, pending: Path) -> None:
+        """Record the source's case id on the pending request before the transfer.
+
+        The window this closes: adopt moves the source into managed storage and
+        removes it, so a process that dies mid-adopt leaves a request naming a
+        folder that may no longer exist, with no way to tell a completed adopt
+        from one that never started. With the id on file, recovery can ask the
+        store which happened.
+
+        Best effort by design. A source whose id is unreadable is one adopt is
+        about to reject anyway, and failing to stamp only costs recovery its
+        precision — it must never cost the adopt itself.
+        """
+        try:
+            case_id = read_case_id_from_folder(Path(req.source_folder))
+            if not case_id:
+                return
+            req.case_id = case_id
+            req.save(str(pending), retain_lock=False)
+        except Exception:
+            logger.warning(
+                "Could not stamp the case id onto pending adopt %s; "
+                "crash recovery for it will report an unknown outcome",
+                pending, exc_info=True,
+            )
 
     def _already_answered(self, correlation_id: str) -> AdoptResult | None:
         path = self._transport.result_path(correlation_id)
@@ -402,8 +438,86 @@ class SignalingAdapter:
             path.unlink(missing_ok=True)
         return count
 
-    def _count_adopt_pending(self) -> int:
-        return len(_yaml_files(self._transport.adopt_stage("pending")))
+    def _settle_adopt_pending(self) -> int:
+        """Settle adopt requests a crash caught mid-execution.
+
+        Adopt is the one request type whose outcome recovery cannot assume.
+        Requeueing blindly would re-run against a source the previous attempt
+        may have already consumed, and erroring blindly would tell a submitter
+        "failed" about a case that is live in managed storage right now. So the
+        stamped ``case_id`` decides it: the store is asked what actually landed,
+        and the submitter is told that.
+
+        What it must never do is leave the request in ``pending/``. A submitter
+        polling a result path cannot distinguish "still working" from "the
+        process that was adopting your case died three restarts ago", and that
+        is the one answer no timeout ever resolves.
+        """
+        count = 0
+        for path in _yaml_files(self._transport.adopt_stage("pending")):
+            try:
+                req = AdoptRequest.load(str(path), acquire_lock=False)
+            except Exception:
+                logger.warning("Discarding unreadable in-flight adopt request %s", path)
+                path.unlink(missing_ok=True)
+                continue
+            if self._already_answered(req.correlation_id) is not None:
+                # The crash landed between publishing and cleanup; the published
+                # result is authoritative and must not be overwritten.
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                self._transport.publish_result(
+                    req.correlation_id, self._recovered_adopt_result(req)
+                )
+                count += 1
+            except Exception:
+                logger.exception("Could not settle in-flight adopt request %s", path)
+            path.unlink(missing_ok=True)
+        return count
+
+    def _recovered_adopt_result(self, req: AdoptRequest) -> AdoptResult:
+        """Reconstruct the outcome of an interrupted adopt from managed storage.
+
+        Uses ``locate()`` rather than the store directly — the adapter drives the
+        manager's public API, and by the time adapter recovery runs the fleet has
+        already rebuilt its pool, so a readmitted case is found either way.
+        """
+        loc = self._manager.locate(req.case_id) if req.case_id else None
+        if loc is not None and loc.status == LIVE:
+            return AdoptResult(
+                status="completed",
+                case_id=req.case_id or "",
+                case_folder=str(loc.case_folder),
+                source_folder=req.source_folder,
+                correlation_id=req.correlation_id,
+            )
+        if loc is not None:
+            # It landed, then adopt's own failure path moved it out of live
+            # storage. The submitter needs the status, not a bare "error".
+            return AdoptResult(
+                status="error",
+                case_id=req.case_id or "",
+                case_folder=str(loc.case_folder),
+                source_folder=req.source_folder,
+                correlation_id=req.correlation_id,
+                rejection_reason=(
+                    "dead-letter: recovered from pending/; the case is in managed "
+                    f"storage with status {loc.status!r}"
+                ),
+            )
+        detail = (
+            "the case never reached managed storage"
+            if req.case_id
+            else "outcome unknown (no case id was recorded before the transfer)"
+        )
+        return AdoptResult(
+            status="error",
+            case_id=req.case_id or "",
+            source_folder=req.source_folder,
+            correlation_id=req.correlation_id,
+            rejection_reason=f"dead-letter: recovered from pending/; {detail}",
+        )
 
     # ------------------------------------------------------------------
     # Helpers
