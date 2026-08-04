@@ -61,7 +61,7 @@ class CaseManagerClient:
         return self._manager.locate(case_id)
 
     def locate_all(self, *, external_key: str) -> list[CaseLocation]:
-        return self._manager.locate_all(external_key=external_key)
+        return self._manager.locate_by_external_key(external_key=external_key)
 
     def reader(
         self,
@@ -77,10 +77,15 @@ class CaseManagerClient:
     def readers_by_external_key(self, external_key: str) -> list[FolderBackedCaseReader]:
         return self._manager.readers_by_external_key(external_key)
 
-    def list_live_pool(self) -> list[CaseLocation]:
+    def list_live(self) -> list[CaseLocation]:
+        """Cases this process's manager is still actively driving.
+
+        Empty when this client has no admitted pool (typical out-of-process
+        use). For durable live-on-disk inventory, use store/fleet surfaces.
+        """
         return [
             self._manager.locate(r.case_id)
-            for r in self._manager.iter_live_pool()
+            for r in self._manager.iter_live()
             if self._manager.locate(r.case_id) is not None
         ]
 

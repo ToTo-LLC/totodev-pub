@@ -297,3 +297,52 @@ async def test_an_orphan_with_no_store_entry_is_absorbed(tmp_path):
     assert dest is not None and (dest / RECORD_NAME).exists()
     assert manager._store.status_of(case.case_id) == QUARANTINED
     assert case.case_id in [reader.case_id for reader in manager.iter_quarantine()]
+
+
+@pytest.mark.asyncio
+async def test_iter_quarantine_orders_oldest_first_by_default(tmp_path, monkeypatch):
+    """Matches store non-live ordering: oldest activity first; reverse=True flips it."""
+    from pathlib import Path
+
+    from totodev_pub.case_manager_support.case_store import LocalCaseStore
+
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    staging.mkdir()
+
+    early = await adopt_into_live(
+        manager, seed_detached_case(TicketCase, staging / "early").case_folder
+    )
+    late = await adopt_into_live(
+        manager, seed_detached_case(TicketCase, staging / "late").case_folder
+    )
+    early_id, late_id = early.case_id, late.case_id
+    times = {
+        early_id: datetime(2026, 7, 1, 12, 0, 0),
+        late_id: datetime(2026, 8, 15, 12, 0, 0),
+    }
+    real_activity = LocalCaseStore._activity_at
+
+    def fake_activity(self, folder):
+        for e in list(self.iter_by_status(LIVE)) + list(self.iter_by_status(QUARANTINED)):
+            if e.case_folder.resolve() == Path(folder).resolve() and e.case_id in times:
+                return times[e.case_id]
+        return real_activity(self, folder)
+
+    monkeypatch.setattr(LocalCaseStore, "_activity_at", fake_activity)
+
+    early.case_detach()
+    late.case_detach()
+    await quarantine_case(
+        manager._store, manager._manager_dir, early_id, early.case_folder, "early"
+    )
+    await quarantine_case(
+        manager._store, manager._manager_dir, late_id, late.case_folder, "late"
+    )
+
+    assert [r.case_id for r in manager.iter_quarantine()] == [early_id, late_id]
+    assert [r.case_id for r in manager.iter_quarantine(reverse=True)] == [late_id, early_id]
+    assert [r.case_id for r in manager.iter_quarantine(
+        after=datetime(2026, 8, 1), before=datetime(2026, 8, 31, 23, 59)
+    )] == [late_id]

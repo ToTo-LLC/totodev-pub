@@ -58,7 +58,7 @@ async def test_termination_announces_the_departure(tmp_path):
     await manager._driver.fire(case.case_folder, "finish")
 
     notices = []
-    manager.on_notice(notices.append)
+    manager.subscribe_notices(notices.append)
     manager._reconcile_terminal_in_pool()
     await manager._maintenance_tick()
 
@@ -78,7 +78,7 @@ async def test_quarantine_announces_the_departure(tmp_path):
     case.case_detach()
 
     notices = []
-    manager.on_notice(notices.append)
+    manager.subscribe_notices(notices.append)
     await manager._quarantine(case.case_id, case.case_folder, "unreadable record")
 
     assert CaseNoticeKind.CASE_QUARANTINED in _kinds(notices)
@@ -94,7 +94,7 @@ async def test_eject_announces_the_departure(tmp_path):
     await manager.start()
 
     notices = []
-    manager.on_notice(notices.append)
+    manager.subscribe_notices(notices.append)
     try:
         await manager.eject_from_pool(
             case.case_id, export_to_folder=tmp_path / "exported", timeout=5.0

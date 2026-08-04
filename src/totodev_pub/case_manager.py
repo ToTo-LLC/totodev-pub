@@ -636,8 +636,9 @@ class CaseManager:
         failures raise.
 
         When the case actually lands in quarantine, a ``CASE_QUARANTINED``
-        notice is emitted; subscribe with ``on_notice()`` to observe completion
-        without awaiting this call (useful if it returned ``None`` on timeout).
+        notice is emitted; subscribe with ``subscribe_notices()`` to observe
+        completion without awaiting this call (useful if it returned ``None``
+        on timeout).
         """
         if not reason or not reason.strip():
             raise ValueError("quarantine_case requires a non-empty reason")
@@ -750,7 +751,7 @@ class CaseManager:
         address exactly one case.
         """
         if external_key is not None:
-            hits = self.locate_all(external_key=external_key)
+            hits = self.locate_by_external_key(external_key=external_key)
             if not hits:
                 raise FileNotFoundError(f"No case with external_key {external_key!r}")
             if len(hits) > 1:
@@ -766,7 +767,7 @@ class CaseManager:
     def readers_by_external_key(self, external_key: str) -> list[FolderBackedCaseReader]:
         """Every case carrying ``external_key`` — ambiguity-tolerant ``reader()``.
         """
-        return [FolderBackedCaseReader(loc.case_folder) for loc in self.locate_all(external_key=external_key)]
+        return [FolderBackedCaseReader(loc.case_folder) for loc in self.locate_by_external_key(external_key=external_key)]
 
     async def fire(
         self,
@@ -939,11 +940,11 @@ class CaseManager:
         entry = self._store.find(case_id)
         return None if entry is None else self._to_location(entry)
 
-    def locate_all(self, *, external_key: str) -> list[CaseLocation]:
+    def locate_by_external_key(self, *, external_key: str) -> list[CaseLocation]:
         """Every case carrying ``external_key``.
 
         Full scan (external keys are not indexed). Prefer ``locate(case_id)``
-        on hot paths.
+        on hot paths.  This is a potentially expensive operation.
         """
         hits: list[CaseLocation] = []
         for entry in self._store.iter_all():
@@ -951,19 +952,21 @@ class CaseManager:
                 hits.append(self._to_location(entry))
         return hits
 
-    def iter_live_pool(self) -> Iterator[FolderBackedCaseReader]:
-        """Readers over cases the pool is actively driving.
+    def iter_live(self) -> Iterator[FolderBackedCaseReader]:
+        """Read-only views of cases this manager is still working.
 
-        Narrower than ``iter_live_bucket()``, which includes every live-status
-        case whether or not this process holds it.
+        Includes only cases that can still make progress under this process.
+        Cases that have finished, or that have been asked to leave (eject,
+        quarantine, and similar), are skipped even if cleanup has not finished
+        yet.
+
+        Reflects what *this* manager is driving right now — not every live case
+        that may exist on disk. A manager that is not running the fleet (for
+        example one opened only via ``CaseManagerClient``) will usually yield
+        nothing.
         """
-        for case in self._driver:
+        for case in self._driver.active_cases():
             yield FolderBackedCaseReader(case.case_folder)
-
-    def iter_live_bucket(self) -> Iterator[FolderBackedCaseReader]:
-        """Every case at live status, whether or not the pool currently holds it.
-        """
-        yield from self._readers_at(LIVE)
 
     def iter_terminal(
         self,
@@ -972,49 +975,83 @@ class CaseManager:
         after: datetime | date | None = None,
         before: datetime | date | None = None,
     ) -> Iterator[FolderBackedCaseReader]:
-        """Archived cases, optionally filtered by activity-time bounds."""
-        for entry in self._store.iter_by_status(
+        """Archived cases, optionally filtered by activity-time bounds.
+
+        Default order is oldest first; pass ``reverse=True`` for newest first.
+        """
+        yield from self._readers_at(
             TERMINATED, reverse=reverse, after=after, before=before
-        ):
-            yield FolderBackedCaseReader(entry.case_folder)
+        )
 
-    def iter_quarantine(self) -> Iterator[FolderBackedCaseReader]:
-        """Cases the manager has stopped driving. See ``support.quarantine``."""
-        yield from self._readers_at(QUARANTINED)
+    def iter_quarantine(
+        self,
+        *,
+        reverse: bool = False,
+        after: datetime | date | None = None,
+        before: datetime | date | None = None,
+    ) -> Iterator[FolderBackedCaseReader]:
+        """Cases the manager has stopped driving but kept for repair.
+
+        Same time filters and ordering as ``iter_terminal``: oldest first by
+        default, ``reverse=True`` for newest first. See ``support.quarantine``.
+        """
+        yield from self._readers_at(
+            QUARANTINED, reverse=reverse, after=after, before=before
+        )
 
     # ------------------------------------------------------------------
-    # Observability hooks
+    # Host seams
     # ------------------------------------------------------------------
 
-    def on_notice(self, callback: Callable[[CaseNotice], None]) -> int:
-        """Subscribe to manager notices. Returns a handle for ``off_notice()``.
+    def subscribe_notices(self, callback: Callable[[CaseNotice], None]) -> int:
+        """Subscribe to in-process manager announcements. Returns a handle for
+        ``unsubscribe_notices()``.
 
-        One channel carries problems and lifecycle notices for cases leaving the
-        pool (terminate / eject / quarantine); filter on ``notice.kind.is_lifecycle``.
-        Handlers must not block (they run on the manager's loop). Exceptions in a
-        handler are swallowed.
+        This is not a live feed of case activity. It publishes discrete announcements
+        in one channel:
+
+        - **Problems** the operator may need to act on (stalls, adopt failures,
+          manager unresponsive, maintenance-item failures, …).
+        - **Departures** when a case leaves the pool
+          (``CASE_TERMINATED`` / ``CASE_QUARANTINED`` / ``CASE_EJECTED``).
+          Filter with ``notice.kind.is_lifecycle``.
+
+        Delivery is at-most-once and in-process only — not an audit log. Handlers
+        must not block (they run on the manager's loop); exceptions are swallowed.
         """
         return self._notices.register(callback)
 
-    def off_notice(self, handle: int) -> None:
-        """Unsubscribe. Unknown handles are ignored."""
+    def unsubscribe_notices(self, handle: int) -> None:
+        """Drop a subscription previously returned by ``subscribe_notices()``.
+
+        Unknown handles are ignored.
+        """
         self._notices.unregister(handle)
 
     def on_loop_failure(self, callback: Callable[[BaseException], None]) -> None:
-        """Register the host callback invoked when the manager loop gives up after
-        repeated consecutive failures.
+        """Register the host's terminal handoff when this manager can no longer run.
 
-        ``serve()`` connects this to the watchdog. With no callback the loop
-        re-raises (embedded usage).
+        Invoked after repeated consecutive manager-loop failures, and when filespace
+        lease ownership is lost. Exactly one callback is kept (later registration
+        replaces earlier). The callback runs synchronously on the event-loop thread
+        and must not await work on that loop.
+
+        ``serve()`` wires this to the watchdog kill path (or an immediate hard exit
+        when the watchdog is disabled). With no callback the loop re-raises — the
+        expected path for embedded/test usage.
         """
         self._loop_failure_cb = callback
 
     def on_maintenance(self, callback: Callable[[], Awaitable[None]]) -> None:
-        """Run ``callback`` at the head of every maintenance tick.
+        """Register async work to run at the head of every maintenance tick.
 
-        Callbacks run before the same tick's advances, so work added here can be
-        advanced soon. Each callback is isolated: a raise is logged and noticed,
-        and the rest of the tick continues.
+        This is a participation seam, not an event subscription: callbacks do work
+        on the manager's cadence (e.g. mailbox intake). They run before that tick's
+        pool advances, so work queued here can be stepped in the same tick.
+
+        Multiple callbacks are supported (append order). Each is isolated — a raise
+        is logged and noticed, and the rest of the tick continues. There is no
+        unregister API today.
         """
         self._maintenance_cbs.append(callback)
 
@@ -1723,8 +1760,17 @@ class CaseManager:
                 child.rename(new_name)
         return {"seen": seen, "admitted": admitted, "rejected": rejected, "skipped": skipped}
 
-    def _readers_at(self, status: str) -> Iterator[FolderBackedCaseReader]:
-        for entry in self._store.iter_by_status(status):
+    def _readers_at(
+        self,
+        status: str,
+        *,
+        reverse: bool = False,
+        after: datetime | date | None = None,
+        before: datetime | date | None = None,
+    ) -> Iterator[FolderBackedCaseReader]:
+        for entry in self._store.iter_by_status(
+            status, reverse=reverse, after=after, before=before
+        ):
             yield FolderBackedCaseReader(entry.case_folder)
 
     def _to_location(self, entry: CaseEntry) -> CaseLocation:

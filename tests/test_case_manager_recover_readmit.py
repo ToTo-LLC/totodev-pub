@@ -145,7 +145,7 @@ async def test_an_unrehydratable_orphan_escalates(tmp_path, monkeypatch):
 
     manager2 = provision_manager(tmp_path)
     notices = []
-    manager2.on_notice(notices.append)
+    manager2.subscribe_notices(notices.append)
     def unreadable(folder):
         raise ValueError("record is unreadable")
 
@@ -210,7 +210,7 @@ async def test_a_pooled_case_the_store_no_longer_calls_live_is_evicted(tmp_path,
     assert case_id in {c.case_id for c in manager._driver}, "precondition: still pooled"
 
     notices = []
-    manager.on_notice(notices.append)
+    manager.subscribe_notices(notices.append)
     with caplog.at_level(logging.ERROR):
         report = await manager._readmit_orphans()
 

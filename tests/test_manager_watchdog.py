@@ -43,7 +43,7 @@ async def test_pulse_stuck_triggers_kill_ladder(tmp_path):
     manager = provision_manager(tmp_path, watchdog_pulse_stuck_secs=0.1)
     await manager.recover()
     escalations = []
-    manager.on_notice(escalations.append)
+    manager.subscribe_notices(escalations.append)
     # Simulate a running manager whose pulse went silent long ago.
     manager._running = True
     manager._last_pulse = time.monotonic() - 99.0
@@ -149,7 +149,7 @@ async def test_alarm_only_diagnoses_without_dying(tmp_path):
     )
     await manager.recover()
     escalations = []
-    manager.on_notice(escalations.append)
+    manager.subscribe_notices(escalations.append)
     manager._running = True
     manager._last_pulse = time.monotonic() - 99.0
     exit_fn = ExitRecorder()
@@ -200,7 +200,7 @@ async def test_tick_slow_alarms_but_never_kills(tmp_path, action):
     )
     await manager.recover()
     escalations = []
-    manager.on_notice(escalations.append)
+    manager.subscribe_notices(escalations.append)
     manager._running = True
     manager._run_task = None
     started = time.monotonic() - 5.0
@@ -249,7 +249,7 @@ async def test_mailbox_neglect_kills_when_intake_goes_unserved(tmp_path):
     manager = provision_manager(tmp_path, watchdog_mailbox_stale_secs=0.2)
     await manager.recover()
     escalations = []
-    manager.on_notice(escalations.append)
+    manager.subscribe_notices(escalations.append)
 
     transport = transport_for(manager)
     intake = transport.fire_intake()

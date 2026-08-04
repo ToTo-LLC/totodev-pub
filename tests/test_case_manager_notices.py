@@ -14,7 +14,7 @@ async def test_escalation_handler(tmp_path):
     def handler(esc):
         seen.append(esc.kind)
 
-    manager.on_notice(handler)
+    manager.subscribe_notices(handler)
     staging = tmp_path / "staging" / "bad"
     staging.mkdir(parents=True)
     # Reject adopt — active lease

@@ -100,7 +100,7 @@ async def test_terminal_reconcile_isolates_one_failing_case(tmp_path, monkeypatc
     monkeypatch.setattr(case_manager_module, "begin_termination", flaky_begin_termination)
 
     notices = []
-    manager.on_notice(notices.append)
+    manager.subscribe_notices(notices.append)
 
     count = manager._reconcile_terminal_in_pool()
 
@@ -125,7 +125,7 @@ async def test_escalation_detection_failure_does_not_abort_the_tick(tmp_path, mo
     monkeypatch.setattr(manager, "_detect_escalations", boom)
 
     notices = []
-    manager.on_notice(notices.append)
+    manager.subscribe_notices(notices.append)
 
     await manager._maintenance_tick()
 

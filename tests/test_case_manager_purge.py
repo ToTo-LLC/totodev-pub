@@ -132,7 +132,7 @@ async def test_maintenance_tick_survives_a_purge_failure(tmp_path, monkeypatch):
         lambda folder, now, min_age_secs: True,
     )
     escalations = []
-    manager.on_notice(escalations.append)
+    manager.subscribe_notices(escalations.append)
 
     await manager._maintenance_tick()  # must not raise
 

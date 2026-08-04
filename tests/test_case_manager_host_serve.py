@@ -282,7 +282,7 @@ async def test_three_loop_failures_exit_70_via_the_watchdog(
     """The highest-risk gap: loop failure -> ladder -> process exit 70."""
     manager = provision_manager(tmp_path)
     escalations = []
-    manager.on_notice(escalations.append)
+    manager.subscribe_notices(escalations.append)
     _failing_tick(manager, monkeypatch)  # before serve(); recover() never calls it
 
     await _serve_until_exit(manager, hard_exit_codes)
@@ -302,7 +302,7 @@ async def test_three_loop_failures_exit_70_without_a_watchdog(
     """watchdog_enabled=False must still fail loud rather than idle forever."""
     manager = provision_manager(tmp_path, watchdog_enabled=False)
     escalations = []
-    manager.on_notice(escalations.append)
+    manager.subscribe_notices(escalations.append)
     _failing_tick(manager, monkeypatch)
 
     await _serve_until_exit(manager, hard_exit_codes)

@@ -93,7 +93,7 @@ async def test_an_unreadable_termination_ticket_is_retried_then_retired(tmp_path
     _corrupt(ticket_file)
 
     notices = []
-    manager.on_notice(notices.append)
+    manager.subscribe_notices(notices.append)
 
     # Below the threshold it stays pending: a transient failure must not spend
     # the whole budget on its first occurrence.
@@ -223,7 +223,7 @@ async def test_an_unreadable_quarantine_ticket_is_replaced_not_looped(tmp_path):
         _corrupt(ticket_file)
 
         notices = []
-        manager.on_notice(notices.append)
+        manager.subscribe_notices(notices.append)
         for _ in range(_ATTEMPTS):
             await manager._maintenance_tick()
 
