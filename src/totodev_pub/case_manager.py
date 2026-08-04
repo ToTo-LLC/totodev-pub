@@ -310,6 +310,7 @@ class CaseManager:
         self._loop_failure_cb: Callable[[BaseException], None] | None = None
         self._terminated_handle: Any = None
         self._eject_waiters: dict[str, asyncio.Future[EjectResult]] = {}
+        self._quarantine_waiters: dict[str, asyncio.Future[Path]] = {}
         # Liveness stamps. Written only here, read from the watchdog thread —
         # which is why they are plain floats and never a compound object.
         self._last_pulse: float | None = None
@@ -540,7 +541,8 @@ class CaseManager:
         return result
 
     def allocate_staging_folder(self) -> Path:
-        """Allocate same-filesystem scratch for assembling a case before adopt.
+        """Allocate one folder into which a case may be placed, typically prior
+        to calling adopt_case().
 
         Purpose: cases built here adopt cheaply — contents can be renamed into
         managed storage instead of copied across devices. The folder is
@@ -571,7 +573,8 @@ class CaseManager:
         export_to_folder: Path,
         timeout: float | None = None,
     ) -> EjectResult:
-        """Export a case out of managed storage and wait until export completes.
+        """Export a case out of managed storage and wait until export completes,
+        including all file move/copy.
 
         Halts the case and waits until its active advance finishes first, so a
         mid-advance eject works. ``timeout`` bounds each phase; on expiry
@@ -618,27 +621,73 @@ class CaseManager:
         reason: str,
         timeout: float | None = None,
     ) -> Path | None:
-        """Park a live pooled case in quarantine for operator investigation.
+        """Force a live case into quarantine, stopping it but keeping
+        it in the CaseManager's storage (restorable via ``reopen_case()``).
 
-        Stops driving the case but keeps it in managed storage (unlike
-        ``eject_from_pool``, which exports it out). Requires a non-empty
-        ``reason``; that text is recorded on the case journal. Halts any
-        in-flight advance first so the case can leave the pool cleanly.
+        Requires a non-empty ``reason``; that text is recorded on the case
+        journal. Stops further scheduling and waits until the case is visible
+        via ``iter_quarantine()`` (any in-flight step is allowed to finish; it
+        is not cancelled).
 
-        Returns the quarantined folder path, or ``None`` if the folder move
-        was deferred behind a still-held lease (the maintenance tick finishes
-        it). Resume later with ``reopen_case()``.
+        Returns the quarantined folder path when the case can be found among
+        quarantined cases. Returns ``None`` if ``timeout`` elapses first —
+        not a malfunction; the case may still appear in quarantine later
+        (for example after a deferred lease-aware move). Misuse and unexpected
+        failures raise.
+
+        When the case actually lands in quarantine, a ``CASE_QUARANTINED``
+        notice is emitted; subscribe with ``on_notice()`` to observe completion
+        without awaiting this call (useful if it returned ``None`` on timeout).
         """
         if not reason or not reason.strip():
             raise ValueError("quarantine_case requires a non-empty reason")
         case = self.get_live(case_id)
-        await self._halt_and_settle(case.case_folder, case_id=case_id, timeout=timeout)
+        reason_text = reason.strip()
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+
+        def remaining() -> float | None:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - loop.time())
+
+        try:
+            await self._halt_and_settle(
+                case.case_folder, case_id=case_id, timeout=remaining()
+            )
+        except EjectTimeoutError:
+            return None
+
         try:
             removed = self._driver.remove(case.case_folder)
         except KeyError:
             raise LiveCaseNotFoundError(case_id) from None
         removed.case_detach()
-        return await self._quarantine(case_id, removed.case_folder, reason.strip())
+
+        fut: asyncio.Future[Path] = loop.create_future()
+        self._quarantine_waiters[case_id] = fut
+        try:
+            landed = await self._quarantine(
+                case_id, removed.case_folder, reason_text
+            )
+            if landed is not None:
+                return landed
+            if fut.done():
+                return fut.result()
+            entry = self._store.find(case_id)
+            if entry is not None and entry.status == QUARANTINED:
+                return entry.case_folder
+            rem = remaining()
+            if rem is not None and rem <= 0:
+                return None
+            try:
+                if rem is None:
+                    return await fut
+                return await asyncio.wait_for(fut, timeout=rem)
+            except asyncio.TimeoutError:
+                return None
+        finally:
+            self._quarantine_waiters.pop(case_id, None)
 
     async def reopen_case(self, case_id: str) -> None:
         """Return a quarantined case to the live pool after the owner has fixed it
@@ -1439,6 +1488,7 @@ class CaseManager:
         )
         if landed is not None:
             self._emit_notice("CASE_QUARANTINED", ticket.case_id, landed, ticket.reason)
+            self._resolve_quarantine_waiter(ticket.case_id, landed)
 
     async def _advance_eject_ticket(self, ticket_file: Path) -> None:
         """Process one eject ticket and complete its waiter either way.
@@ -1644,7 +1694,13 @@ class CaseManager:
         )
         if landed is not None:
             self._emit_notice("CASE_QUARANTINED", case_id, landed, reason)
+            self._resolve_quarantine_waiter(case_id, landed)
         return landed
+
+    def _resolve_quarantine_waiter(self, case_id: str, landed: Path) -> None:
+        fut = self._quarantine_waiters.get(case_id)
+        if fut is not None and not fut.done():
+            fut.set_result(landed)
 
     async def _scan_adopt_drop(self) -> dict[str, int]:
         drop = self._manager_dir / self._policy.adopt_drop_subdir

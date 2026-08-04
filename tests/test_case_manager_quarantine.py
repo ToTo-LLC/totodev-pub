@@ -9,6 +9,9 @@ moving its folder anyway would be a split-brain. So the move waits, behind a
 durable ticket the manager re-drives every tick.
 """
 
+import asyncio
+from datetime import datetime, timezone
+
 import pytest
 
 from case_manager_test_utils import (
@@ -24,10 +27,24 @@ from totodev_pub.case_manager_support.quarantine import (
     pending_quarantine_tickets,
     quarantine_case,
     quarantine_ticket_exists,
+    quarantine_ticket_path,
+    record_quarantine_reason,
 )
+from totodev_pub.folder_backed_case import FolderBackedCase
 from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournalView
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
+
+
+class BlockingTicketCase(FolderBackedCase):
+    """Like TicketCase, but one step can be held mid-advance behind a gate."""
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["[*] --> open -- work --> done --> [*]"]
+
+    async def perform_work(self, tctx):
+        await self._gate.wait()
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +91,79 @@ async def test_operator_quarantine_requires_a_reason(tmp_path):
 
     with pytest.raises(ValueError, match="reason"):
         await manager.quarantine_case(case.case_id, reason="   ")
+
+
+@pytest.mark.asyncio
+async def test_quarantine_timeout_before_completion_returns_none(tmp_path):
+    """Timeout is 'not done yet', not a malfunction — None, not an exception."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    case_type_registry.register_case_types(BlockingTicketCase)
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(BlockingTicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+    case._gate = asyncio.Event()
+    manager._driver.boost(case.case_folder)
+    await manager._driver.advance(suggested_interval_secs=0.0)
+    assert manager._driver._by_folder[case.case_folder].in_flight
+
+    dest = await manager.quarantine_case(case_id, reason="park while busy", timeout=0.05)
+
+    assert dest is None
+    assert case_id not in [r.case_id for r in manager.iter_quarantine()]
+
+    case._gate.set()
+    await manager._driver.settle()
+
+
+@pytest.mark.asyncio
+async def test_operator_quarantine_waits_until_deferred_move_lands(tmp_path):
+    """Success means visible in quarantine — wait out a deferred relocate."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+
+    real_quarantine = manager._quarantine
+
+    async def defer_once(cid: str, folder, reason: str):
+        # Simulate lease-held deferral; maintenance finishes the move.
+        record_quarantine_reason(folder, cid, reason)
+        ticket_path = quarantine_ticket_path(manager._manager_dir, cid)
+        ticket_path.parent.mkdir(parents=True, exist_ok=True)
+        QuarantineTicket(
+            case_id=cid,
+            case_folder=str(folder),
+            reason=reason,
+            enqueued_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ).save(str(ticket_path), retain_lock=False)
+        manager._quarantine = real_quarantine
+        return None
+
+    manager._quarantine = defer_once  # type: ignore[method-assign]
+
+    async def pump_maintenance():
+        while manager._store.status_of(case_id) != QUARANTINED:
+            await manager._maintenance_tick()
+            await asyncio.sleep(0.01)
+
+    pump = asyncio.create_task(pump_maintenance())
+    try:
+        dest = await manager.quarantine_case(
+            case_id, reason="wait for deferred land", timeout=2.0
+        )
+    finally:
+        pump.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pump
+
+    assert dest is not None
+    assert case_id in [r.case_id for r in manager.iter_quarantine()]
 
 
 @pytest.mark.asyncio
