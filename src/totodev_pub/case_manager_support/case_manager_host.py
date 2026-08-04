@@ -51,6 +51,7 @@ from totodev_pub.case_manager_support.watchdog import (
 
 if TYPE_CHECKING:
     from totodev_pub.case_manager import CaseManager
+    from totodev_pub.case_manager_support.fleet_status_board import FleetStatusBoard
     from totodev_pub.case_manager_support.signaling_adapter import SignalingAdapter
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ async def serve(
     manager: "CaseManager",
     *,
     adapter: "SignalingAdapter | None" = None,
+    fleet_status: "FleetStatusBoard | bool" = True,
     stop_grace_secs: float = 30.0,
     stop_when: Callable[[], bool] | None = None,
     stop_when_empty: bool = False,
@@ -156,6 +158,11 @@ async def serve(
     knows what a mailbox is. Shutdown is **not** part of it: this host polls the
     shutdown mailbox unconditionally, so ``enable_mailbox=False`` disables
     request intake without disabling the ability to ask the process to stop.
+
+    ``fleet_status`` controls the optional fleet status board observer. ``True``
+    (default) attaches a publishing ``FleetStatusBoard`` when
+    ``policy.enable_fleet_status_board`` is set; ``False`` skips; pass an
+    instance to use a custom board (e.g. ``publish_file=False``).
 
     ``stop_when`` is polled once per maintenance interval on the manager's
     event loop — a blocking predicate is the caller's bug, exactly like a
@@ -202,6 +209,28 @@ async def serve(
     if adapter is not None:
         adapter.recover()
         adapter.attach()
+
+    board: FleetStatusBoard | None = None
+    if fleet_status is True:
+        if manager._policy.enable_fleet_status_board:
+            from totodev_pub.case_manager_support.fleet_status_board import (
+                FleetStatusBoard as _FleetStatusBoard,
+            )
+            board = _FleetStatusBoard(
+                manager,
+                publish_file=True,
+                full_flush_interval_secs=(
+                    manager._policy.fleet_status_full_flush_interval_secs
+                ),
+                terminal_retention_secs=(
+                    manager._policy.fleet_status_terminal_retention_secs
+                ),
+            )
+            board.attach()
+    elif fleet_status is not False:
+        board = fleet_status
+        board.attach()
+
     await manager.start()
 
     action = _tracer_downgrade(manager._policy)
@@ -321,6 +350,8 @@ async def serve(
         shutdown_poller.cancel()
         if poller is not None:
             poller.cancel()
+        if board is not None:
+            board.detach()
 
     # Park before any deliberate shutdown: an armed watchdog during a settle
     # (which stops the pulse by design) would turn every clean docker stop into

@@ -1,6 +1,6 @@
 # Part of the totodev_pub library.
 
-"""Fleet status board: writer, rows, case_ext_status_info, retention (Fleet Status Board Spec)."""
+"""Fleet status board: observer, rows, case_ext_status_info, retention."""
 
 import asyncio
 import json
@@ -15,33 +15,33 @@ from case_manager_test_utils import (
     provision_manager,
     seed_detached_case,
 )
-from totodev_pub.case_manager_support.constants import (
-    FLEET_BOARD_DISABLED_PREFIX,
-    FLEET_STATUS_FILENAME,
-)
+from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME
 from totodev_pub.case_manager import CaseManager
-from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.case_manager_support.fleet_status import (
-    FleetStatusBoardWriter,
     build_live_row,
     collect_case_status_facts,
     parse_board_text,
     render_board_body,
 )
+from totodev_pub.case_manager_support.fleet_status_board import FleetStatusBoard
+from totodev_pub.case_manager_support.fleet_status_events import FleetEventKind
 
 
 def board_path(manager):
     return manager._manager_dir / FLEET_STATUS_FILENAME
 
 
-def provision_fleet_manager(tmp_path, **overrides):
-    return provision_manager(
-        tmp_path,
-        enable_fleet_status_board=True,
-        fleet_status_full_flush_interval_secs=0.0,
-        **overrides,
+def attach_board(manager, **kwargs) -> FleetStatusBoard:
+    defaults = dict(
+        publish_file=True,
+        full_flush_interval_secs=0.0,
+        terminal_retention_secs=120.0,
     )
+    defaults.update(kwargs)
+    board = FleetStatusBoard(manager, **defaults)
+    board.attach()
+    return board
 
 
 async def wait_for(predicate, *, timeout=3.0):
@@ -50,31 +50,6 @@ async def wait_for(predicate, *, timeout=3.0):
             return True
         await asyncio.sleep(0.05)
     return predicate()
-
-
-# ---------------------------------------------------------------------------
-# Known location / disabled sentinel
-# ---------------------------------------------------------------------------
-
-
-def test_disabled_board_holds_sentinel(tmp_path):
-    manager = provision_manager(tmp_path, enable_fleet_status_board=False)
-    path = board_path(manager)
-    assert path.exists()
-    first = path.read_text(encoding="utf-8").splitlines()[0]
-    assert first.startswith(FLEET_BOARD_DISABLED_PREFIX)
-    assert "enable_fleet_status_board" in first
-    with pytest.raises(FleetStatusBoardDisabledError):
-        parse_board_text(path.read_text(encoding="utf-8"))
-
-
-def test_enabled_board_replaces_sentinel(tmp_path):
-    manager = provision_fleet_manager(tmp_path)
-    text = board_path(manager).read_text(encoding="utf-8")
-    assert not any(
-        line.startswith(FLEET_BOARD_DISABLED_PREFIX) for line in text.splitlines()
-    )
-    assert parse_board_text(text) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +154,7 @@ def test_case_ext_status_info_failure_yields_vanilla_row(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Writer notify: skip-if-unchanged, append, full flush
+# Board notify: skip-if-unchanged, append, full flush
 # ---------------------------------------------------------------------------
 
 
@@ -192,161 +167,191 @@ def _jsonl_data_lines(path):
 
 
 def test_notify_skips_unchanged_row_unless_forced(tmp_path):
-    mgr_dir = tmp_path / "mgr"
-    mgr_dir.mkdir()
-    writer = FleetStatusBoardWriter(
-        mgr_dir, full_flush_interval_secs=999.0, terminal_retention_secs=120.0
+    manager = provision_manager(tmp_path)
+    board = FleetStatusBoard(
+        manager, full_flush_interval_secs=999.0, terminal_retention_secs=120.0
     )
+    board._seeded = True
+    if not board.board_path.parent.exists():
+        board.board_path.parent.mkdir(parents=True)
+    from totodev_pub.case_manager_support.fleet_status import publish_board
+    publish_board(board.board_path, "")
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
-    assert writer.notify(case) is True  # first sighting
-    mtime1 = writer.board_path.stat().st_mtime_ns
-    size1 = writer.board_path.stat().st_size
-    assert writer.notify(case) is False  # unchanged → silent skip
-    assert writer.board_path.stat().st_mtime_ns == mtime1
-    assert writer.board_path.stat().st_size == size1
-    assert writer.notify(case, force=True) is True
-    assert writer.board_path.stat().st_mtime_ns != mtime1
+    assert board.notify(case) is True
+    mtime1 = board.board_path.stat().st_mtime_ns
+    size1 = board.board_path.stat().st_size
+    assert board.notify(case) is False
+    assert board.board_path.stat().st_mtime_ns == mtime1
+    assert board.board_path.stat().st_size == size1
+    assert board.notify(case, force=True) is True
+    assert board.board_path.stat().st_mtime_ns != mtime1
     case.case_detach()
 
 
 def test_notify_appends_changed_row_last_wins(tmp_path):
-    mgr_dir = tmp_path / "mgr"
-    mgr_dir.mkdir()
-    writer = FleetStatusBoardWriter(
-        mgr_dir, full_flush_interval_secs=999.0, terminal_retention_secs=120.0
+    manager = provision_manager(tmp_path)
+    board = FleetStatusBoard(
+        manager, full_flush_interval_secs=999.0, terminal_retention_secs=120.0
     )
+    board._seeded = True
+    from totodev_pub.case_manager_support.fleet_status import publish_board
+    publish_board(board.board_path, "")
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
-    assert writer.notify(case) is True
+    assert board.notify(case) is True
     case.case_emit_alert_event("ping")
-    assert writer.notify(case) is True
-    lines = _jsonl_data_lines(writer.board_path)
-    assert len(lines) == 2  # two appends, not compacted
-    merged = parse_board_text(writer.board_path.read_text(encoding="utf-8"))
+    assert board.notify(case) is True
+    lines = _jsonl_data_lines(board.board_path)
+    assert len(lines) == 2
+    merged = parse_board_text(board.board_path.read_text(encoding="utf-8"))
     assert merged[case.case_id].alert_count == 1
     case.case_detach()
 
 
 def test_notify_full_flushes_when_interval_elapsed(tmp_path):
-    mgr_dir = tmp_path / "mgr"
-    mgr_dir.mkdir()
-    writer = FleetStatusBoardWriter(
-        mgr_dir, full_flush_interval_secs=0.0, terminal_retention_secs=120.0
+    manager = provision_manager(tmp_path)
+    board = FleetStatusBoard(
+        manager, full_flush_interval_secs=0.0, terminal_retention_secs=120.0
     )
+    board._seeded = True
+    from totodev_pub.case_manager_support.fleet_status import publish_board
+    publish_board(board.board_path, "")
     case = TicketCase.create_case_in_folder(tmp_path / "c1")
-    assert writer.notify(case) is True
+    assert board.notify(case) is True
     case.case_emit_alert_event("one")
-    assert writer.notify(
+    assert board.notify(
         case,
         live_cases=[case],
         locate=lambda _cid: None,
     ) is True
-    lines = _jsonl_data_lines(writer.board_path)
-    assert len(lines) == 1  # compacted full rewrite
-    merged = parse_board_text(writer.board_path.read_text(encoding="utf-8"))
+    lines = _jsonl_data_lines(board.board_path)
+    assert len(lines) == 1
+    merged = parse_board_text(board.board_path.read_text(encoding="utf-8"))
     assert merged[case.case_id].alert_count == 1
     case.case_detach()
 
 
 # ---------------------------------------------------------------------------
-# Manager integration: refresh, terminal retention, folder re-resolution
+# Observer integration
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
+async def test_manager_without_board_does_not_write_fleet_file(tmp_path):
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    await manager.start()
+    try:
+        await asyncio.sleep(0.15)
+        assert not board_path(manager).exists()
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
 async def test_live_case_appears_on_board(tmp_path):
-    manager = provision_fleet_manager(tmp_path)
+    manager = provision_manager(tmp_path, maintenance_interval_secs=0.05)
     staging = tmp_path / "staging"
     staging.mkdir()
     seed_detached_case(ManualCase, staging / "c1", external_key="K-1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
+    board = attach_board(manager)
     await manager.start()
     try:
         def on_board():
-            rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
-            return case.case_id in rows
+            return case.case_id in board.rows()
+
         assert await wait_for(on_board)
-        rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
-        row = rows[case.case_id]
+        row = board[case.case_id]
         assert row.case_state == "waiting"
         assert row.external_key == "K-1"
         assert row.case_type == "ManualCase"
         assert row.is_terminal is False
+        file_rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
+        assert case.case_id in file_rows
     finally:
+        board.detach()
         await manager.stop()
 
 
 @pytest.mark.asyncio
 async def test_terminal_case_retained_then_expired(tmp_path):
-    manager = provision_fleet_manager(
-        tmp_path, fleet_status_terminal_retention_secs=0.6
-    )
+    manager = provision_manager(tmp_path, maintenance_interval_secs=0.05)
     staging = tmp_path / "staging"
     staging.mkdir()
     seed_detached_case(TerminalCase, staging / "c1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
+    board = attach_board(manager, terminal_retention_secs=0.6)
     await manager.start()
     try:
         await manager.fire(case_id=case.case_id, trigger="finish")
 
         def retained_terminal():
-            rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
-            row = rows.get(case.case_id)
+            row = board.rows().get(case.case_id)
             return row is not None and row.is_terminal and row.terminal_at is not None
+
         assert await wait_for(retained_terminal)
 
-        # After the termination pipeline moves the folder, the row re-resolves.
         def folder_reresolved():
             loc = manager.locate(case_id=case.case_id)
             if loc is None or loc.status != "terminated":
                 return False
-            rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
-            row = rows.get(case.case_id)
+            row = board.rows().get(case.case_id)
             return row is not None and str(loc.case_folder) == row.case_folder
+
         assert await wait_for(folder_reresolved)
 
         def expired():
-            rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
-            return case.case_id not in rows
+            return case.case_id not in board.rows()
+
         assert await wait_for(expired, timeout=5.0)
     finally:
+        board.detach()
         await manager.stop()
 
 
 @pytest.mark.asyncio
 async def test_unchanged_fleet_skips_republish(tmp_path):
-    manager = provision_fleet_manager(tmp_path)
+    manager = provision_manager(tmp_path, maintenance_interval_secs=0.05)
     staging = tmp_path / "staging"
     staging.mkdir()
     seed_detached_case(ManualCase, staging / "c1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
+    board = attach_board(manager, full_flush_interval_secs=999.0)
     await manager.start()
     try:
         def on_board():
-            rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
-            return case.case_id in rows
+            return case.case_id in board.rows()
+
         assert await wait_for(on_board)
         mtime1 = board_path(manager).stat().st_mtime_ns
-        await asyncio.sleep(0.3)  # many maintenance ticks, no fleet change
+        assert board.publish_full_if_due(
+            list(manager._driver),
+            locate=lambda cid: manager.locate(cid),
+            force=False,
+        ) is False
+        assert board.publish_full(
+            list(manager._driver),
+            locate=lambda cid: manager.locate(cid),
+        ) is False
         mtime2 = board_path(manager).stat().st_mtime_ns
         assert mtime1 == mtime2
     finally:
+        board.detach()
         await manager.stop()
 
 
 @pytest.mark.asyncio
-async def test_manager_case_ext_status_info_wiring(tmp_path):
+async def test_board_case_ext_status_info_wiring(tmp_path):
     class ExtStatusCase(ManualCase):
         def case_ext_status_info(self):
             return {"from_hook": self.case_id.upper()}
 
     store = CaseManager.open_local_store(
         tmp_path / "cache",
-        enable_fleet_status_board=True,
-        fleet_status_full_flush_interval_secs=0.0,
-        maintenance_interval_secs=0.01,
+        maintenance_interval_secs=0.05,
     )
     case_type_registry.register_case_types(
         TicketCase, TerminalCase, ManualCase, ExtStatusCase
@@ -357,12 +362,104 @@ async def test_manager_case_ext_status_info_wiring(tmp_path):
     seed_detached_case(ExtStatusCase, staging / "c1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
+    board = attach_board(manager)
     await manager.start()
     try:
         def decorated():
-            rows = parse_board_text(board_path(manager).read_text(encoding="utf-8"))
-            row = rows.get(case.case_id)
+            row = board.rows().get(case.case_id)
             return row is not None and row.ext.get("from_hook") == case.case_id.upper()
+
         assert await wait_for(decorated)
     finally:
+        board.detach()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_publish_file_false_updates_memory_only(tmp_path):
+    manager = provision_manager(tmp_path, maintenance_interval_secs=0.05)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seed_detached_case(ManualCase, staging / "c1")
+    await manager.recover()
+    case = await adopt_into_live(manager, staging / "c1")
+    board = attach_board(manager, publish_file=False)
+    await manager.start()
+    try:
+        assert await wait_for(lambda: case.case_id in board.rows())
+        assert not board_path(manager).exists()
+    finally:
+        board.detach()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_board_subscribe_emits_fleet_events(tmp_path):
+    manager = provision_manager(tmp_path, maintenance_interval_secs=0.05)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seed_detached_case(TerminalCase, staging / "c1")
+    await manager.recover()
+    case = await adopt_into_live(manager, staging / "c1")
+    board = attach_board(
+        manager, publish_file=False, terminal_retention_secs=0.5
+    )
+    collected: list = []
+    board.subscribe(lambda events: collected.extend(events))
+    await manager.start()
+    try:
+        await manager.fire(case_id=case.case_id, trigger="finish")
+
+        def saw_terminal():
+            return any(e.kind == FleetEventKind.WENT_TERMINAL for e in collected)
+
+        assert await wait_for(saw_terminal)
+
+        def saw_disappeared():
+            return any(
+                e.kind == FleetEventKind.CASE_DISAPPEARED and e.case_id == case.case_id
+                for e in collected
+            )
+
+        assert await wait_for(saw_disappeared, timeout=5.0)
+    finally:
+        board.detach()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_raising_subscriber_does_not_break_board(tmp_path):
+    manager = provision_manager(tmp_path, maintenance_interval_secs=0.05)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seed_detached_case(ManualCase, staging / "c1")
+    await manager.recover()
+    case = await adopt_into_live(manager, staging / "c1")
+    board = attach_board(manager, publish_file=False)
+    ok_events: list = []
+
+    def boom(_events):
+        raise RuntimeError("subscriber exploded")
+
+    def ok(events):
+        ok_events.extend(events)
+
+    board.subscribe(boom)
+    board.subscribe(ok)
+    await manager.start()
+    try:
+        assert await wait_for(lambda: case.case_id in board.rows())
+        # Force a row change so subscribers fire after baseline is set.
+        case_obj = next(c for c in manager._driver if c.case_id == case.case_id)
+        case_obj.case_emit_alert_event("ping")
+        board.notify(
+            case_obj,
+            force=True,
+            live_cases=list(manager._driver),
+            locate=lambda cid: manager.locate(cid),
+        )
+        assert await wait_for(lambda: len(ok_events) > 0)
+        assert case.case_id in board.rows()
+    finally:
+        board.detach()
         await manager.stop()

@@ -78,7 +78,6 @@ from totodev_pub.case_manager_support.case_store import (
 )
 from totodev_pub.case_manager_support.constants import (
     EJECT_SUBDIR,
-    FLEET_STATUS_FILENAME,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     PULSE_INTERVAL_SECS,
@@ -95,10 +94,6 @@ from totodev_pub.case_manager_support.eject import (
     process_eject_ticket,
 )
 from totodev_pub.case_manager_support.notice import CaseNotice, NoticeRegistry
-from totodev_pub.case_manager_support.fleet_status import (
-    FleetStatusBoardWriter,
-    ensure_board_file,
-)
 from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
     CacheRootStateError,
@@ -354,14 +349,6 @@ class CaseManager:
         self._pulse_task: asyncio.Task[None] | None = None
         self._recovered = False
         self.last_recover_report: RecoverReport | None = None
-        self._fleet_board: FleetStatusBoardWriter | None = None
-        self._fleet_event_handle: Any = None
-        if self._policy.enable_fleet_status_board:
-            self._fleet_board = FleetStatusBoardWriter(
-                self._manager_dir,
-                full_flush_interval_secs=self._policy.fleet_status_full_flush_interval_secs,
-                terminal_retention_secs=self._policy.fleet_status_terminal_retention_secs,
-            )
         self._log_startup_summary()
 
     @classmethod
@@ -460,18 +447,6 @@ class CaseManager:
             CasePoolEventNames.TERMINATED,
             self._on_terminated_event,
         )
-        if self._fleet_board is not None:
-            self._fleet_event_handle = self._driver.case_event_subscribe(
-                {
-                    CasePoolEventNames.ADMITTED,
-                    CasePoolEventNames.ALERTED,
-                    CasePoolEventNames.ADVANCED,
-                    CasePoolEventNames.FAILED,
-                    CasePoolEventNames.REMOVED,
-                    CasePoolEventNames.EVICTED,
-                },
-                self._on_fleet_board_event,
-            )
         self._write_manifest(running=True)
         self._last_heartbeat_write = time.monotonic()
         self._last_pulse = time.monotonic()
@@ -505,12 +480,6 @@ class CaseManager:
             except KeyError:
                 pass
             self._terminated_handle = None
-        if self._fleet_event_handle is not None:
-            try:
-                self._driver.case_event_unsubscribe(self._fleet_event_handle)
-            except KeyError:
-                pass
-            self._fleet_event_handle = None
         if self._run_task is not None:
             self._run_task.cancel()
             try:
@@ -524,7 +493,6 @@ class CaseManager:
             self._run_task = None
         await self._driver.stop()
         await self._settle_with_diagnostics()
-        self._publish_fleet_status_board(force=True)
         self._write_manifest(running=False, stopped=True)
         # Last, and only after the fleet has settled: releasing earlier would invite a
         # successor in while this one is still writing. A clean release is also what
@@ -950,7 +918,6 @@ class CaseManager:
             raise
         self._driver.add(fresh)          # fresh slot: advanceable cases are admitted HOT
         self._driver.boost(folder)       # and fire on the next beat
-        self._notify_fleet_board(fresh)
         return fresh
 
     # ------------------------------------------------------------------
@@ -1252,7 +1219,6 @@ class CaseManager:
         (mgr_dir / policy.adopt_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
         (mgr_dir / policy.shutdown_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
-        ensure_board_file(mgr_dir, enabled=policy.enable_fleet_status_board)
 
     def _write_manifest(
         self, *, running: bool = False, stopped: bool = False, recovering: bool = False
@@ -1276,7 +1242,7 @@ class CaseManager:
             termination_pending=rel(termination_dir(self._manager_dir) / "pending"),
             eject_pending=rel(eject_dir(self._manager_dir) / "pending"),
             staging=rel(self._manager_dir / self._policy.staging_subdir),
-            fleet_status_board=rel(self._manager_dir / FLEET_STATUS_FILENAME),
+            fleet_status_board=None,
         )
         manifest = CaseManagerManifest(
             cache_root=str(self._cache_root),
@@ -1485,7 +1451,6 @@ class CaseManager:
                 await loop.run_in_executor(
                     None, lambda: run_redundant_purge(self._store, self._policy)
                 )
-        self._publish_fleet_status_board()
         with self._isolated_tick_item("condition detection", self._manager_dir):
             self._detect_escalations()
         self._last_tick_completed = time.monotonic()
@@ -1634,55 +1599,6 @@ class CaseManager:
             or self._count_eject_pending()
         )
 
-    # ------------------------------------------------------------------
-    # Pool status board & events
-    # ------------------------------------------------------------------
-
-    def _fleet_locate(self) -> Callable[[str], Any]:
-        return lambda cid: self.locate(cid)
-
-    def _notify_fleet_board(self, case: FolderBackedCase, *, force: bool = False) -> None:
-        if self._fleet_board is None:
-            return
-        try:
-            self._fleet_board.notify(
-                case,
-                force=force,
-                live_cases=list(self._driver),
-                locate=self._fleet_locate(),
-            )
-        except Exception:
-            logger.warning("fleet status board notify failed", exc_info=True)
-
-    def _publish_fleet_status_board(self, *, force: bool = False) -> None:
-        if self._fleet_board is None:
-            return
-        try:
-            self._fleet_board.publish_full_if_due(
-                list(self._driver),
-                locate=self._fleet_locate(),
-                force=force,
-            )
-        except Exception:
-            logger.warning("fleet status board full flush failed", exc_info=True)
-
-    def _on_fleet_board_event(self, event: CasePoolEvent) -> None:
-        """Forward interesting pool events to the status board.
-
-        REMOVED / EVICTED force a full publish so cases that left the pool drop
-        off (append alone cannot remove a ``case_id`` under last-wins).
-        """
-        if self._fleet_board is None:
-            return
-        if event.event in (CasePoolEventNames.REMOVED, CasePoolEventNames.EVICTED):
-            self._publish_fleet_status_board(force=True)
-            return
-        if event.event == CasePoolEventNames.ADVANCED:
-            ar = event.advance_result
-            if ar is None or not ar.progressed:
-                return
-        self._notify_fleet_board(event.case)
-
     def _reconcile_terminal_in_pool(self) -> int:
         """Enqueue termination for terminal cases still in the pool.
 
@@ -1696,9 +1612,6 @@ class CaseManager:
             if self._store.status_of(case.case_id) not in (LIVE, None):
                 continue    # already departed; its stored status is the receipt
             with self._isolated_tick_item("terminal reconcile", case.case_folder):
-                if self._fleet_board is not None:
-                    self._fleet_board.note_terminal(case)
-                    self._notify_fleet_board(case, force=True)
                 if begin_termination(
                     case,
                     manager_dir=self._manager_dir,
@@ -1709,9 +1622,6 @@ class CaseManager:
         return count
 
     def _on_terminated_event(self, event: CasePoolEvent) -> None:
-        if self._fleet_board is not None:
-            self._fleet_board.note_terminal(event.case)
-            self._notify_fleet_board(event.case, force=True)
         begin_termination(
             event.case,
             manager_dir=self._manager_dir,

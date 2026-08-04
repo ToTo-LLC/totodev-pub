@@ -213,11 +213,18 @@ class CaseManagerClient:
     def read_fleet_status(self, *, only_if_fresh: bool = True) -> dict[str, FleetStatusRow]:
         """One-file bulk fleet snapshot, last-wins merged by case_id.
 
-        Raises FleetStatusBoardDisabledError when the deployment has the board
-        disabled, and ManagerNotFreshError when only_if_fresh=True and the
-        manager heartbeat is stale/stopped."""
+        Raises ``FileNotFoundError`` when no publishing board has written the
+        file yet, and ``ManagerNotFreshError`` when ``only_if_fresh=True`` and
+        the manager heartbeat is stale/stopped.
+        """
         self._check_fresh(only_if_fresh)
-        return read_board(self.fleet_status_board_path())
+        path = self.fleet_status_board_path()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Fleet status board not published at {path} "
+                "(attach a FleetStatusBoard with publish_file=True)"
+            )
+        return read_board(path)
 
     def fleet_status_watcher(self, *, emit_initial: bool = False) -> FleetStatusBoardWatcher:
         """Snapshot-diff change watcher for LONG-LIVED observer processes (the

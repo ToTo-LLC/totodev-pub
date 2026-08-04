@@ -15,12 +15,15 @@ Almost every question about hosting resolves to "which layer owns this":
 |---|---|---|
 | **Host** | The process: signals, exit codes, the watchdog, **and shutdown** | `case_manager_host.serve()` |
 | **Signaling adapter** | The file-drop transport: fire / adopt / reclassify, correlation ids, results, dead-lettering | `signaling_adapter.SignalingAdapter` |
+| **Fleet status board** | In-memory fleet projection ± file publish ± in-process `FleetEvent` notifications (optional) | `fleet_status_board.FleetStatusBoard` |
 | **`CaseManager`** | The fleet: storage, the pool, case lifecycle | `case_manager.CaseManager` |
 
-The adapter is **optional**. A manager with none attached is driven entirely
-through its own methods — an embedded host, a batch job, a test. That is a
-supported shape, not a degraded one, and it is why the manager's public API has
-to be complete on its own. Shutdown works either way, because the host owns it.
+The adapter and fleet status board are **optional**. A manager with none attached
+is driven entirely through its own methods — an embedded host, a batch job, a
+test. That is a supported shape, not a degraded one, and it is why the manager's
+public API has to be complete on its own. Shutdown works either way, because the
+host owns it. `serve()` attaches a publishing fleet status board by default when
+policy allows.
 
 ## The examples
 

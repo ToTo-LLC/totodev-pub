@@ -264,9 +264,13 @@ case departing and your handler persisting, the notice is lost. Subscribe and
 keep your own record if you need history — this is operator convenience, not an
 audit log.
 
-**Fleet status board** — `.case_manager/fleet_status.jsonl`, a periodically
-refreshed snapshot of every case in the pool. Read it with
-`FleetStatusBoardWatcher`; disable with `enable_fleet_status_board=False`.
+**Fleet status board** — optional observer (`FleetStatusBoard`) that maintains an
+in-memory abbreviated snapshot of the live pool and may publish
+`.case_manager/fleet_status.jsonl` for out-of-process readers
+(`FleetStatusBoardWatcher` / `CaseManagerClient.read_fleet_status`). `serve()`
+attaches a publishing board by default when `enable_fleet_status_board=True`
+(policy host knob). Pass `fleet_status=False` to skip, or pass a custom board
+instance (e.g. `publish_file=False` for in-memory only).
 
 ## Container caveats
 

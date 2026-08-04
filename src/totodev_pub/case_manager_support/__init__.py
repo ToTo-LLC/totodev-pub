@@ -25,7 +25,6 @@ from totodev_pub.case_manager_support.exceptions import (
     DuplicateCaseIdError,
     EjectAbandonedError,
     EjectTimeoutError,
-    FleetStatusBoardDisabledError,
     InvalidAddressingError,
     LiveCaseNotFoundError,
     ManagerNotFreshError,
@@ -38,6 +37,7 @@ from totodev_pub.case_manager_support.exceptions import (
 )
 from totodev_pub.case_manager_support.layout import CaseLocation
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
+from totodev_pub.case_manager_support.fleet_status_board import FleetStatusBoard
 from totodev_pub.case_manager_support.fleet_status_events import (
     FleetEvent,
     FleetEventKind,
@@ -70,7 +70,6 @@ __all__ = [
     "DuplicateCaseIdError",
     "EjectAbandonedError",
     "EjectTimeoutError",
-    "FleetStatusBoardDisabledError",
     "InvalidAddressingError",
     "LiveCaseNotFoundError",
     "ManagerNotFreshError",
@@ -81,6 +80,7 @@ __all__ = [
     "StuckTrigger",
     "UnknownCaseStatusError",
     # Fleet status board
+    "FleetStatusBoard",
     "FleetStatusBoardWatcher",
     "FleetEvent",
     "FleetEventKind",

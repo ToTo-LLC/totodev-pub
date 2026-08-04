@@ -30,13 +30,6 @@ MANIFEST_FILENAME = "manifest.yaml"
 # ---- Fleet status board (Fleet Status Board Spec) ----
 FLEET_BOARD_PROTOCOL_VERSION = 1
 FLEET_STATUS_FILENAME = "fleet_status.jsonl"
-# The board file always exists at its known location; when the feature is off it
-# holds exactly this sentinel comment. Readers detect it by the stable prefix.
-FLEET_BOARD_DISABLED_PREFIX = "# Fleet status board disabled"
-FLEET_BOARD_DISABLED_SENTINEL = (
-    f"{FLEET_BOARD_DISABLED_PREFIX} — set `enable_fleet_status_board=False` in "
-    "your CaseManagerPolicy to keep the board off (it is on by default)."
-)
 
 PLACEHOLDER_HEADER = (
     "# CaseManager cache placeholder — do not parse.\n"

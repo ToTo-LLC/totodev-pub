@@ -14,7 +14,6 @@ from case_manager_test_utils import (
 )
 from totodev_pub.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME
-from totodev_pub.case_manager_support.exceptions import FleetStatusBoardDisabledError
 from totodev_pub.case_manager_support.fleet_status import FleetStatusRow
 from totodev_pub.case_manager_support.fleet_status_events import (
     FleetEventKind,
@@ -172,16 +171,18 @@ def test_watcher_collection_surface(tmp_path):
 
 @pytest.mark.asyncio
 async def test_client_reads_and_watches_board(tmp_path):
-    manager = provision_manager(
-        tmp_path,
-        enable_fleet_status_board=True,
-        fleet_status_full_flush_interval_secs=0.0,
-    )
+    from totodev_pub.case_manager_support.fleet_status_board import FleetStatusBoard
+
+    manager = provision_manager(tmp_path, maintenance_interval_secs=0.05)
     staging = tmp_path / "staging"
     staging.mkdir()
     seed_detached_case(ManualCase, staging / "c1")
     await manager.recover()
     case = await adopt_into_live(manager, staging / "c1")
+    board = FleetStatusBoard(
+        manager, publish_file=True, full_flush_interval_secs=0.0
+    )
+    board.attach()
     await manager.start()
     try:
         client = CaseManagerClient(tmp_path / "cache")
@@ -204,11 +205,12 @@ async def test_client_reads_and_watches_board(tmp_path):
         rows = client.read_fleet_status(only_if_fresh=False)
         assert rows[case.case_id].case_state == "waiting"
     finally:
+        board.detach()
         await manager.stop()
 
 
-def test_client_read_raises_when_disabled(tmp_path):
-    manager = provision_manager(tmp_path, enable_fleet_status_board=False)
+def test_client_read_raises_when_board_unpublished(tmp_path):
+    provision_manager(tmp_path)  # creates cache layout; no board attached
     client = CaseManagerClient(tmp_path / "cache")
-    with pytest.raises(FleetStatusBoardDisabledError):
+    with pytest.raises(FileNotFoundError):
         client.read_fleet_status(only_if_fresh=False)

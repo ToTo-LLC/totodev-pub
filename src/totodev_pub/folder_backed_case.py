@@ -697,13 +697,15 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # ---- Extended-status hook (polled, not event-driven) ----
 
     def case_ext_status_info(self) -> dict[str, Any]:
-        """Overridable hook for extended status when a case runs under ``CaseManager``.
+        """Overridable hook for extended status when a case runs under a fleet
+        status board observer.
 
-        The manager periodically publishes a fleet-status board — a shared snapshot of
-        all in-pool cases for operators and clients. On each row build it calls this
-        method and merges the returned dict into that row's ``ext`` field. Override to
-        supply case-specific extended status (e.g. ``percent_complete`` while a long,
-        slow ``perform_*`` step runs) without persisting transient progress to disk.
+        An attached ``FleetStatusBoard`` periodically rebuilds an abbreviated
+        snapshot of in-pool cases (optionally published to disk for out-of-process
+        clients). On each row build it calls this method and merges the returned
+        dict into that row's ``ext`` field. Override to supply case-specific
+        extended status (e.g. ``percent_complete`` while a long, slow ``perform_*``
+        step runs) without persisting transient progress to disk.
         Default: no-op (empty dict).
 
         Quick use:
@@ -721,7 +723,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
           Keep this FAST and CHEAP — it may be called on every row build (as often as
           once per maintenance tick), so never touch disk, never block, never await.
           It may also be called WHILE a perform_* trigger for this case is actively
-          running (the fleet writer runs outside the trigger's own execution), so
+          running (the fleet board runs outside the trigger's own execution), so
           reading a value mid-update is expected and fine: this hook has no
           consistency guarantee relative to an in-flight trigger, and generally
           shouldn't need one for a best-effort progress signal like this."""
