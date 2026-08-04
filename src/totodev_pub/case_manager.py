@@ -231,6 +231,39 @@ class CaseManager:
     Composes case storage, pool driver, type registry, and the manager's
     control directory under a working directory. See the module docstring
     for construction, scale, and hosting.
+
+    **Where this object should live.** Embedding a manager in the process that
+    holds your user interface is supported. The design target, though, is a
+    manager with a process (or container) of its own: the pool advances cases on
+    the event loop, so a busy fleet competes with the UI for it; a crash on
+    either side takes the other down; and restart-and-recover is far simpler for
+    a process whose only job is the fleet. Split, the manager side is
+    ``case_manager_host.serve()`` and the UI side is ``CaseManagerClient`` over
+    the file-drop protocol — a hosting change, not an API change.
+
+    The whole lifecycle, driven by hand::
+
+        store = CaseManager.open_local_store(work_dir)    # creates / reopens
+        case_type_registry.register_case_types(InquiryCase)   # before construction
+        manager = CaseManager(store)
+        await manager.recover()                           # claim + reconcile
+        await manager.start()                             # enter run mode
+
+        staged = manager.allocate_staging_folder()        # consumed by adopt
+        result = await manager.adopt_case(                # detach: adopt needs it unleased
+            InquiryCase.create_case_in_folder(staged, external_key="INQ-1").case_detach()
+        )
+
+        for reader in manager.iter_live():                # snapshots, lease-free
+            print(reader.case_id, reader.case_state)
+        await manager.fire(case_id=result.case_id, trigger="approve")
+
+        await manager.stop()                              # drain, settle, release
+
+    Worked and runnable, with the reasoning behind each step, in
+    ``case_manager_support/examples/example_00_embedded_fleet.py``. A real
+    process does not hand-roll recover/start/stop — ``serve()`` owns those along
+    with signals, exit codes, and the watchdog; see the neighbouring examples.
     """
 
     # ------------------------------------------------------------------
@@ -551,8 +584,11 @@ class CaseManager:
         can fill it::
 
             staged = manager.allocate_staging_folder()
-            MyCase.create_case_in_folder(staged, external_key="K-1")
-            await manager.adopt_case(staged)
+            # case_detach() returns the folder, so the handoff stays one phrase.
+            # It is not optional: adopt rejects a source that is still leased.
+            await manager.adopt_case(
+                MyCase.create_case_in_folder(staged, external_key="K-1").case_detach()
+            )
 
         Abandoned staging is reclaimed on each allocate (lazy GC):
 

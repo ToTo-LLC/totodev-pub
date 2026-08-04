@@ -24,6 +24,23 @@ to be complete on its own. Shutdown works either way, because the host owns it.
 
 ## The examples
 
+### 0. The manager by hand — `example_00_embedded_fleet.py`
+
+Start here. Not a process shape at all: provision a root, adopt two cases, let
+the pool run, inspect it, stop. It drives explicitly the lifecycle the other
+three hand to `serve()`, so those steps are visible before they are hidden.
+
+```bash
+uv run python -m totodev_pub.case_manager_support.examples.example_00_embedded_fleet
+```
+
+Runs in a throwaway directory with no arguments; pass a path to keep the fleet.
+Two traps it exists to show — **detach before adopting** (adopt rejects a case
+folder whose lease the builder still holds) and **finished is not yet filed** (a
+case leaves the pool on reaching a terminal state and is archived a tick later,
+so waiting on `iter_terminal()` and waiting on `case_is_terminal` are different
+waits).
+
 ### 1. Minimal host — `example_01_minimal_host.py`
 
 The smallest complete process: open a root, name your case types, `serve()`.
@@ -85,7 +102,15 @@ Each load gets its own root, so one test may load several bags without collision
 
 | You want | Use |
 |---|---|
+| To understand the manager's API before choosing a shape | Example 0 |
 | A long-running service other processes talk to | Example 3 |
 | A job that processes a batch and exits | Example 2 |
 | A fleet inside a larger program you already run | Example 1, no adapter |
 | A test | `make_case_bag_fixture()` |
+
+Examples 1–3 all give the manager its own process, which is the design target: a
+busy pool advances cases on the event loop and will compete with a UI for it, a
+crash on either side takes the other down, and restart-and-recover is far
+simpler for a process whose only job is the fleet. Embedding (example 0) is
+supported and a fine place to start — the split is a hosting change, not an API
+change.
