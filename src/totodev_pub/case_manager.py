@@ -724,14 +724,25 @@ class CaseManager:
         case_id: str | None = None,
         case_folder: Path | None = None,
         trigger: str | None = None,
+        wait: bool = True,
+        on_launch: Callable[[], None] | None = None,
+        on_complete: Callable[[AdvanceResult | None, BaseException | None], None] | None = None,
         **trigger_kwargs: Any,
-    ) -> AdvanceResult:
-        """Queue an advance (or manual action) on a pooled case and await the result
-        when the run loop executes it.
+    ) -> AdvanceResult | None:
+        """Queue an advance (or manual action) on a pooled case.
 
         Addressing: exactly one of ``case_id`` / ``case_folder``. With
         ``trigger=None``, available automatic transitions are attempted; with a
         pinned ``trigger``, that manual action runs.
+
+        ``wait=True`` (default) awaits the run loop and returns the
+        ``AdvanceResult``. ``wait=False`` returns ``None`` immediately after
+        enqueue — use when an intake loop must keep draining without waiting
+        for each step (completion via ``on_complete`` or other observation).
+
+        Optional ``on_launch`` / ``on_complete`` run on the event-loop thread
+        when the step starts and finishes (success or error). They are additive
+        with either ``wait`` value.
 
         - Requires run mode (``ManagerNotRunningError`` otherwise). Mailbox files
           and this API share one queue with the pool's normal advances.
@@ -749,58 +760,43 @@ class CaseManager:
         loc = self._resolve_single(case_id=case_id, case_folder=case_folder)
         if loc is None:
             raise LiveCaseNotFoundError(case_id or str(case_folder))
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[AdvanceResult] = loop.create_future()
 
-        def on_complete(
+        fut: asyncio.Future[AdvanceResult] | None = None
+        if wait:
+            fut = asyncio.get_running_loop().create_future()
+
+        def _complete(
             result: AdvanceResult | None, error: BaseException | None,
         ) -> None:
-            if fut.done():
-                return
-            if error is not None:
-                fut.set_exception(error)
-            elif result is not None:
-                fut.set_result(result)
-            else:
-                fut.set_exception(RuntimeError("fire completed with no result or error"))
+            # Settle the waiter first so a raising user callback cannot strand awaiters.
+            if fut is not None and not fut.done():
+                if error is not None:
+                    fut.set_exception(error)
+                elif result is not None:
+                    fut.set_result(result)
+                else:
+                    fut.set_exception(
+                        RuntimeError("fire completed with no result or error")
+                    )
+            if on_complete is not None:
+                on_complete(result, error)
+
+        attach_kwargs: dict[str, Any] = {}
+        if on_launch is not None:
+            attach_kwargs["on_launch"] = on_launch
+        if wait or on_complete is not None:
+            attach_kwargs["on_complete"] = _complete
 
         self._driver.attach_fire(
             loc.case_folder,
             trigger,
             trigger_kwargs,
-            on_complete=on_complete,
+            **attach_kwargs,
         )
-        return await fut
-
-    def queue_fire(
-        self,
-        case_folder: Path,
-        trigger: str | None,
-        trigger_kwargs: dict[str, Any],
-        *,
-        on_launch: Callable[[], None] | None = None,
-        on_complete: Callable[[AdvanceResult | None, BaseException | None], None] | None = None,
-    ) -> None:
-        """Queue a fire and return immediately — use when you cannot await the result.
-
-        Same pool scheduling as ``fire()`` (shared queue, concurrency/chokes), but
-        does not block the caller. Prefer ``fire()`` when your coroutine can
-        ``await`` the ``AdvanceResult``. Prefer this when completion must be
-        handled elsewhere — typically a mailbox/transport that writes a result
-        file, or any intake loop that must keep draining requests without
-        waiting for each case step to finish.
-
-        Optional callbacks run on the event-loop thread: ``on_launch`` when the
-        run loop starts the step, ``on_complete`` when it finishes (success or
-        error). Prefer this over calling into ``manager._driver``.
-        """
-        self._driver.attach_fire(
-            case_folder,
-            trigger,
-            trigger_kwargs,
-            **({"on_launch": on_launch} if on_launch is not None else {}),
-            **({"on_complete": on_complete} if on_complete is not None else {}),
-        )
+        if wait:
+            assert fut is not None
+            return await fut
+        return None
 
     async def reclassify_case(
         self,

@@ -183,11 +183,11 @@ class SignalingAdapter:
         """Attach each fire request to its case's scheduling slot.
 
         The intake directory *is* the queue — there is no in-memory one. Each
-        request moves ``intake/ → pending/`` and is handed to the driver; the
-        drain does **not** await the step. ``on_launch`` moves ``pending/ →
-        firing/`` when the sweep actually launches it and ``on_complete`` writes
-        the result, which keeps a slow or choke-starved fire from stalling the
-        whole tick.
+        request moves ``intake/ → pending/`` and is handed to
+        ``fire(..., wait=False)`` so the drain does **not** await the step.
+        ``on_launch`` moves ``pending/ → firing/`` when the sweep actually
+        launches it and ``on_complete`` writes the result, which keeps a slow
+        or choke-starved fire from stalling the whole tick.
         """
         for path in sorted(self._transport.fire_intake().glob("*.yaml"), key=arrival_order):
             corr = path.stem
@@ -198,9 +198,9 @@ class SignalingAdapter:
                     self._dead_letter(path, self._transport.fire_stage("malformed"))
                     self._publish_failure("fire", corr, f"malformed fire request: {exc}")
                     continue
-                self._attach_fire(req, path)
+                await self._attach_fire(req, path)
 
-    def _attach_fire(self, req: FireRequest, path: Path) -> None:
+    async def _attach_fire(self, req: FireRequest, path: Path) -> None:
         case_key = req.case_id or "unknown"
         pending = self._transport.fire_stage("pending", case_key) / path.name
         pending.parent.mkdir(parents=True, exist_ok=True)
@@ -227,12 +227,13 @@ class SignalingAdapter:
                     firing.unlink(missing_ok=True)
                     pending.unlink(missing_ok=True)
 
-            self._manager.queue_fire(
-                loc.case_folder,
-                req.trigger,
-                req.trigger_kwargs or {},
+            await self._manager.fire(
+                case_folder=loc.case_folder,
+                trigger=req.trigger,
+                wait=False,
                 on_launch=on_launch,
                 on_complete=on_complete,
+                **(req.trigger_kwargs or {}),
             )
         except Exception as exc:
             self._publish_failure("fire", corr, str(exc))

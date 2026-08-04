@@ -114,3 +114,62 @@ async def test_manager_fire_through_running_loop(tmp_path):
         assert case.case_state == "done"
     finally:
         await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_manager_fire_wait_false_returns_immediately(tmp_path):
+    manager = provision_manager(tmp_path, enable_mailbox=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seed_detached_case(TicketCase, staging / "c1")
+    await manager.recover()
+    case = await adopt_into_live(manager, staging / "c1")
+    attach_adapter(manager)
+    await manager.start()
+    completed: list[object] = []
+    try:
+        result = await manager.fire(
+            case_id=case.case_id,
+            trigger="work",
+            wait=False,
+            on_complete=lambda r, e: completed.append((r, e)),
+        )
+        assert result is None
+        for _ in range(200):
+            if completed:
+                break
+            await asyncio.sleep(0.05)
+        assert len(completed) == 1
+        advance, error = completed[0]
+        assert error is None
+        assert advance is not None and advance.progressed
+        assert case.case_state == "done"
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_manager_fire_wait_true_additive_on_complete(tmp_path):
+    manager = provision_manager(tmp_path, enable_mailbox=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    seed_detached_case(TicketCase, staging / "c1")
+    await manager.recover()
+    case = await adopt_into_live(manager, staging / "c1")
+    attach_adapter(manager)
+    await manager.start()
+    seen: list[object] = []
+    try:
+        result = await manager.fire(
+            case_id=case.case_id,
+            trigger="work",
+            on_complete=lambda r, e: seen.append((r, e)),
+        )
+        assert result is not None and result.progressed
+        assert len(seen) == 1
+        cb_result, cb_error = seen[0]
+        assert cb_error is None
+        assert cb_result is result
+        assert case.case_state == "done"
+    finally:
+        await manager.stop()
