@@ -697,8 +697,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # ---- Extended-status hook (polled, not event-driven) ----
 
     def case_ext_status_info(self) -> dict[str, Any]:
-        """Overridable hook for extended status when a case runs under a fleet
-        status board observer.
+        """Overridable hook for ``FleetStatusBoard`` row decoration (``ext`` field).
 
         An attached ``FleetStatusBoard`` periodically rebuilds an abbreviated
         snapshot of in-pool cases (optionally published to disk for out-of-process

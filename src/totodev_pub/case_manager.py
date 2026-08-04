@@ -225,7 +225,9 @@ class CaseManager:
 
     Composes case storage, pool driver, type registry, and the manager's
     control directory under a working directory. See the module docstring
-    for construction, scale, and hosting.
+    for construction, scale, and hosting. Abbreviated live-pool status is an
+    optional observer (``FleetStatusBoard``), not owned here — attach it
+    yourself or let ``serve()`` attach one.
 
     **Where this object should live.** Embedding a manager in the process that
     holds your user interface is supported. The design target, though, is a
