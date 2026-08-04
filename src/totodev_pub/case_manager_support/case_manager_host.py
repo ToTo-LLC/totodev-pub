@@ -46,6 +46,7 @@ from totodev_pub.case_manager_support.shutdown import (
 from totodev_pub.case_manager_support.watchdog import (
     ManagerWatchdog,
     WatchdogDetection,
+    log_recent_death_records,
     write_death_record,
 )
 
@@ -197,11 +198,11 @@ async def serve(
             cause["directive"] = directive
             stop_event.set()
 
-    # 1. Sequencing: both recoveries, then start() (which starts the pulse task).
-    #    Two parties, one order: the fleet settles its storage and pool first,
+    # 1. Sequencing: every recovery, then start() (which starts the pulse task).
+    #    Three parties, one order: the fleet settles its storage and pool first,
     #    then the adapter settles requests that were in flight when the process
     #    died — a dead-lettered fire has to name a case the manager has already
-    #    accounted for.
+    #    accounted for — and the host reports its own crash trail.
     if manager.is_recovered:
         logger.info("Manager was already recovered; serve() is not repeating it.")
     else:
@@ -209,6 +210,10 @@ async def serve(
     if adapter is not None:
         adapter.recover()
         adapter.attach()
+    # The host's half: only a host ever writes a death record, so only a host
+    # reports them. Deliberately after manager.recover(), so the crash trail reads
+    # next to the recovery it explains rather than ahead of it.
+    log_recent_death_records(manager._manager_dir)
 
     board: FleetStatusBoard | None = None
     if fleet_status is True:

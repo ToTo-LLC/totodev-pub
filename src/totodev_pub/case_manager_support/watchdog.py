@@ -80,8 +80,12 @@ def write_death_record(manager_dir: Path, *, check: str, reason: str) -> Path:
 
 def log_recent_death_records(manager_dir: Path) -> int:
     """Log one line per death record with mtime in the last 24h — capped at the
-    5 most recent, plus the total count. Called from recover() so the
-    reliability signal surfaces without the operator knowing to look."""
+    5 most recent, plus the total count. Returns the number found.
+
+    Called from ``serve()``'s startup sequencing, not from ``CaseManager.recover()``:
+    death records exist only where a host/watchdog wrote them, so surfacing them is
+    the host's half of recovery. An embedded manager never writes one and so has
+    nothing to report."""
     try:
         now = time.time()
         records = [

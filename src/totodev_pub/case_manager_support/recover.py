@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Callable
 from totodev_pub.case_manager_support.case_store import LIVE
 from totodev_pub.case_manager_support.exceptions import RecoveryIntegrityError
 from totodev_pub.case_manager_support.shutdown import discard_stale_requests, shutdown_intake_dir
-from totodev_pub.case_manager_support.watchdog import log_recent_death_records
 from totodev_pub.folder_backed_case_support.pool_membership_journal import (
     PoolMembershipJournal,
     restore_pool_from_journal,
@@ -31,7 +30,9 @@ class RecoverReport:
 
     Requests in flight when the process died are not here: settling those is the
     signaling adapter's recovery, which the host sequences alongside this one.
-    Neither half knows how to do the other's."""
+    Watchdog death records are not here either, for the same reason — only a host
+    writes them, so reporting them is the host's recovery. Neither half knows how
+    to do the other's."""
 
     pool_restored: int = 0
     termination_pending: int = 0
@@ -41,7 +42,6 @@ class RecoverReport:
     adopt_drop_rejected: int = 0
     adopt_drop_skipped: int = 0
     dropped_paths: list[Path] = field(default_factory=list)
-    death_records_recent: int = 0
     shutdown_requests_discarded: int = 0
     orphans_readmitted: int = 0
     orphan_anomalies: list[str] = field(default_factory=list)
@@ -61,7 +61,6 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     # discover it later through contended cases.
     await manager._acquire_filespace()
 
-    report.death_records_recent = log_recent_death_records(manager._manager_dir)
     report.shutdown_requests_discarded = discard_stale_requests(
         shutdown_intake_dir(manager._manager_dir, manager._policy)
     )
@@ -126,7 +125,7 @@ def _log_report(report: RecoverReport) -> None:
     logger.info(
         "Recovery complete: pool_restored=%d orphans_readmitted=%d "
         "termination_pending=%d eject_pending=%d adopt_drop=%d/%d/%d/%d "
-        "death_records_recent=%d shutdown_requests_discarded=%d",
+        "shutdown_requests_discarded=%d",
         report.pool_restored,
         report.orphans_readmitted,
         report.termination_pending,
@@ -135,7 +134,6 @@ def _log_report(report: RecoverReport) -> None:
         report.adopt_drop_admitted,
         report.adopt_drop_rejected,
         report.adopt_drop_skipped,
-        report.death_records_recent,
         report.shutdown_requests_discarded,
     )
     if report.dropped_paths:
