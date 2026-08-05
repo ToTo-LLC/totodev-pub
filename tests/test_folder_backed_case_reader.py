@@ -11,7 +11,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from totodev_pub.folder_backed_case import FolderBackedCase, AssetSpec
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournalView
 from totodev_pub.folder_backed_case_support.constants import LEASE_NAME
 from totodev_pub.folder_backed_case_support.asset_dataclass_registry import (

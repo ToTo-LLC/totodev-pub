@@ -113,6 +113,17 @@ def test_create_and_basic_properties(tmp_path):
         case.case_detach()
 
 
+def test_case_detach_returns_folder(tmp_path):
+    """Detach returns the folder path so create→detach→handoff can be fluent."""
+    folder = tmp_path / "case-detach-path"
+    case = SimpleCase.create_case_in_folder(folder)
+    returned = case.case_detach()
+    assert returned == folder
+    assert isinstance(returned, Path)
+    # Idempotent re-call still returns the folder (handy after an earlier detach).
+    assert case.case_detach() == folder
+
+
 def test_second_open_raises(tmp_path):
     folder = tmp_path / "case-003"
     first = SimpleCase.create_case_in_folder(folder)
@@ -466,6 +477,40 @@ def test_reclassify_to_succeeds_through_type_gate(tmp_path):
         )
     finally:
         fresh.case_detach()
+
+
+def test_reclassify_to_raises_when_target_assertions_fail(tmp_path):
+    from totodev_pub.folder_backed_case_support.constants import EV_ASSERTED, EV_RECLASSIFIED
+    from totodev_pub.folder_backed_case_support.exceptions import ReclassifyAssertionError
+
+    class StrictReclassTarget(FolderBackedCase):
+        asset_aliases = {}
+        fsm_trigger_chokes = {}
+        fsm_state_chains = ["[*] --> new == go ==> finished --> [*]"]
+
+        def case_assert_new_has_owner(self, ltx):
+            return "missing owner"
+
+        def case_assert_new_has_route(self, ltx):
+            return "missing route"
+
+    folder = tmp_path / "case-reclass-assert"
+    case = SimpleCase.create_case_in_folder(folder, case_id="r-assert-1")
+    with pytest.raises(ReclassifyAssertionError) as ei:
+        case.case_reclassify_to(StrictReclassTarget)
+    exc = ei.value
+    assert exc.case_id == "r-assert-1"
+    assert exc.target_type == "StrictReclassTarget"
+    assert exc.state == "new"
+    assert [f.name for f in exc.failures] == ["has_owner", "has_route"]
+    assert "missing owner" in str(exc) and "missing route" in str(exc)
+    # Commit stuck: new type on disk; rebound instance still holds the lease.
+    assert FolderBackedCase.peek_case_record(folder).case_object_type == "StrictReclassTarget"
+    assert isinstance(exc.case, StrictReclassTarget)
+    labels = [ev.label for ev in exc.case._journal.primitive.events(recent_first=False)]
+    assert EV_RECLASSIFIED in labels
+    assert EV_ASSERTED in labels
+    exc.case.case_detach()
 
 
 def test_missing_fsm_trigger_chokes_raises_at_class_definition():

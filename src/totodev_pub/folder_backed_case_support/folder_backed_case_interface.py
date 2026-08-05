@@ -44,7 +44,7 @@ from totodev_pub.folder_backed_case_support.constants import (
 )
 
 if TYPE_CHECKING:
-    from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+    from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 
 
 def _raises_when_detached(fn):
@@ -401,7 +401,10 @@ class FolderBackedCaseInterface(ABC):
         returned instance when you are done with it.
 
         ``case_id`` may be a literal id string, a ``CaseIDGenerator`` to mint one
-        from, or omitted to use ``cls.case_id_generator``.
+        from, or omitted to use ``cls.case_id_generator``. The default generator is
+        unique only *within one process*, so when several processes mint cases into
+        one shared tree (an API tier staging cases for a worker's store, say), set
+        ``case_id_generator = UUIDCaseIDGenerator()`` on the case class.
 
         Subclass overrides should call ``super().create_case_in_folder(...)``
         first so the folder and base structures exist before custom init.
@@ -412,13 +415,17 @@ class FolderBackedCaseInterface(ABC):
         """
         ...
 
-    def case_detach(self) -> None:
+    def case_detach(self) -> Path:
         """Unbinds this object from its folder: release the lease and mark detached.
 
         Call this when you are done acting on a live case (scripts, tests, handoff
         to ``CaseManager``, after harvesting a terminated case). After detach,
         mutating use raises ``DetachedCaseError``. Does not move or archive the
         folder.
+
+        Returns the case folder path so create→detach→handoff can be fluent
+        (``adopt_case(create(...).case_detach())``) without keeping a separate
+        handle. Also returned on idempotent re-calls.
 
         If you forget, the lease self-expires after a crash-recovery window;
         explicit detach is still preferred so other owners need not wait.
@@ -744,6 +751,25 @@ class FolderBackedCaseInterface(ABC):
         ``alias`` is trustworthy (per the spec's ``trust_states``), raising
         ``AssetNotTrustedInStateError`` if not.
 
+        **Reading an asset from inside the step that produces it.** A
+        ``perform_`` hook runs *before* the transition commits, so the case is
+        still in the SOURCE state while the hook executes. An asset that only
+        becomes complete when the step finishes is therefore — correctly — not
+        yet trusted, and this accessor will refuse it. That is the gate working,
+        not a mistake to design around: do **not** widen ``trust_states`` to
+        include the source state just to get the read through, or arrival in the
+        destination state stops meaning the asset is loadable.
+
+        Writing is never trust-checked, so producing the asset needs nothing
+        special. For the read half of a read-modify-write (updating a manifest as
+        a conversion progresses, appending to a partial-progress record so a
+        retry can resume), use the ungated equivalents on ``case_assets``, which
+        resolve the same alias and apply the same loader::
+
+            self.case_assets.load_dataclass("manifest")      # cf. case_load_asset
+            self.case_assets.load_dataclasses("pages")       # cf. case_load_assets
+            self.case_assets.dataclass_paths("pages")        # paths only
+
         For ``many=True`` aliases use ``case_load_assets``. For assets not
         declared in ``asset_aliases`` use ``case_assets`` to find/load manually.
         ``loader=Path`` returns the absolute ``Path`` of the matched file.
@@ -893,16 +919,17 @@ class FolderBackedCaseInterface(ABC):
         That also makes it safe to hand across process/thread boundaries —
         unlike a live case object, which is bound to one owner's lease.
 
-        The returned ``FolderBackedCaseReader`` mirrors the read-only surface
-        above (``case_id``, ``case_state``, ``case_is_terminal``,
-        ``case_dwell_secs``, ``case_assets``, ``case_load_asset()``,
-        ``case_event_journal``, plus lease-aware extras like
-        ``case_lease_secs_left`` and ``case_active_trigger``) as thin wrappers
-        over the same ``peek_*`` static methods on this class. Each access
-        re-reads its source of truth (record, event journal, or filesystem) rather
-        than caching, so expect more I/O cost per read than the equivalent
-        in-memory property on a live case — a reasonable trade for
-        correctness when you can't or don't want to hold the lease.
+        The returned ``FolderBackedCaseReader`` (in
+        ``folder_backed_case_support.folder_backed_case_reader``) mirrors the
+        read-only surface above (``case_id``, ``case_state``,
+        ``case_is_terminal``, ``case_dwell_secs``, ``case_assets``,
+        ``case_load_asset()``, ``case_event_journal``, plus lease-aware extras
+        like ``case_lease_secs_left`` and ``case_active_trigger``) as thin
+        wrappers over the same ``peek_*`` static methods on this class. Each
+        access re-reads its source of truth (record, event journal, or
+        filesystem) rather than caching, so expect more I/O cost per read than
+        the equivalent in-memory property on a live case — a reasonable trade
+        for correctness when you can't or don't want to hold the lease.
 
         Cannot trigger transitions or otherwise mutate the case — for that you
         need a live, lease-holding instance (see ``create_case_in_folder()`` /

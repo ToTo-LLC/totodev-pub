@@ -42,6 +42,7 @@ from __future__ import annotations
 import enum
 import importlib.util
 import inspect
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -62,6 +63,27 @@ if TYPE_CHECKING:
 # (validate_case_assertion_methods), called from the same bind-time block as
 # validate_object_compatibility.
 ASSERT_METHOD_PREFIX = "case_assert_"
+
+
+@dataclass(frozen=True)
+class AssertionFailure:
+    """One failure from a single ``sweep`` call (mirrors CASE_ASSERT_FAILED data)."""
+
+    name: Optional[str]
+    source: str
+    msg: str
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class AssertionSweepResult:
+    """In-process outcome of one ``sweep`` — the mirror of CASE_ASSERTED + failures."""
+
+    state: str
+    ran: int
+    failed: int
+    mode: str
+    failures: list[AssertionFailure] = field(default_factory=list)
 
 
 class AssertionMode(enum.Enum):
@@ -218,81 +240,96 @@ class _CaseAssertionRunner:
         # Unknown-state file functions already warned about (once per instance).
         self._warned_unknown: set[str] = set()
 
-    def sweep(self, state: str) -> None:
+    def sweep(self, state: str) -> AssertionSweepResult:
         """Run every assertion tied to ``state`` (class methods first, name-sorted;
         then the automatic asset-loadability check; then file assertions) and close
-        with one CASE_ASSERTED summary. Consults the process-global AssertionMode
-        afresh on every call."""
+        with one CASE_ASSERTED summary. Returns an in-process ``AssertionSweepResult``
+        for this sweep only. Consults the process-global AssertionMode afresh on
+        every call."""
         mode = get_case_assertion_mode()
         if mode is AssertionMode.SKIP:
             self._journal.log_asserted(state, ran=0, failed=0, mode=mode.value)
-            return
+            return AssertionSweepResult(
+                state=state, ran=0, failed=0, mode=mode.value, failures=[],
+            )
         ltx = self._journal.last_transition()
         ran = 0
-        failed = 0
+        failures: list[AssertionFailure] = []
         for slug, method_name in self._class_assertions.get(state, []):
             ran += 1
             fn = getattr(self._case, method_name)
-            failed += self._run_one(state, slug, "method", fn, (ltx,))
-        asset_ran, asset_failed = self._check_asset_loadability(state)
+            hit = self._run_one(state, slug, "method", fn, (ltx,))
+            if hit is not None:
+                failures.append(hit)
+        asset_ran, asset_failures = self._check_asset_loadability(state)
         ran += asset_ran
-        failed += asset_failed
+        failures.extend(asset_failures)
         if mode is AssertionMode.FULL:
-            file_ran, file_failed = self._sweep_files(state, ltx)
+            file_ran, file_failures = self._sweep_files(state, ltx)
             ran += file_ran
-            failed += file_failed
-        self._journal.log_asserted(state, ran=ran, failed=failed, mode=mode.value)
+            failures.extend(file_failures)
+        self._journal.log_asserted(
+            state, ran=ran, failed=len(failures), mode=mode.value,
+        )
+        return AssertionSweepResult(
+            state=state, ran=ran, failed=len(failures), mode=mode.value,
+            failures=failures,
+        )
 
-    def _check_asset_loadability(self, state: str) -> tuple[int, int]:
+    def _check_asset_loadability(
+        self, state: str,
+    ) -> tuple[int, list[AssertionFailure]]:
         """Confirm every asset alias trusted in ``state`` (per its declared
         ``AssetSpec.trust_states``) can actually be loaded. Unconditional — it runs
         whether or not any hand-written ``case_assert_*`` targets this state; the
         only gate is the mode check already done by the caller (``sweep``)."""
         book = type(self._case)._resolve_asset_book()
         ran = 0
-        failed = 0
+        failures: list[AssertionFailure] = []
         for alias in book.trusted_aliases(state):
             spec = book.spec(alias)
             loader = self._case.case_load_assets if spec.many else self._case.case_load_asset
             ran += 1
-            failed += self._run_asset_load(state, alias, loader)
-        return ran, failed
+            hit = self._run_asset_load(state, alias, loader)
+            if hit is not None:
+                failures.append(hit)
+        return ran, failures
 
-    def _run_asset_load(self, state: str, alias: str, loader: Callable) -> int:
-        """Load one asset alias purely to confirm it does not raise; return 1 on
-        failure, 0 on pass. Unlike ``_run_one``, the loaded value's truthiness is
-        irrelevant — only an exception counts as failure here."""
+    def _run_asset_load(
+        self, state: str, alias: str, loader: Callable,
+    ) -> Optional[AssertionFailure]:
+        """Load one asset alias purely to confirm it does not raise. Unlike
+        ``_run_one``, the loaded value's truthiness is irrelevant — only an
+        exception counts as failure here."""
         try:
             loader(alias)
         except Exception as exc:
-            self._record_failure(
+            return self._record_failure(
                 state, f"asset_loadable:{alias}", "asset-load",
                 str(exc) or type(exc).__name__, type(exc).__name__,
             )
-            return 1
-        return 0
+        return None
 
     # ---- single-assertion execution (isolation boundary) ----
 
     def _run_one(
         self, state: str, slug: str, source: str, fn: Callable, args: tuple,
-    ) -> int:
-        """Run one assertion; return 1 on failure, 0 on pass. NEVER raises."""
+    ) -> Optional[AssertionFailure]:
+        """Run one assertion; return the failure record or None on pass. NEVER raises."""
         error: Optional[str] = None
         try:
             result = fn(*args)
         except Exception as exc:               # raise inside an assertion = FAIL
             result, error = str(exc) or type(exc).__name__, type(exc).__name__
         if not result:                          # falsy = PASS (None, "", False, 0)
-            return 0
+            return None
         msg = result if isinstance(result, str) else str(result)
-        self._record_failure(state, slug, source, msg, error)
-        return 1
+        return self._record_failure(state, slug, source, msg, error)
 
     def _record_failure(
         self, state: str, name: Optional[str], source: str, msg: str,
         error: Optional[str],
-    ) -> None:
+    ) -> AssertionFailure:
         value = f"{state}.{name}" if name else _msg_basename(source)
         self._journal.log_assert_failed(
             value, state=state, name=name, source=source, msg=msg, error=error,
@@ -302,34 +339,35 @@ class _CaseAssertionRunner:
             name or source, source, state, msg,
         )
         hook = getattr(self._case, "on_assertion_failed", None)
-        if hook is None:
-            return
-        try:
-            hook(state, name or source, msg)
-        except Exception:                       # a misbehaving hook must not mask/disturb
-            self._case.log.exception(
-                "on_assertion_failed hook raised for case %s", self._case.case_id,
-            )
+        if hook is not None:
+            try:
+                hook(state, name or source, msg)
+            except Exception:                   # a misbehaving hook must not mask/disturb
+                self._case.log.exception(
+                    "on_assertion_failed hook raised for case %s", self._case.case_id,
+                )
+        return AssertionFailure(name=name, source=source, msg=msg, error=error)
 
     def _sweep_files(
         self, state: str, ltx: Optional[CaseTransition],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, list[AssertionFailure]]:
         """Discover and run assertions/*.py functions tied to ``state``. Files are
         DATA: a broken file logs one import-failure CASE_ASSERT_FAILED and the sweep
         continues; a function naming an unknown state warns once (per instance) and
-        is skipped. Returns (ran, failed) — import failures count in ``failed`` only
-        (nothing ran)."""
+        is skipped. Returns (ran, failures) — import failures count in ``failures``
+        only (nothing ran)."""
         folder = self._case.case_folder / ASSERTS_DIR_NAME
         if not folder.is_dir():
-            return 0, 0
-        from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+            return 0, []
+        from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
         reader = FolderBackedCaseReader(self._case.case_folder)
         ran = 0
-        failed = 0
+        failures: list[AssertionFailure] = []
         for path in sorted(folder.glob("*.py")):
-            module = self._load_module(path, state)
+            module, import_failure = self._load_module(path, state)
             if module is None:
-                failed += 1                     # import failure already journaled
+                if import_failure is not None:
+                    failures.append(import_failure)
                 continue
             functions = sorted(
                 (name, fn) for name, fn in vars(module).items()
@@ -352,35 +390,40 @@ class _CaseAssertionRunner:
                 if fn_state != state:
                     continue                    # tied to another (known) state
                 ran += 1
-                failed += self._run_one(
+                hit = self._run_one(
                     state, slug, f"file:{path.name}", fn, (reader, ltx),
                 )
-        return ran, failed
+                if hit is not None:
+                    failures.append(hit)
+        return ran, failures
 
-    def _load_module(self, path: Path, state: str):
-        """Import an assertion file, cached by (path, mtime). Returns the module,
-        or None after journaling an import failure. Modules are NOT placed in
-        sys.modules — they are private to this runner (no global registry growth,
-        matching the case-logger philosophy)."""
+    def _load_module(
+        self, path: Path, state: str,
+    ) -> tuple[Optional[object], Optional[AssertionFailure]]:
+        """Import an assertion file, cached by (path, mtime). Returns
+        ``(module, None)`` on success, or ``(None, failure)`` after journaling an
+        import failure. Modules are NOT placed in sys.modules — they are private
+        to this runner (no global registry growth, matching the case-logger
+        philosophy)."""
         cached = self._module_cache.get(path)
         try:
             mtime = path.stat().st_mtime
             if cached is not None and cached[0] == mtime:
-                return cached[1]
+                return cached[1], None
             spec = importlib.util.spec_from_file_location(
                 f"_case_assertions__{self._case.case_id}__{path.stem}", path,
             )
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
         except Exception as exc:
-            self._record_failure(
+            failure = self._record_failure(
                 state, None, f"file:{path.name}",
                 f"failed to import assertion file: {exc}", type(exc).__name__,
             )
             self._module_cache.pop(path, None)
-            return None
+            return None, failure
         self._module_cache[path] = (mtime, module)
-        return module
+        return module, None
 
 
 def _msg_basename(source: str) -> str:

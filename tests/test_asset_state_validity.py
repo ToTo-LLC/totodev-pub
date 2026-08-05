@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.folder_backed_case import FolderBackedCase
-from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
 from totodev_pub.folder_backed_case_support.asset_schema import AssetSpec
 from totodev_pub.folder_backed_case_support.exceptions import (
     AssetNotTrustedInStateError,
@@ -259,15 +259,28 @@ def test_keep_true_seeds_manifest_at_create(tmp_path):
 def test_reclassify_restamps_states_and_keep(tmp_path):
     folder = tmp_path / "reclass"
     case = ReclassSource.create_case_in_folder(folder)
+    fresh = None
     try:
+        # Both aliases are trusted in `shared`, so both files must exist: the
+        # source's for the sweep at the end of go(), the target's for the sweep
+        # reclassify runs after committing the type switch. Absent them this
+        # asserts the wrong thing — that a case can take on a type whose
+        # invariants it fails (see
+        # test_reclassify_to_raises_when_target_assertions_fail).
+        case.case_assets.write("old.yaml", b"title: before\n")
         asyncio.run(case.go())
         assert "assets/old.yaml" in case._keep_manifest.list_rules()
+        # After go(), not before: `shared` is terminal, and the terminal purge
+        # keeps only what the SOURCE class declared. new.yaml written earlier
+        # would be swept as ephemera before the target ever looked for it.
+        case.case_assets.write("new.yaml", b"lines: 3\n")
         fresh = case.case_reclassify_to(ReclassTarget)
         assert fresh._record.asset_aliases["new"]["trust_states"] == ["shared"]
         assert "assets/new.yaml" in fresh._keep_manifest.list_rules()
 
     finally:
-        case.case_detach()
+        # reclassify hands the lease to `fresh`; detaching `case` alone leaves it held.
+        (fresh or case).case_detach()
 
 
 def test_bypass_via_case_assets_ignores_gate(tmp_path):

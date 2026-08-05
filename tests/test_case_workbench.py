@@ -655,6 +655,7 @@ def test_custom_assertions_lists_files(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_marimo_skeleton_default_stamped_path(tmp_path):
+    pytest.importorskip("networkx")
     wb = _wb(tmp_path)
     report = wb.marimo_skeleton(WbTicketCase)
     assert report.path is not None
@@ -669,6 +670,7 @@ def test_marimo_skeleton_default_stamped_path(tmp_path):
 
 
 def test_marimo_skeleton_survives_cleanup(tmp_path):
+    pytest.importorskip("networkx")
     wb = _wb(tmp_path)
     report = wb.marimo_skeleton(WbTicketCase)
     assert report.path.exists()
@@ -677,6 +679,7 @@ def test_marimo_skeleton_survives_cleanup(tmp_path):
 
 
 def test_marimo_skeleton_by_class_name_string(tmp_path):
+    pytest.importorskip("networkx")
     wb = _wb(tmp_path)
     report = wb.marimo_skeleton("WbTicketCase")
     assert report.path.exists()
@@ -684,6 +687,7 @@ def test_marimo_skeleton_by_class_name_string(tmp_path):
 
 
 def test_marimo_skeleton_explicit_path_and_overwrite_guard(tmp_path):
+    pytest.importorskip("networkx")
     wb = _wb(tmp_path)
     dest = tmp_path / "nb" / "my_notebook.py"
     report = wb.marimo_skeleton(WbTicketCase, path=dest)

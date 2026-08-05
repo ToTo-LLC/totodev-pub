@@ -41,27 +41,19 @@ instead of linking out.
 5. **Generate the skeleton class file**, following the shape in
    `assets/case_class_template.py` and the output examples in
    `references/generated_output_examples.md` (module/class docstrings,
-   asset TODOs). Auto-trigger `perform_*` methods take **no kwargs**
-   (`(self, tctx)` only); leave manual-trigger kwargs as `(self, tctx)`
-   placeholders until Step 8.
+   asset TODOs).
 6. **Validate it binds** — actually import the generated module and fix
    whatever the framework rejects. Do not skip this.
 7. **Review optional design patterns** — consult
    `references/case_design_patterns.md` and prompt the developer about whether
    any of those enhancements fit this case; fold in the ones they adopt and
    re-validate.
-8. **Manual-trigger kwargs** — for every `==` (manual) trigger, interview
-   whether callers pass arguments, and declare them as keyword-only params on
-   `perform_<trigger>` (JSON/YAML-friendly types). Auto (`--`) triggers stay
-   no-arg. Re-validate after edits.
-9. **Lint the FSM and check coverage** — run the chain-DSL CLI over the final
+8. **Lint the FSM and check coverage** — run the chain-DSL CLI over the final
    declaration for advisory warnings, then the checklist, before handing it
    back.
-10. **Offer a case briefing** — ask if the developer wants a rendered
-    summary of the finished class (lifecycle diagram, states/triggers/guards/
-    assertions/assets tables) to sanity-check the whole design at a glance.
-11. **Offer a workbench notebook** — ask if they'd like a ready-to-drive marimo
-    skeleton for exercising the new class in a `CaseWorkbench`.
+9. **Offer a case briefing** — ask if the developer wants a rendered
+   summary of the finished class (lifecycle diagram, states/triggers/guards/
+   assertions/assets tables) to sanity-check the whole design at a glance.
 
 Before drafting chains, read **FSM design principles** in
 `references/dsl_and_hooks.md` (start of that file). Then use the same file for
@@ -240,14 +232,11 @@ docstring voice, ClassVar trust map, and anti-patterns, also read
 
 For every name that appears in the confirmed `fsm_state_chains`:
 
-- One `async def perform_<trigger>(self, tctx: EventData, *, ...)` for every trigger
-  that does real work. Keyword-only params after `tctx` are the trigger kwargs
-  contract — filled in for **manual** (`==`) triggers in Step 8; **auto** (`--`)
-  triggers always stay `(self, tctx)` only (no keyword-only params). Docstring
-  states what the method must read/write/call — drawn from the interview, not
-  invented. Import `EventData` from `transitions.core` (the transitions
-  trigger-context object — not the case event journal). Annotate
-  `tctx: EventData` on every hook that takes it
+- One `async def perform_<trigger>(self, tctx: EventData)` for every trigger
+  that does real work, docstring stating what it must read/write/call — drawn
+  from the interview, not invented. Import `EventData` from
+  `transitions.core` (the transitions trigger-context object — not the case
+  event journal). Annotate `tctx: EventData` on every hook that takes it
   (`perform_` / `before_` / `after_` / `guard_` / `on_enter_` / `on_exit_`).
 - One `async def guard_<guard>(self, tctx: EventData) -> bool` for every
   method guard named in a bracket group (`trigger [guard]`), docstring
@@ -342,54 +331,25 @@ Each adopted pattern is folded in the same way the base design was built — new
 states get `case_assert_*`, new triggers get `perform_`/`guard_` stubs, new
 assets get an `AssetSpec` plus a pydantic class — with bodies still stubbed via
 `_not_implemented`, never implemented. Adding a state or trigger can break the
-FSM, so **re-run the Step 6 bind check** after folding anything in. New manual
-(`==`) triggers from this step are kwargs placeholders until Step 8.
+FSM, so **re-run the Step 6 bind check** after folding anything in.
 
-## Step 8 — Manual-trigger kwargs
+## Step 7b — If a CaseManager will run it
 
-Do this **after** the lifecycle and optional patterns are settled, so the set of
-manual triggers is complete. Auto-advance triggers (`--` … `-->`) are assumed
-to take **no arguments** — their `perform_*` stays `(self, tctx: EventData)` with
-no keyword-only params. Do not invent kwargs for auto edges.
+Most cases end up driven by a fleet coordinator rather than by hand. That does
+not change how the type is designed, but a few declarations already made decide
+how it behaves once a manager owns it — whether it self-completes or waits, what
+it competes with for concurrency, what survives the post-terminal purge, and
+where it gets archived.
 
-For **each manual trigger** (`==` … `==>` / `: ==` in the chains), ask (one
-trigger at a time):
+Read `references/running_under_a_manager.md` and raise only the questions that
+plausibly apply to *this* case, one at a time, exactly as in Step 7. The most
+common real finding is a case whose path to terminal contains a manual (`==`)
+edge nobody intends to fire, which in production looks like a case that sits in
+the pool forever.
 
-1. **Does a caller need to pass data when firing this trigger?** (e.g.
-   `await case.add_attachments(paths=[...])`, `await case.approve(note="…")`).
-   If the edge is only a signal / button with no payload, keep `(self, tctx)`.
-2. If yes: **name each parameter**, whether it is **required or optional**, and
-   a **default** when optional.
-3. **Choose JSON/YAML-friendly types.** Prefer `str`, `int`, `float`, `bool`,
-   `None`, and nested `list` / `dict` of those. Filepaths are `str` (or
-   `list[str]`), not `pathlib.Path`. Avoid custom classes, open handles, bytes
-   blobs, and other values that do not round-trip cleanly through JSON/YAML —
-   multiprocess / manager relays may persist or cross process boundaries with
-   these kwargs. If the developer wants a rich object, ask for a serializable
-   stand-in (id string, path string, dict of primitives) instead.
+Skip this step entirely if the developer has said the case is driven directly.
 
-Then edit each affected `perform_<trigger>` to declare the contract:
-
-```python
-async def perform_add_attachments(
-    self, tctx: EventData, *, paths: list[str],
-) -> None:
-    """TODO(responsibility): ... use `paths`, not tctx.kwargs ..."""
-    return self._not_implemented(None)
-
-async def perform_approve(
-    self, tctx: EventData, *, note: str | None = None,
-) -> None:
-    ...
-```
-
-Update the responsibility docstring to name those parameters. Leave stub bodies
-as `_not_implemented` — do not implement the work.
-
-**Re-run Step 6's import (and smoke construct if applicable)** after changing
-signatures so bind-time perform-signature checks pass.
-
-## Step 9 — FSM lint + coverage checklist
+## Step 8 — FSM lint + coverage checklist
 
 Before the checklist, run the finished declaration through the chain-DSL CLI
 once. The Step 6 import gate proves the FSM *parses and validates*; the CLI
@@ -411,13 +371,6 @@ for this case (e.g. a deliberately fully-automated pipeline). Then confirm:
 
 - [ ] Every trigger named in `fsm_state_chains` has a `perform_<trigger>` (or
       an explicit note on why not).
-- [ ] Every **auto** (`--`) trigger's `perform_*` takes **no kwargs**
-      (`(self, tctx)` only).
-- [ ] Every **manual** (`==`) trigger was covered in Step 8: either
-      `(self, tctx)` with an explicit "no caller payload" decision, or
-      keyword-only params with annotations/defaults; types are JSON/YAML-
-      friendly (`str`/`int`/`float`/`bool`/`None`/lists/dicts of those —
-      filepaths as `str`, not `Path`).
 - [ ] Every method guard named in a bracket group (`trigger [guard]`) has a
       matching `guard_<guard>`.
 - [ ] Every **auto** self-loop (`A -- … --> A`) has at least one named method
@@ -446,12 +399,12 @@ for this case (e.g. a deliberately fully-automated pipeline). Then confirm:
 - [ ] The chain-DSL CLI (above) reports no unaddressed lint warnings — or each
       remaining one is acknowledged as intended for this case.
 
-## Step 10 — Offer a case briefing
+## Step 9 — Offer a case briefing
 
-Once the class binds cleanly (Step 6), manual kwargs are settled (Step 8), and
-the coverage checklist (Step 9) is satisfied, **ask** the developer whether
-they'd like a **case briefing** for the class — don't generate it unprompted;
-it's a few extra seconds of output some developers won't want.
+Once the class binds cleanly (Step 6) and the coverage checklist (Step 8) is
+satisfied, **ask** the developer whether they'd like a **case briefing** for
+the class — don't generate it unprompted; it's a few extra seconds of output
+some developers won't want.
 
 A case briefing is the class-level design handoff produced by
 `totodev_pub.folder_backed_case_support.case_briefing`: lifecycle diagram plus
@@ -480,36 +433,3 @@ tables — worth fixing before handing the file back if so.
 Show the case briefing to the developer directly (or save it alongside the
 generated class if they'd like a copy) — don't just report that it
 succeeded.
-
-## Step 11 — Offer a workbench notebook
-
-Where the briefing *documents* the class, a **workbench notebook** lets the
-developer *drive* it. After the briefing (or instead of it, if they skipped),
-**ask** whether they'd like a ready-to-run **marimo skeleton** for exercising
-the new class in a `CaseWorkbench` — again, don't generate it unprompted.
-
-It is produced by the interactive twin of the briefing generator,
-`totodev_pub.folder_backed_case_support.case_workbench_marimo`, from the same
-class-level analysis: import + `CaseWorkbench.create()`, commented run-button-
-gated examples for each manual trigger (with every `perform_<trigger>` kwarg
-pre-filled), a few run-loop flavors, the custom-assertions folder, and
-freeze-dry / detach.
-
-If they say yes, either write it via the workbench (stamped file under
-`volatile/case-workbench/notebooks/`):
-
-```python
-from totodev_pub.case_testing import CaseWorkbench
-wb = CaseWorkbench.for_project()
-print(wb.marimo_skeleton(<GeneratedClass>))
-```
-
-or emit the text via the CLI:
-
-```bash
-python -m totodev_pub.folder_backed_case_support.case_workbench_marimo <module path>:<GeneratedClass>
-```
-
-Like the briefing, this touches the class only — no case folder is created (the
-*notebook*, when run, is what creates and drives a live case). See
-`docs/case-workbench-notebooks.md` for the full guide.

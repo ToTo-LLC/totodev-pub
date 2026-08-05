@@ -47,8 +47,7 @@ specifically needs create-time import.
 - Initial state is **inert and empty**, named outside the domain (`new`,
   `initial`, …) — not `submitted` / `received` / `uploaded`.
 - A **manual** trigger (e.g. `add_attachments`) takes a filepath or filepaths
-  via kwargs (declared as keyword-only params on `perform_*`; keep them
-  JSON-serializable when the manager may
+  via kwargs (`tctx.kwargs`; keep them JSON-serializable when the manager may
   relay them). Its `perform_` copies/links those files into the case assets.
 - Transition into a very temporary state such as `attachments_added`, then
   either loop back to `new` or enter the first real-flow state. Prefer a
@@ -211,6 +210,14 @@ For a choked/costly trigger (one listed in `fsm_trigger_chokes`, or wrapped via
 partial progress to an asset and check that asset on entry, so a retry (#3)
 *resumes* rather than redoing completed work. Trades implementation complexity
 for not paying twice on a mid-step failure.
+
+Read that progress asset with `case_assets.load_dataclass(alias)`, not
+`case_load_asset(alias)`. A `perform_` hook runs before the transition commits,
+so the case is still in the source state and the trust-checked accessor will
+raise `AssetNotTrustedInStateError` for an asset whose `trust_states` starts at
+the destination — which is the correct declaration. Widening `trust_states` to
+silence it is the wrong fix; it would make arrival in the destination state stop
+meaning the asset is complete. Writing needs no special handling either way.
 
 ### 10. Run summary / outcome asset
 

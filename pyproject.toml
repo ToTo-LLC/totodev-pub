@@ -1,6 +1,6 @@
 [project]
 name = "totodev-pub"
-version = "0.1.1"
+version = "0.2.0"
 description = "Public snapshot of the totodev utility library."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -99,6 +99,9 @@ dev = [
   "pytest-asyncio",
   "ruff",
 ]
+
+[project.scripts]
+totodev-manager-health = "totodev_pub.cli.manager_health:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

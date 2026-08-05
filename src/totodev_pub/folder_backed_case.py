@@ -22,6 +22,9 @@ CaseEventJournalView    — read-only facade over the case event-journal protoco
 CaseAssets              — working-file playground (assets/); retention-blind.
 FolderBackedCaseInterface — basic-usage contract (read this first).
 FolderBackedCase        — ABC you subclass to define a case type.
+FolderBackedCaseReader  — lock-free read-only view of a case folder (no lease);
+                          returned by ``get_case_reader()`` / manager iterators;
+                          import from folder_backed_case_support.folder_backed_case_reader.
 AdvanceResult           — outcome of case_advance() (non-throwing reporter).
 case_briefing.generate_case_briefing — static Markdown report for a case type (lifecycle diagram + tables); import from folder_backed_case_support.case_briefing.
 """
@@ -61,7 +64,8 @@ from totodev_pub.folder_backed_case_support.case_id_generation import (
 from totodev_pub.folder_backed_case_support.exceptions import (
     CaseAlreadyOpenError, OwnershipLostError, DetachedCaseError,
     CaseTypeMismatchError, RecordTypeMismatchError,
-    IncompatibleReclassError, MissingFsmError, FsmChainParseError, FsmBindingError,
+    IncompatibleReclassError, ReclassifyAssertionError, MissingFsmError,
+    FsmChainParseError, FsmBindingError,
     AutoAdvanceBlocked, TriggerTimeout, MissingAssetSchemaError, MissingTriggerChokesError,
     CaseTransitionInFlightError, CaseInvokedProcessError, PerformParamsError,
 )
@@ -100,7 +104,8 @@ __all__ = [
     "AdvanceResult",
     "FsmChainSpec", "CaseTypeSpec", "CaseAlreadyOpenError", "OwnershipLostError",
     "DetachedCaseError", "CaseTypeMismatchError",
-    "RecordTypeMismatchError", "IncompatibleReclassError", "MissingFsmError",
+    "RecordTypeMismatchError", "IncompatibleReclassError", "ReclassifyAssertionError",
+    "MissingFsmError",
     "FsmChainParseError", "FsmBindingError", "AutoAdvanceBlocked", "TriggerTimeout",
     "PerformParamsError",
     "CaseInvokedProcessError",
@@ -224,8 +229,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
         nickname: str | None = None,
         **fields,
     ) -> FolderBackedCase:
-        # Planned CaseManager (draft: notebooks/DEVDAVE/case_manager_classes/
-        # CaseManager Model.md) will also call this for fleet inception.
+        # CaseManager calls this too, for fleet inception: a case adopted into
+        # managed storage is created here first, then transferred.
         case_folder = Path(case_folder)
         book = cls._resolve_asset_book()
         asset_aliases = book.to_record()
@@ -289,7 +294,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # re-opening WITHOUT knowing the class is case_type_registry.rehydrate(folder). Both
     # are documented in SECTION 4 (__init__) and the CaseTypeRegistry, respectively.
 
-    def case_detach(self) -> None:
+    def case_detach(self) -> Path:
         # Guarded on is_active() (not just "is not None"), so this runs exactly ONCE per
         # live attach — idempotent against a repeat explicit call, __del__ calling it
         # again, or mid-reclassify's internal call. Banner + tee-disable happen BEFORE
@@ -302,10 +307,14 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # its own attach banner — so pretending detach could "reseal" a purged file was
         # already false. Keeping both bookends symmetric and unconditional is simpler and
         # doesn't claim a guarantee ("never touched again") the code can't actually make.
+        #
+        # Returns the folder path (including on idempotent re-calls) so create→detach→
+        # handoff can be fluent without retaining a separate path handle.
         if self._lease is not None and self._lease.is_active():
             write_detach_banner(self.log)
             disable_case_file_tee(self.log)
             self._lease.release()
+        return self._folder
 
     @_raises_when_detached
     async def case_advance(
@@ -523,7 +532,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
 
     @staticmethod
     def get_case_reader(folder: Path) -> "FolderBackedCaseReader":
-        from totodev_pub.folder_backed_case_reader import FolderBackedCaseReader
+        from totodev_pub.folder_backed_case_support.folder_backed_case_reader import FolderBackedCaseReader
         return FolderBackedCaseReader(Path(folder))
 
     # =======================================================================
@@ -691,13 +700,14 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # ---- Extended-status hook (polled, not event-driven) ----
 
     def case_ext_status_info(self) -> dict[str, Any]:
-        """Overridable hook for extended status when a case runs under ``CaseManager``.
+        """Overridable hook for ``FleetStatusBoard`` row decoration (``ext`` field).
 
-        The manager periodically publishes a fleet-status board — a shared snapshot of
-        all in-pool cases for operators and clients. On each row build it calls this
-        method and merges the returned dict into that row's ``ext`` field. Override to
-        supply case-specific extended status (e.g. ``percent_complete`` while a long,
-        slow ``perform_*`` step runs) without persisting transient progress to disk.
+        An attached ``FleetStatusBoard`` periodically rebuilds an abbreviated
+        snapshot of in-pool cases (optionally published to disk for out-of-process
+        clients). On each row build it calls this method and merges the returned
+        dict into that row's ``ext`` field. Override to supply case-specific
+        extended status (e.g. ``percent_complete`` while a long, slow ``perform_*``
+        step runs) without persisting transient progress to disk.
         Default: no-op (empty dict).
 
         Quick use:
@@ -715,7 +725,7 @@ class FolderBackedCase(FolderBackedCaseInterface):
           Keep this FAST and CHEAP — it may be called on every row build (as often as
           once per maintenance tick), so never touch disk, never block, never await.
           It may also be called WHILE a perform_* trigger for this case is actively
-          running (the fleet writer runs outside the trigger's own execution), so
+          running (the fleet board runs outside the trigger's own execution), so
           reading a value mid-update is expected and fine: this hook has no
           consistency guarantee relative to an in-flight trigger, and generally
           shouldn't need one for a best-effort progress signal like this."""
@@ -726,7 +736,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
     # itself a CaseIDGenerator, overriding this for just that call). Override on a
     # subclass to share one generator across case types, run multiple namespaces, or
     # encode limited type info into the id. Default: short, sortable, base-36
-    # millisecond time slug (in-process monotonic).
+    # millisecond time slug (in-process monotonic) -- so for cases minted from more
+    # than one process into one tree, set UUIDCaseIDGenerator() instead.
     case_id_generator: CaseIDGenerator = DEFAULT_CASE_ID_GENERATOR
 
     # Lease timing (TTL, beat throttle, in-flight pulse cadence) is a single FIXED policy in
@@ -760,11 +771,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         return self._fsm.trigger_timeouts.get(trigger, DEFAULT_TRIGGER_TIMEOUT_WARNING_SECS)
 
 
-    def archive_grouping_label(self) -> str:
-        """Destination archive grouping when this case closes. Default: close month
-        (``YYYY-MM``). Override to key on creation date, fiscal period, tenant, etc."""
-        return _utcnow().strftime("%Y-%m")
-
     # ---- reclassify ("call an audible" to a different subclass) ----
 
     def case_reclassify_to(
@@ -777,6 +783,12 @@ class FolderBackedCase(FolderBackedCaseInterface):
           Use when a case must change its TYPE mid-life (e.g. a generic intake becomes a
           specialized workflow) while keeping its folder, id, and history. The current
           state must be a valid state of `new_cls` or IncompatibleReclassError is raised.
+
+        After the type switch commits, assertions for the preserved state are swept under
+        the NEW class. Failures raise ``ReclassifyAssertionError`` (type stamp stays;
+        ``exc.case`` is the rebound instance). Assertion ``ltx`` is still
+        ``last_transition()`` — the real prior CASE_STATE_ENTERED that put the case in
+        this state, not a synthetic reclassify transition.
 
         Maintainer notes:
           Two-phase commit (crash-atomic):
@@ -803,6 +815,16 @@ class FolderBackedCase(FolderBackedCaseInterface):
         )
         fresh._flush_record(force=True)                      # phase 2: commit new name + schema
         type(fresh)._seed_keep_rules(fresh._keep_manifest)
+        # Post-commit safety check: new class's invariants for the preserved state.
+        sweep = fresh._assertion_runner.sweep(fresh.case_state)
+        if sweep.failed:
+            raise ReclassifyAssertionError(
+                case_id=fresh.case_id,
+                target_type=new_cls.__name__,
+                state=fresh.case_state,
+                failures=sweep.failures,
+                case=fresh,
+            )
         return fresh
 
     # =======================================================================
@@ -853,7 +875,6 @@ class FolderBackedCase(FolderBackedCaseInterface):
         "case_ext_status_info",
         # runtime seams & rare operations
         "trigger_warn_secs",
-        "archive_grouping_label",
         "case_reclassify_to",
         # lease-machinery peeks (fleet observers / recovery sweeps, not owners —
         # the owner's facility is case_heartbeat, on the interface)
@@ -1355,8 +1376,8 @@ class FolderBackedCase(FolderBackedCaseInterface):
             self._record.save()
 
     # Lease TTL is a fixed crash-recovery window (constants.py). Idle holders must
-    # detach, heartbeat, or delegate to a planned CaseManager (draft: notebooks/DEVDAVE/
-    # case_manager_classes/CaseManager Model.md) for fleet-wide keepalive.
+    # detach, heartbeat, or hand the case to a CaseManager, which keeps the whole
+    # fleet's leases alive for them.
 
     def _check_active(self) -> None:
         if self.case_is_detached:

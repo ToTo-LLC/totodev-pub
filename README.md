@@ -136,6 +136,26 @@ PYTHONPATH=src pytest
 This installs every runtime extra and runs the entire suite, exposing real
 regressions across all feature areas.
 
+### Before tagging a release: clear the lazy-test cache
+
+Tests wrapped in `very_lazy_test` (see `src/totodev_pub/pytest_tools.py`) skip
+themselves on a later run once they've passed, recording that pass in a gitignored
+`tests/<name>.passed_tests.tmp` file — a deliberate cost-saving measure for iterative
+local development, not a correctness gap. On a machine with accumulated cache files
+this can silently skip several dozen tests even in the "full lane" above, so a normal
+green run during day-to-day work is **not sufficient evidence for a release**.
+
+Before tagging, clear the cache and run once with nothing eligible to skip:
+
+```bash
+rm -f tests/*.passed_tests.tmp
+PYTHONPATH=src pytest
+```
+
+Compare the passed/skipped counts against a cached run from the same tree if you want
+to confirm the cache was actually doing something — the difference is exactly the set
+of tests a routine local run would not have exercised.
+
 ### How optional-feature gating works
 
 - Optional-feature tests are tagged with markers (`pipes`, `connectors`,

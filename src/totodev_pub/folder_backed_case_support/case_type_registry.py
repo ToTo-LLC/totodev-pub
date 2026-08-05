@@ -42,6 +42,10 @@ class CaseTypeRegistry:
     def __init__(self) -> None:
         self._registry: dict[str, type[FolderBackedCase]] = {}
 
+    def __len__(self) -> int:
+        """Number of registered case types."""
+        return len(self._registry)
+
     def register_case_types(self, *case_classes: type[FolderBackedCase]) -> None:
         """Register one or more case types, keyed by class ``__name__``.
 

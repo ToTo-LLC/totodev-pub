@@ -28,6 +28,7 @@ from .exceptions import (
     CaseTypeMismatchError,
     RecordTypeMismatchError,
     IncompatibleReclassError,
+    ReclassifyAssertionError,
     MissingFsmError,
     FsmChainParseError,
     FsmBindingError,
@@ -60,6 +61,33 @@ from .choke_permit_governor import (
     InvalidChokeLimitsError,
 )
 
+# The scheduling layer is resolved on first access rather than at package import.
+# Those modules import FolderBackedCase, which imports this package — binding them
+# eagerly here would close that cycle and break `import totodev_pub.case_manager`.
+_LAZY_EXPORTS = {
+    "CasePoolDriver": ".case_pool_driver",
+    "CasePoolEvent": ".case_pool_driver",
+    "CasePoolEventNames": ".case_pool_driver",
+    "BalancedCasePoolDriver": ".balanced_case_pool_driver",
+    "SeniorityCasePoolDriver": ".seniority_case_pool_driver",
+    "PoolMembershipJournal": ".pool_membership_journal",
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted([*globals().keys(), *_LAZY_EXPORTS])
+
 __all__ = [
     "RECORD_NAME",
     "LEASE_NAME",
@@ -79,6 +107,7 @@ __all__ = [
     "CaseTypeMismatchError",
     "RecordTypeMismatchError",
     "IncompatibleReclassError",
+    "ReclassifyAssertionError",
     "MissingFsmError",
     "FsmChainParseError",
     "FsmBindingError",
@@ -109,4 +138,10 @@ __all__ = [
     "ChokeGrantError",
     "ChokePermitGovernor",
     "InvalidChokeLimitsError",
+    "CasePoolDriver",
+    "CasePoolEvent",
+    "CasePoolEventNames",
+    "BalancedCasePoolDriver",
+    "SeniorityCasePoolDriver",
+    "PoolMembershipJournal",
 ]

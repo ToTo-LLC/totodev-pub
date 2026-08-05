@@ -1,0 +1,348 @@
+# Part of the totodev_pub library.
+# Repository: https://github.com/ToTo-LLC/totodev-pub
+
+"""Quarantine: immediate when the lease allows, deferred when it does not.
+
+The deferral is the design, not a fallback. A case that keeps renewing its lease
+while failing every interaction is exactly the one quarantine exists for, and
+moving its folder anyway would be a split-brain. So the move waits, behind a
+durable ticket the manager re-drives every tick.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+
+import pytest
+
+from case_manager_test_utils import (
+    TicketCase,
+    adopt_into_live,
+    provision_manager,
+    seed_detached_case,
+)
+from totodev_pub.case_manager_support.case_store import LIVE, QUARANTINED
+from totodev_pub.case_manager_support.quarantine import (
+    EV_QUARANTINED,
+    QuarantineTicket,
+    pending_quarantine_tickets,
+    quarantine_case,
+    quarantine_ticket_exists,
+    quarantine_ticket_path,
+    record_quarantine_reason,
+)
+from totodev_pub.folder_backed_case import FolderBackedCase
+from totodev_pub.folder_backed_case_support.case_journal import CaseEventJournalView
+from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
+from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
+
+
+class BlockingTicketCase(FolderBackedCase):
+    """Like TicketCase, but one step can be held mid-advance behind a gate."""
+
+    asset_aliases = {}
+    fsm_trigger_chokes = {}
+    fsm_state_chains = ["[*] --> open -- work --> done --> [*]"]
+
+    async def perform_work(self, tctx):
+        await self._gate.wait()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_case_registry():
+    saved = dict(case_type_registry._registry)
+    try:
+        yield
+    finally:
+        case_type_registry._registry.clear()
+        case_type_registry._registry.update(saved)
+
+
+@pytest.mark.asyncio
+async def test_operator_can_request_quarantine_of_a_live_case(tmp_path):
+    """Park a live case for investigation without ejecting it from managed storage."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+
+    dest = await manager.quarantine_case(case_id, reason="operator: investigate payload")
+
+    assert dest is not None
+    assert manager._store.status_of(case_id) == QUARANTINED
+    assert case_id not in [c.case_id for c in manager._driver]
+    assert case_id in [r.case_id for r in manager.iter_quarantine()]
+    labels = [ev.label for ev in CaseEventJournalView.for_folder(dest).primitive.events()]
+    assert EV_QUARANTINED in labels
+
+    await manager.reopen_case(case_id)
+    assert manager.get_live(case_id).case_id == case_id
+
+
+@pytest.mark.asyncio
+async def test_operator_quarantine_requires_a_reason(tmp_path):
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+
+    with pytest.raises(ValueError, match="reason"):
+        await manager.quarantine_case(case.case_id, reason="   ")
+
+
+@pytest.mark.asyncio
+async def test_quarantine_timeout_before_completion_returns_none(tmp_path):
+    """Timeout is 'not done yet', not a malfunction — None, not an exception."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    case_type_registry.register_case_types(BlockingTicketCase)
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(BlockingTicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+    case._gate = asyncio.Event()
+    manager._driver.boost(case.case_folder)
+    await manager._driver.advance(suggested_interval_secs=0.0)
+    assert manager._driver._by_folder[case.case_folder].in_flight
+
+    dest = await manager.quarantine_case(case_id, reason="park while busy", timeout=0.05)
+
+    assert dest is None
+    assert case_id not in [r.case_id for r in manager.iter_quarantine()]
+
+    case._gate.set()
+    await manager._driver.settle()
+
+
+@pytest.mark.asyncio
+async def test_operator_quarantine_waits_until_deferred_move_lands(tmp_path):
+    """Success means visible in quarantine — wait out a deferred relocate."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+
+    real_quarantine = manager._quarantine
+
+    async def defer_once(cid: str, folder, reason: str):
+        # Simulate lease-held deferral; maintenance finishes the move.
+        record_quarantine_reason(folder, cid, reason)
+        ticket_path = quarantine_ticket_path(manager._manager_dir, cid)
+        ticket_path.parent.mkdir(parents=True, exist_ok=True)
+        QuarantineTicket(
+            case_id=cid,
+            case_folder=str(folder),
+            reason=reason,
+            enqueued_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ).save(str(ticket_path), retain_lock=False)
+        manager._quarantine = real_quarantine
+        return None
+
+    manager._quarantine = defer_once  # type: ignore[method-assign]
+
+    async def pump_maintenance():
+        while manager._store.status_of(case_id) != QUARANTINED:
+            await manager._maintenance_tick()
+            await asyncio.sleep(0.01)
+
+    pump = asyncio.create_task(pump_maintenance())
+    try:
+        dest = await manager.quarantine_case(
+            case_id, reason="wait for deferred land", timeout=2.0
+        )
+    finally:
+        pump.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pump
+
+    assert dest is not None
+    assert case_id in [r.case_id for r in manager.iter_quarantine()]
+
+
+@pytest.mark.asyncio
+async def test_a_released_case_is_quarantined_immediately(tmp_path):
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id, live_folder = case.case_id, case.case_folder
+    case.case_detach()
+    (live_folder / "payload.txt").write_text("keep me", encoding="utf-8")
+
+    dest = await quarantine_case(
+        manager._store, manager._manager_dir, case_id, live_folder, "verification failed"
+    )
+
+    assert dest is not None and dest != live_folder
+    assert (dest / "payload.txt").read_text(encoding="utf-8") == "keep me"
+    assert manager._store.status_of(case_id) == QUARANTINED
+    assert not quarantine_ticket_exists(manager._manager_dir, case_id)
+
+
+@pytest.mark.asyncio
+async def test_a_held_lease_defers_the_move_behind_a_ticket(tmp_path):
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)   # adopt leaves the case attached
+    case_id, live_folder = case.case_id, case.case_folder
+
+    try:
+        dest = await quarantine_case(
+            manager._store, manager._manager_dir, case_id, live_folder, "will not die"
+        )
+        assert dest is None, "the move is deferred, not forced"
+        assert quarantine_ticket_exists(manager._manager_dir, case_id)
+        assert manager._store.status_of(case_id) == LIVE, "the folder has not moved"
+    finally:
+        case.case_detach()
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_move_lands_once_the_lease_lapses(tmp_path):
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+
+    await quarantine_case(
+        manager._store, manager._manager_dir, case_id, case.case_folder, "will not die"
+    )
+    assert pending_quarantine_tickets(manager._manager_dir)
+
+    # The lease lapses; the next tick re-drives the ticket.
+    case.case_detach()
+    await manager._maintenance_tick()
+
+    assert manager._store.status_of(case_id) == QUARANTINED
+    assert pending_quarantine_tickets(manager._manager_dir) == []
+
+
+@pytest.mark.asyncio
+async def test_waiting_out_a_lease_does_not_spend_retries(tmp_path):
+    """A lease can outlive many ticks; that must never retire the ticket."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+
+    try:
+        await quarantine_case(
+            manager._store, manager._manager_dir, case.case_id, case.case_folder, "held"
+        )
+        for _ in range(5):
+            await manager._maintenance_tick()
+
+        pending = pending_quarantine_tickets(manager._manager_dir)
+        assert len(pending) == 1, "the ticket survives every attempt"
+        assert QuarantineTicket.load(str(pending[0]), acquire_lock=False).retry_count == 0
+    finally:
+        case.case_detach()
+
+
+@pytest.mark.asyncio
+async def test_the_reason_is_recorded_on_the_case_itself(tmp_path):
+    """The reason belongs to the case's journal, which travels with the folder."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+
+    staging = tmp_path / "inbound"
+    seed_detached_case(TicketCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id, live_folder = case.case_id, case.case_folder
+    case.case_detach()
+
+    dest = await quarantine_case(
+        manager._store, manager._manager_dir, case_id, live_folder, "record was garbage"
+    )
+
+    labels = [ev.label for ev in CaseEventJournalView.for_folder(dest).primitive.events()]
+    assert EV_QUARANTINED in labels, "the reason survived the relocation with the case"
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_with_no_store_entry_is_absorbed(tmp_path):
+    """The rescue path: a folder on disk the index never knew about.
+
+    Copying bytes alone is not enough — an unregistered folder is invisible to
+    iter_quarantine() and to every other index-driven query the manager has.
+    """
+    manager = provision_manager(tmp_path)
+    manager._ensure_namespace()
+
+    orphan = tmp_path / "orphan"
+    case = seed_detached_case(TicketCase, orphan)
+    assert manager._store.find(case.case_id) is None
+
+    dest = await quarantine_case(
+        manager._store, manager._manager_dir, case.case_id, orphan, "orphaned by termination"
+    )
+
+    assert dest is not None and (dest / RECORD_NAME).exists()
+    assert manager._store.status_of(case.case_id) == QUARANTINED
+    assert case.case_id in [reader.case_id for reader in manager.iter_quarantine()]
+
+
+@pytest.mark.asyncio
+async def test_iter_quarantine_orders_oldest_first_by_default(tmp_path, monkeypatch):
+    """Matches store non-live ordering: oldest activity first; reverse=True flips it."""
+    from pathlib import Path
+
+    from totodev_pub.case_manager_support.case_store import LocalCaseStore
+
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    staging.mkdir()
+
+    early = await adopt_into_live(
+        manager, seed_detached_case(TicketCase, staging / "early").case_folder
+    )
+    late = await adopt_into_live(
+        manager, seed_detached_case(TicketCase, staging / "late").case_folder
+    )
+    early_id, late_id = early.case_id, late.case_id
+    times = {
+        early_id: datetime(2026, 7, 1, 12, 0, 0),
+        late_id: datetime(2026, 8, 15, 12, 0, 0),
+    }
+    real_activity = LocalCaseStore._activity_at
+
+    def fake_activity(self, folder):
+        for e in list(self.iter_by_status(LIVE)) + list(self.iter_by_status(QUARANTINED)):
+            if e.case_folder.resolve() == Path(folder).resolve() and e.case_id in times:
+                return times[e.case_id]
+        return real_activity(self, folder)
+
+    monkeypatch.setattr(LocalCaseStore, "_activity_at", fake_activity)
+
+    early.case_detach()
+    late.case_detach()
+    await quarantine_case(
+        manager._store, manager._manager_dir, early_id, early.case_folder, "early"
+    )
+    await quarantine_case(
+        manager._store, manager._manager_dir, late_id, late.case_folder, "late"
+    )
+
+    assert [r.case_id for r in manager.iter_quarantine()] == [early_id, late_id]
+    assert [r.case_id for r in manager.iter_quarantine(reverse=True)] == [late_id, early_id]
+    assert [r.case_id for r in manager.iter_quarantine(
+        after=datetime(2026, 8, 1), before=datetime(2026, 8, 31, 23, 59)
+    )] == [late_id]

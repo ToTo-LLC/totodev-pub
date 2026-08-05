@@ -263,7 +263,7 @@ bind time — so only stub what the chains actually name.
 
 | Pattern | Signature | When it fires | Stub for |
 |---|---|---|---|
-| `perform_<trigger>` | `async def (self, tctx: EventData)` for **auto** triggers; `async def (self, tctx: EventData, *, ...)` for **manual** triggers that take caller payload (keyword-only params are the kwargs contract) | the trigger's main work; auto-wired as `before_<trigger>` if no explicit `before_<trigger>` exists | every trigger named in the chains that does real work |
+| `perform_<trigger>` | `async def (self, tctx: EventData)` | the trigger's main work; auto-wired as `before_<trigger>` if no explicit `before_<trigger>` exists | every trigger named in the chains that does real work |
 | `before_<trigger>` | `async def (self, tctx: EventData)` | before the transition, only if you need this *and* a separate `perform_` | only if the developer distinguishes "before" from "perform" |
 | `after_<trigger>` | `async def (self, tctx: EventData)` | after the transition commits | only if the developer names post-transition work |
 | `guard_<guard>` | `async def (self, tctx: EventData) -> bool` | polled (possibly many times); must be fast, idempotent, side-effect free | every method guard named in a bracket group (`trigger [guard]`) in the chains |
@@ -273,19 +273,10 @@ bind time — so only stub what the chains actually name.
 `tctx` is `transitions.core.EventData` (not the event journal). Always annotate
 it in generated stubs: `tctx: EventData`, with
 `from transitions.core import EventData`. Kwargs passed to a direct trigger
-call (`await case.<trigger>(path=...)`) land in `tctx.kwargs` and are bound to
-`perform_<trigger>`'s keyword-only parameters (annotated; required vs defaulted
-as in ordinary Python). Use those parameters inside `perform_*` — do not dig
-declared keys back out of `tctx.kwargs`.
-
-**Auto vs manual kwargs.** Auto-advance triggers (`--`) take **no** caller
-kwargs — generate `(self, tctx)` only. Manual triggers (`==`) may declare
-keyword-only params after `tctx`; the case-designer skill interviews those late
-(after the lifecycle settles). Prefer JSON/YAML-serializable types (`str`,
-`int`, `float`, `bool`, `None`, lists/dicts of those; filepaths as `str` not
-`Path`) so multiprocess / manager relays can persist or cross process boundaries.
-Raising in a guard or `before_` hook aborts the transition and counts as a
-failed attempt (feeds `@FAIL`).
+call land in `tctx.kwargs`. Keep those kwargs JSON-serializable — parts of the
+`CaseManager` framework may persist or relay them. Raising in a guard or
+`before_` hook aborts the transition and counts as a failed attempt (feeds
+`@FAIL`).
 
 Hooks must be well-behaved async — they share one event loop with every other
 live case. Long/blocking work belongs behind `case_invoke_threaded()` (in-process
@@ -426,12 +417,7 @@ class MyCase(FolderBackedCase):
         self.log.warning("STUB not implemented: %s", caller)
         return retval
 
-    async def perform_<auto_trigger>(self, tctx: EventData) -> None:
-        return self._not_implemented(None)
-
-    async def perform_<manual_trigger>(
-        self, tctx: EventData, *, path: str, force: bool = False,
-    ) -> None:
+    async def perform_<trigger>(self, tctx: EventData) -> None:
         return self._not_implemented(None)
 
     async def guard_<guard>(self, tctx: EventData) -> bool:
