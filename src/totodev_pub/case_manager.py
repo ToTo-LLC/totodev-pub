@@ -84,14 +84,12 @@ from totodev_pub.case_manager_support.case_store import (
     LocalCaseStore,
 )
 from totodev_pub.case_manager_support.constants import (
-    EJECT_SUBDIR,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     PULSE_INTERVAL_SECS,
-    QUARANTINE_SUBDIR,
     RESULTS_SUBDIR,
-    TERMINATION_SUBDIR,
 )
+from totodev_pub.case_manager_support.namespace_map import provisioned_namespace_dirs
 from totodev_pub.case_manager_support.eject import (
     EjectResult,
     EjectTicket,
@@ -1210,26 +1208,15 @@ class CaseManager:
 
         Storage buckets are created by the case store; this owns only the manager
         control directory (mailboxes, tickets, leases, and related state).
+
+        The directory list is not written here — it comes from
+        ``namespace_map.provisioned_namespace_dirs``, which is also what renders
+        ``docs/case-manager-layout.md``. One declaration serves both so the
+        documented tree cannot drift from the provisioned one.
         """
         mgr_dir.mkdir(parents=True, exist_ok=True)
-        for sub in (
-            policy.staging_subdir,
-            policy.adopt_drop_subdir,
-            policy.fire_mailbox_subdir,
-            policy.adopt_mailbox_subdir,
-            RESULTS_SUBDIR,
-            *(f"{TERMINATION_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
-            *(f"{EJECT_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
-            *(f"{QUARANTINE_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
-        ):
+        for sub in provisioned_namespace_dirs(policy):
             (mgr_dir / sub).mkdir(parents=True, exist_ok=True)
-        for sub in ("intake", "malformed"):
-            (mgr_dir / policy.fire_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
-        for sub in ("intake", "malformed", "executing"):
-            (mgr_dir / policy.reclassify_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
-        (mgr_dir / policy.adopt_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
-        (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
-        (mgr_dir / policy.shutdown_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
 
     def _write_manifest(
         self, *, running: bool = False, stopped: bool = False, recovering: bool = False
