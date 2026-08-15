@@ -4,6 +4,70 @@ Notable changes to `totodev-pub`. Format follows [Keep a Changelog](https://keep
 versioning is [semantic](https://semver.org/spec/v2.0.0.html). Releases before 0.2.0 predate
 this file and are not recorded here.
 
+## [Unreleased]
+
+### Changed — BREAKING: on-disk layout cutover
+
+The four per-action mailboxes became one request queue, and the two scratch docks
+became one loading dock. **`POLICY_SCHEMA_VERSION` 2 → 3, with no migration.**
+Layout is immutable per filespace, so a filespace created at schema 2 cannot be
+opened by this version — a deliberate one-time break taken while the layout was
+not yet depended on in production. Recreate the filespace.
+
+- **`requests/` replaces `fire_mailbox/`, `adopt_mailbox/`, `reclassify_mailbox/`
+  and `shutdown_mailbox/`.** The action moved out of the folder path and into the
+  message's `op` field, so adding one costs a message type and a handler rather
+  than an edit to four files. Stages are `queued/`, `claimed/{case_id}/`,
+  `running/{case_id}/`, `failed/`, `results/`, plus a `shutdown/` leaf.
+- **One word per state.** Three words meant "in progress" (`firing`, `executing`,
+  and adopt's `pending`) while fire's `pending` meant "accepted, not started" — so
+  `pending` denoted two opposite things in two sibling mailboxes.
+- **`incoming/` replaces `staging/` and `adopt_drop/`.** Two docks meant two
+  cleaner rules with no stated rule for choosing between them, and `adopt_drop`
+  was named after one of its readers rather than its contents. One rule now:
+  reclaimed only when old, unleased, **and** carrying no `.ready` marker.
+- **`incoming/` is drained every tick.** Its predecessor scanned once at startup,
+  behind an off-by-default flag, so a folder dropped by another process waited for
+  the next restart.
+- The manager namespace is **17 directories, down from 24**.
+
+### Changed — API
+
+- `Policy`: `requests_subdir` / `incoming_subdir` replace the four `*_mailbox_subdir`
+  fields plus `staging_subdir` and `adopt_drop_subdir`. `staging_min_age_secs` →
+  `incoming_min_age_secs`, `staging_stale_lease_secs` → `incoming_stale_lease_secs`,
+  `startup_adopt_scan` → `startup_incoming_scan`.
+- `allocate_staging_folder()` → `allocate_incoming_folder()`, on both `CaseManager`
+  and `CaseManagerClient`.
+- `FireRequest` / `AdoptRequest` / `ReclassifyRequest` → one `RequestEnvelope`
+  carrying `op` plus a typed payload (`FirePayload`, `AdoptPayload`,
+  `ReclassifyPayload`). `MAILBOX_PROTOCOL_VERSION` 1 → 2.
+- `MailboxTransport`: `queued()` / `claimed()` / `running()` / `failed()` replace the
+  per-mailbox intake and stage accessors.
+- `ManifestPaths` publishes `requests_queued`, `requests_claimed`, `requests_running`,
+  `requests_failed`, `shutdown_intake` and `incoming` in place of the four intakes,
+  `staging` and `adopt_drop`. `MANIFEST_PROTOCOL_VERSION` 1 → 2.
+- `AdapterRecoverReport` gains `requeued`; requeueing from `claimed/` is now
+  op-agnostic, since claiming happens before any work touches a case.
+
+### Behaviour changes worth knowing
+
+- **Drain order is submission order.** It was fire → reclassify → adopt within a
+  tick, which meant a fire co-submitted with an adopt was processed *before* the
+  adopt that would have pooled its case. One FIFO queue removes that trap.
+- **A request too broken to name its own `op` gets a generic error result.** With
+  the action in the folder path, even unparseable garbage could be answered in the
+  right shape; now the action lives in the file. A body that still parses as YAML
+  keeps its op and its result type. Either way the submitter gets a terminal
+  error rather than silence, which is the property that actually matters.
+
+### Added
+
+- `docs/case-manager-layout.md` — a generated map of the whole on-disk layout,
+  rendered from the same declaration the manager provisions from
+  (`case_manager_support/namespace_map.py`), with tests pinning declaration,
+  disk and document together.
+
 ## [0.2.0] - 2026-08-04
 
 Introduces `CaseManager`, the supervision layer for the `FolderBackedCase` family.

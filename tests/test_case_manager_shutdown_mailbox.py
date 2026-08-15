@@ -46,5 +46,7 @@ async def test_manifest_advertises_shutdown_intake(tmp_path):
     manifest = CaseManagerManifest.load(
         str(manager._manager_dir / MANIFEST_FILENAME), acquire_lock=False
     )
-    assert manifest.paths.shutdown_mailbox_intake is not None
-    assert "shutdown_mailbox" in manifest.paths.shutdown_mailbox_intake
+    assert manifest.paths.shutdown_intake is not None
+    # Its own leaf under the request channel, not a stage of the shared queue:
+    # the host polls it whether or not an adapter exists.
+    assert manifest.paths.shutdown_intake.endswith("requests/shutdown")

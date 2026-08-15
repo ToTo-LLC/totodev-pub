@@ -27,7 +27,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
-from totodev_pub.case_manager_support.layout import read_case_id_from_folder
 from totodev_pub.folder_backed_case_support.case_type_registry import case_type_registry
 from totodev_pub.folder_backed_case_support.constants import RECORD_NAME
 
@@ -97,7 +96,7 @@ async def load_case_bag(
         if not (child / RECORD_NAME).exists():
             report.skipped.append(child.name)
             continue
-        staged = manager.allocate_staging_folder()
+        staged = manager.allocate_incoming_folder()
         shutil.copytree(child, staged, dirs_exist_ok=True)
         result = await manager.adopt_case(staged)
         if result.status == "completed":

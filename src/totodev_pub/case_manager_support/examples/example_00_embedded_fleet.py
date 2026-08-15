@@ -64,14 +64,14 @@ async def main(work_dir: Path) -> None:
     await manager.recover()
     await manager.start()
 
-    # 4/5. Build each case in staging, then adopt it. Staging is on the same
+    # 4/5. Build each case in incoming/, then adopt it. The dock is on the same
     #      filesystem as managed storage, so adopt renames rather than copies.
     #      case_detach() matters: adopt refuses a folder that is still leased.
     #      It returns that folder, so the handoff reads as one phrase — build,
     #      let go, adopt. Adopt then consumes the folder and pools the case.
     ids: dict[str, str] = {}
     for case_cls, external_key in ((InquiryCase, "INQ-1"), (EscalationCase, "ESC-1")):
-        staged = manager.allocate_staging_folder()
+        staged = manager.allocate_incoming_folder()
         result = await manager.adopt_case(
             case_cls.create_case_in_folder(staged, external_key=external_key).case_detach()
         )

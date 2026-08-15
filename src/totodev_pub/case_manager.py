@@ -84,10 +84,15 @@ from totodev_pub.case_manager_support.case_store import (
     LocalCaseStore,
 )
 from totodev_pub.case_manager_support.constants import (
+    CLAIMED_STAGE,
+    FAILED_STAGE,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     PULSE_INTERVAL_SECS,
+    QUEUED_STAGE,
     RESULTS_SUBDIR,
+    RUNNING_STAGE,
+    SHUTDOWN_STAGE,
 )
 from totodev_pub.case_manager_support.namespace_map import provisioned_namespace_dirs
 from totodev_pub.case_manager_support.eject import (
@@ -131,7 +136,11 @@ from totodev_pub.case_manager_support.quarantine import (
 )
 from totodev_pub.case_manager_support.readmit import OrphanReadmitReport, readmit_orphans
 from totodev_pub.case_manager_support.recover import RecoverReport, recover_manager
-from totodev_pub.case_manager_support.staging import allocate_staging_folder
+from totodev_pub.case_manager_support.incoming import (
+    allocate_incoming_folder,
+    incoming_root,
+    is_ready,
+)
 from totodev_pub.case_manager_support.ticket_attempts import TicketAttemptLedger
 from totodev_pub.case_manager_support.termination import (
     TerminationTicket,
@@ -253,7 +262,7 @@ class CaseManager:
         await manager.recover()                           # claim + reconcile
         await manager.start()                             # enter run mode
 
-        staged = manager.allocate_staging_folder()        # consumed by adopt
+        staged = manager.allocate_incoming_folder()        # consumed by adopt
         result = await manager.adopt_case(                # detach: adopt needs it unleased
             InquiryCase.create_case_in_folder(staged, external_key="INQ-1").case_detach()
         )
@@ -519,11 +528,11 @@ class CaseManager:
     ) -> AdoptResult:
         """Take a detached case folder into managed storage and the live pool.
 
-        ``source_folder`` need not be under staging — any path outside managed
-        storage is accepted (staging / adopt-drop are just convenient scratch).
+        ``source_folder`` need not be under ``incoming/`` — any path outside
+        managed storage is accepted (``incoming/`` is just convenient scratch).
         On success the source is consumed: its contents are moved into the new
         managed location and the emptied source directory is removed. Prefer
-        ``allocate_staging_folder()`` when the tree is expendable and you want
+        ``allocate_incoming_folder()`` when the tree is expendable and you want
         a same-filesystem rename rather than a cross-device copy.
 
         If adopt fails after the case has already been partially taken into
@@ -551,7 +560,7 @@ class CaseManager:
             )
         return result
 
-    def allocate_staging_folder(self) -> Path:
+    def allocate_incoming_folder(self) -> Path:
         """Allocate one folder into which a case may be placed, typically prior
         to calling adopt_case().
 
@@ -561,24 +570,30 @@ class CaseManager:
         both ``create_case_in_folder()`` and ``copytree(..., dirs_exist_ok=True)``
         can fill it::
 
-            staged = manager.allocate_staging_folder()
+            staged = manager.allocate_incoming_folder()
             # case_detach() returns the folder, so the handoff stays one phrase.
             # It is not optional: adopt rejects a source that is still leased.
             await manager.adopt_case(
                 MyCase.create_case_in_folder(staged, external_key="K-1").case_detach()
             )
 
-        Abandoned staging is reclaimed on each allocate (lazy GC):
+        Abandoned folders are reclaimed on each allocate (lazy GC), and only when
+        all three of "old", "unleased" and "no ``.ready`` marker" hold:
 
-        - no / expired lease and older than ``staging_min_age_secs`` (default 5 min)
-          → removed
-        - still-leased but older than ``staging_stale_lease_secs`` (default 24 h)
-          → removed (stale builder presumed dead)
+        - ``.ready`` present → never removed; the manager is about to consume it
+        - no / expired lease and older than ``incoming_min_age_secs`` (default 5
+          min) → removed
+        - still-leased but older than ``incoming_stale_lease_secs`` (default 24 h)
+          → removed (stale builder presumed dead), and logged
 
         In-flight builds younger than those thresholds are left alone. Sweep does
         not run on a timer — only when something allocates again.
+
+        This replaced ``allocate_staging_folder``: ``staging/`` and ``adopt_drop/``
+        were merged into one ``incoming/`` dock, because two docks meant two
+        cleaner rules with no stated rule for choosing between them.
         """
-        return allocate_staging_folder(self._manager_dir, self._policy)
+        return allocate_incoming_folder(self._manager_dir, self._policy)
 
     async def eject_from_pool(
         self,
@@ -1222,24 +1237,21 @@ class CaseManager:
         self, *, running: bool = False, stopped: bool = False, recovering: bool = False
     ) -> None:
         rel = lambda p: str(Path(p).relative_to(self._cache_root))
+        # Composed from policy rather than by asking a MailboxTransport, so the
+        # manager stays transport-free: publishing where requests live is a layout
+        # fact, and importing the transport to state it would invert the layering
+        # this module's docstring rests on.
+        requests = self._manager_dir / self._policy.requests_subdir
         paths = ManifestPaths(
-            fire_mailbox_intake=rel(
-                self._manager_dir / self._policy.fire_mailbox_subdir / "intake"
-            ),
-            adopt_mailbox_intake=rel(
-                self._manager_dir / self._policy.adopt_mailbox_subdir / "intake"
-            ),
-            reclassify_mailbox_intake=rel(
-                self._manager_dir / self._policy.reclassify_mailbox_subdir / "intake"
-            ),
-            shutdown_mailbox_intake=rel(
-                self._manager_dir / self._policy.shutdown_mailbox_subdir / "intake"
-            ),
-            results=rel(self._manager_dir / RESULTS_SUBDIR),
-            adopt_drop=rel(self._manager_dir / self._policy.adopt_drop_subdir),
+            requests_queued=rel(requests / QUEUED_STAGE),
+            results=rel(requests / RESULTS_SUBDIR),
+            requests_claimed=rel(requests / CLAIMED_STAGE),
+            requests_running=rel(requests / RUNNING_STAGE),
+            requests_failed=rel(requests / FAILED_STAGE),
+            shutdown_intake=rel(requests / SHUTDOWN_STAGE),
+            incoming=rel(incoming_root(self._manager_dir, self._policy)),
             termination_pending=rel(termination_dir(self._manager_dir) / "pending"),
             eject_pending=rel(eject_dir(self._manager_dir) / "pending"),
-            staging=rel(self._manager_dir / self._policy.staging_subdir),
             fleet_status_board=None,
         )
         manifest = CaseManagerManifest(
@@ -1415,7 +1427,7 @@ class CaseManager:
             await asyncio.sleep(PULSE_INTERVAL_SECS)
 
     async def _maintenance_tick(self) -> None:
-        """One maintenance pass: terminate/eject/quarantine tickets, mailbox, purge.
+        """One maintenance pass: requests, incoming, tickets, purge.
 
         Each item is isolated so one bad ticket is quarantined/escalated without
         aborting the rest of the tick or exhausting the loop-failure budget.
@@ -1425,6 +1437,11 @@ class CaseManager:
         for callback in self._maintenance_cbs:
             with self._isolated_tick_item("maintenance callback", self._manager_dir):
                 await callback()
+        # Every tick, not only at startup. A folder handed over by another process
+        # is admitted within about a second; its predecessor scanned once during
+        # recovery, behind an off-by-default flag, so a drop waited for a restart.
+        with self._isolated_tick_item("incoming drain", self._manager_dir):
+            await self._drain_incoming()
         for ticket_file in replay_pending(self._manager_dir):
             with self._isolated_tick_item("termination ticket", ticket_file):
                 await self._drive_ticket(
@@ -1702,16 +1719,29 @@ class CaseManager:
         if fut is not None and not fut.done():
             fut.set_result(landed)
 
-    async def _scan_adopt_drop(self) -> dict[str, int]:
-        drop = self._manager_dir / self._policy.adopt_drop_subdir
+    async def _drain_incoming(self) -> dict[str, int]:
+        """Admit every complete folder waiting in ``incoming/``.
+
+        A folder counts as complete only when it carries a ``.ready`` marker.
+        That gate is what lets an out-of-process writer take no lease: an upload
+        still in progress has no marker, so it is passed over rather than adopted
+        half-written.
+
+        Runs on **every tick**, not only at startup. Its predecessor
+        (``_scan_adopt_drop``) ran once during recovery and only when
+        ``startup_adopt_scan`` was switched on — off by default — so a folder
+        dropped by another process waited for the next restart.
+        """
+        incoming = incoming_root(self._manager_dir, self._policy)
         seen = admitted = rejected = skipped = 0
-        if not drop.exists():
+        if not incoming.exists():
             return {"seen": 0, "admitted": 0, "rejected": 0, "skipped": 0}
-        for child in sorted(drop.iterdir()):
-            if not child.is_dir():
+        for child in sorted(incoming.iterdir()):
+            if not child.is_dir() or child.name.startswith("ADOPT_REJECTED_"):
+                skipped += 1 if child.is_dir() else 0
                 continue
-            if child.name.startswith("ADOPT_REJECTED_"):
-                skipped += 1
+            if not is_ready(child):
+                skipped += 1  # still being assembled; not ours yet
                 continue
             seen += 1
             result = await self.adopt_case(child)
@@ -1719,8 +1749,7 @@ class CaseManager:
                 admitted += 1
             else:
                 rejected += 1
-                new_name = drop / f"ADOPT_REJECTED_{child.name}"
-                child.rename(new_name)
+                child.rename(incoming / f"ADOPT_REJECTED_{child.name}")
         return {"seen": seen, "admitted": admitted, "rejected": rejected, "skipped": skipped}
 
     def _readers_at(

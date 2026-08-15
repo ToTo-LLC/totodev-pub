@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from totodev_pub.case_manager_support.case_store import LIVE
 from totodev_pub.case_manager_support.exceptions import RecoveryIntegrityError
@@ -37,10 +37,10 @@ class RecoverReport:
     pool_restored: int = 0
     termination_pending: int = 0
     eject_pending: int = 0
-    adopt_drop_seen: int = 0
-    adopt_drop_admitted: int = 0
-    adopt_drop_rejected: int = 0
-    adopt_drop_skipped: int = 0
+    incoming_seen: int = 0
+    incoming_admitted: int = 0
+    incoming_rejected: int = 0
+    incoming_skipped: int = 0
     dropped_paths: list[Path] = field(default_factory=list)
     shutdown_requests_discarded: int = 0
     orphans_readmitted: int = 0
@@ -73,7 +73,6 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     if journal_path:
         journal = PoolMembershipJournal(journal_path)
     else:
-        import tempfile
         journal = PoolMembershipJournal(
             manager._manager_dir / ".ephemeral_journal.jsonl"
         )
@@ -88,12 +87,17 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
     report.pool_restored = len(rebuild.readded)
     report.dropped_paths = list(rebuild.dropped)
 
-    if manager._policy.startup_adopt_scan:
-        drop_report = await manager._scan_adopt_drop()
-        report.adopt_drop_seen = drop_report["seen"]
-        report.adopt_drop_admitted = drop_report["admitted"]
-        report.adopt_drop_rejected = drop_report["rejected"]
-        report.adopt_drop_skipped = drop_report["skipped"]
+    if manager._policy.startup_incoming_scan:
+        # Optional: admit a backlog *before* the loop starts beating, so a
+        # restart does not begin by reporting an empty pool it is about to fill.
+        # Not the primary path — the maintenance tick drains incoming/ every
+        # tick, so a folder dropped here is admitted within about a second either
+        # way. This only front-loads it.
+        drained = await manager._drain_incoming()
+        report.incoming_seen = drained["seen"]
+        report.incoming_admitted = drained["admitted"]
+        report.incoming_rejected = drained["rejected"]
+        report.incoming_skipped = drained["skipped"]
 
     report.termination_pending = manager._count_termination_pending()
     report.eject_pending = manager._count_eject_pending()
@@ -124,16 +128,16 @@ def _log_report(report: RecoverReport) -> None:
     """
     logger.info(
         "Recovery complete: pool_restored=%d orphans_readmitted=%d "
-        "termination_pending=%d eject_pending=%d adopt_drop=%d/%d/%d/%d "
+        "termination_pending=%d eject_pending=%d incoming=%d/%d/%d/%d "
         "shutdown_requests_discarded=%d",
         report.pool_restored,
         report.orphans_readmitted,
         report.termination_pending,
         report.eject_pending,
-        report.adopt_drop_seen,
-        report.adopt_drop_admitted,
-        report.adopt_drop_rejected,
-        report.adopt_drop_skipped,
+        report.incoming_seen,
+        report.incoming_admitted,
+        report.incoming_rejected,
+        report.incoming_skipped,
         report.shutdown_requests_discarded,
     )
     if report.dropped_paths:

@@ -45,9 +45,9 @@ async def test_pending_intake_is_the_adapters_half_of_idle(tmp_path):
     assert manager.is_idle is True
     assert adapter.is_idle is True
 
-    intake = adapter.transport.fire_intake()
-    intake.mkdir(parents=True, exist_ok=True)
-    (intake / "req.yaml").write_text("pending: true\n", encoding="utf-8")
+    queued = adapter.transport.queued()
+    queued.mkdir(parents=True, exist_ok=True)
+    (queued / "req.yaml").write_text("op: fire\n", encoding="utf-8")
 
     assert adapter.is_idle is False, "the adapter sees the backlog"
     assert manager.is_idle is True, "the fleet has nothing pooled, and says only that"

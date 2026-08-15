@@ -29,12 +29,17 @@ from typing import TYPE_CHECKING
 
 from totodev_pub.case_manager_support.case_store import QUARANTINED, TERMINATED
 from totodev_pub.case_manager_support.constants import (
+    CLAIMED_STAGE,
     EJECT_SUBDIR,
+    FAILED_STAGE,
     FLEET_STATUS_FILENAME,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     QUARANTINE_SUBDIR,
+    QUEUED_STAGE,
     RESULTS_SUBDIR,
+    RUNNING_STAGE,
+    SHUTDOWN_STAGE,
     TERMINATION_SUBDIR,
 )
 
@@ -104,8 +109,8 @@ def namespace_entries(policy: "CaseManagerPolicy") -> tuple[LayoutEntry, ...]:
     """
     return (
         *_namespace_files(),
-        *_scratch_docks(policy),
-        *_mailbox_entries(policy),
+        *_incoming_entry(policy),
+        *_request_queue_entries(policy),
         *_ticket_entries(),
     )
 
@@ -130,53 +135,62 @@ def _namespace_files() -> tuple[LayoutEntry, ...]:
     )
 
 
-def _scratch_docks(policy: "CaseManagerPolicy") -> tuple[LayoutEntry, ...]:
-    in_process = "Scratch dock for in-process assembly. Holds a lease while building"
-    handover = "Scratch dock for a folder handed over by another process. No lease"
-    return (
-        LayoutEntry(policy.staging_subdir, in_process),
-        LayoutEntry(policy.adopt_drop_subdir, handover),
-    )
+def _incoming_entry(policy: "CaseManagerPolicy") -> tuple[LayoutEntry, ...]:
+    """The one loading dock, and the only place under the namespace holding case data.
 
+    Replaces ``staging/`` and ``adopt_drop/``. They did nearly the same job under
+    two cleaner rules with no stated rule for choosing between them, and
+    ``adopt_drop`` was named after one of the actions that read it rather than
+    after what it held — which misleads the moment anything else reads it too.
 
-def _mailbox_entries(policy: "CaseManagerPolicy") -> tuple[LayoutEntry, ...]:
-    """The four request mailboxes plus the shared results directory.
-
-    The stage vocabulary is inconsistent by accident rather than design:
-    ``firing``, ``executing`` and adopt's ``pending`` all mean "in progress",
-    while fire's ``pending`` means "accepted, not yet launched". Recorded as it
-    is — the map's job is to describe the tree, not to improve it.
+    It must sit on the same volume as the status buckets: admission is an atomic
+    rename into ``live/``, and across a device boundary that degrades into a
+    file-by-file copy a crash could tear in half.
     """
-    key = CASE_KEY_TOKEN
-    fire, adopt = policy.fire_mailbox_subdir, policy.adopt_mailbox_subdir
-    reclassify, shutdown = (
-        policy.reclassify_mailbox_subdir,
-        policy.shutdown_mailbox_subdir,
-    )
-    unparseable = "Dead-lettered: the request would not parse"
     return (
-        LayoutEntry(fire, "Mailbox: 'make this case take a step'"),
-        LayoutEntry(f"{fire}/intake", "Submitted fires, awaiting the next drain"),
-        LayoutEntry(f"{fire}/malformed", unparseable),
         LayoutEntry(
-            f"{fire}/pending",
-            "Accepted, awaiting a slot or choke permit",
-            EntryKind.RUNTIME_DIR,
+            policy.incoming_subdir,
+            "Case material being assembled. Admitted once a .ready marker appears",
         ),
-        LayoutEntry(f"{fire}/pending/{key}", "One case's queued step", EntryKind.RUNTIME_DIR),
-        LayoutEntry(f"{fire}/firing", "Launched by the sweep", EntryKind.RUNTIME_DIR),
-        LayoutEntry(f"{fire}/firing/{key}", "One case's running step", EntryKind.RUNTIME_DIR),
-        LayoutEntry(adopt, "Mailbox: 'take ownership of this folder'"),
-        LayoutEntry(f"{adopt}/intake", "Submitted adopts, awaiting the next drain"),
-        LayoutEntry(f"{adopt}/pending", "Executing now. Settled against the store after a crash"),
-        LayoutEntry(reclassify, "Mailbox: 'change this case to a different type'"),
-        LayoutEntry(f"{reclassify}/intake", "Submitted reclassifies, awaiting the next drain"),
-        LayoutEntry(f"{reclassify}/malformed", unparseable),
-        LayoutEntry(f"{reclassify}/executing", "Executing now, one subfolder per case"),
-        LayoutEntry(f"{reclassify}/executing/{key}", "One case's step", EntryKind.RUNTIME_DIR),
-        LayoutEntry(shutdown, "Mailbox: 'stop'. Polled by the host, not the adapter"),
-        LayoutEntry(f"{shutdown}/intake", "Any non-hidden file here requests a shutdown"),
-        LayoutEntry(RESULTS_SUBDIR, "Answers by correlation id. Swept after result_ttl_secs"),
+    )
+
+
+def _request_queue_entries(policy: "CaseManagerPolicy") -> tuple[LayoutEntry, ...]:
+    """One queue for every action, replacing the four per-action mailboxes.
+
+    The action moved out of the folder path and into the message's ``op`` field,
+    so adding an action costs one message type and one handler rather than an
+    edit to four files and three new directories.
+
+    One word per state, each meaning exactly one thing. ``claimed`` and
+    ``running`` stay distinct because for a fire the difference is real and
+    operationally useful — accepted-but-waiting-for-a-choke-permit is not
+    executing, and collapsing them would hide the queue depth an operator needs.
+    """
+    key, requests = CASE_KEY_TOKEN, policy.requests_subdir
+    return (
+        LayoutEntry(requests, "The request channel. Every action, one message format"),
+        LayoutEntry(f"{requests}/{QUEUED_STAGE}", "Submitted; the manager has not claimed it yet"),
+        LayoutEntry(f"{requests}/{CLAIMED_STAGE}", "Claimed, awaiting a slot. One dir per case"),
+        LayoutEntry(
+            f"{requests}/{CLAIMED_STAGE}/{key}", "One case's claimed work", EntryKind.RUNTIME_DIR
+        ),
+        LayoutEntry(f"{requests}/{RUNNING_STAGE}", "Executing right now. One dir per case"),
+        LayoutEntry(
+            f"{requests}/{RUNNING_STAGE}/{key}", "One case's running work", EntryKind.RUNTIME_DIR
+        ),
+        LayoutEntry(
+            f"{requests}/{FAILED_STAGE}",
+            "Gave up, or would not parse. Never retried — a human must look",
+        ),
+        LayoutEntry(
+            f"{requests}/{RESULTS_SUBDIR}",
+            "Answers by correlation id. Swept after result_ttl_secs",
+        ),
+        LayoutEntry(
+            f"{requests}/{SHUTDOWN_STAGE}",
+            "Any non-hidden file requests a stop. Polled by the host, not the adapter",
+        ),
     )
 
 
@@ -200,6 +214,18 @@ def _ticket_entries() -> tuple[LayoutEntry, ...]:
             LayoutEntry(f"{subdir}/failed", "Gave up after max retries. A human must look")
         )
     return tuple(entries)
+
+
+def request_channel_dirs(policy: "CaseManagerPolicy") -> tuple[str, ...]:
+    """The request-channel subset, for the transport to ensure on its own.
+
+    The transport creates its directories independently of provisioning — on every
+    maintenance tick and every submit — because a client may write a request into a
+    filespace whose manager has not run yet. Before this existed the transport kept
+    a second hand-written list of the same paths, which nothing forced to agree
+    with the declaration. Deriving it here means there is only one list.
+    """
+    return tuple(e.path for e in _request_queue_entries(policy) if e.kind is EntryKind.DIR)
 
 
 def provisioned_namespace_dirs(policy: "CaseManagerPolicy") -> tuple[str, ...]:

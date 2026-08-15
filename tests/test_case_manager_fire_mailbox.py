@@ -64,7 +64,7 @@ async def test_fire_intake_drains_fifo_by_arrival(tmp_path):
     case = await adopt_into_live(manager, staging / "c1")
 
     transport = transport_for(manager)
-    intake = transport.fire_intake()
+    intake = transport.queued()
     base = 1_000_000_000.0
     for i, (corr, trig) in enumerate([("zz", "a"), ("mm", "b"), ("aa", "c")]):
         transport.submit_fire(case_id=case.case_id, trigger=trig, correlation_id=corr)
