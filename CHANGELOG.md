@@ -68,6 +68,18 @@ not yet depended on in production. Recreate the filespace.
   (`case_manager_support/namespace_map.py`), with tests pinning declaration,
   disk and document together.
 
+## [0.2.1] - 2026-08-15
+
+### Added
+
+- **`CaseManager.export_case(case_id, *, dest)`** — remove a terminated or quarantined
+  case from managed storage. Pass a path to keep the folder; pass `dest=None` to
+  destroy it (`dest` is required as a keyword so omission cannot silently delete).
+  Live cases still use `eject_from_pool`. Combined with `iter_terminal(before=...)`
+  / `iter_quarantine(before=...)`, this is the host-side recipe for retiring old
+  archives. Distinct from redundant purge, which only strips ephemeral files
+  inside a finished folder.
+
 ## [0.2.0] - 2026-08-04
 
 Introduces `CaseManager`, the supervision layer for the `FolderBackedCase` family.

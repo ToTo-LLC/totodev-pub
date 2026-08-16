@@ -42,7 +42,8 @@ Two traps it exists to show — **detach before adopting** (adopt rejects a case
 folder whose lease the builder still holds) and **finished is not yet filed** (a
 case leaves the pool on reaching a terminal state and is archived a tick later,
 so waiting on `iter_terminal()` and waiting on `case_is_terminal` are different
-waits).
+waits). Old archives are retired with `iter_terminal(before=...)` then
+`export_case` (see the case-designer manager notes); that is not `eject_from_pool`.
 
 ### 1. Minimal host — `example_01_minimal_host.py`
 
