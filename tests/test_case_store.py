@@ -422,6 +422,50 @@ async def test_export_removes_the_case_from_the_store(store, tmp_path):
     assert store.find("c-1") is None, "an exported case has left the store"
 
 
+@pytest.mark.asyncio
+async def test_export_moves_a_terminated_case_out_of_the_store(store, tmp_path):
+    await _seed_live(store, tmp_path)
+    await store.set_status("c-1", TERMINATED)
+    out = tmp_path / "archived-out"
+    result = await store.export("c-1", out)
+
+    assert result == out
+    assert (out / "case_record.yaml").exists()
+    assert store.find("c-1") is None
+
+
+@pytest.mark.asyncio
+async def test_export_none_destroys_a_terminated_case(store, tmp_path):
+    await _seed_live(store, tmp_path)
+    await store.set_status("c-1", TERMINATED)
+    folder = store.find("c-1").case_folder
+
+    result = await store.export("c-1", None)
+
+    assert result is None
+    assert store.find("c-1") is None
+    assert not folder.exists()
+
+
+@pytest.mark.asyncio
+async def test_export_none_destroys_a_quarantined_case(store, tmp_path):
+    await _seed_live(store, tmp_path)
+    await store.set_status("c-1", QUARANTINED)
+    folder = store.find("c-1").case_folder
+
+    result = await store.export("c-1", None)
+
+    assert result is None
+    assert store.find("c-1") is None
+    assert not folder.exists()
+
+
+@pytest.mark.asyncio
+async def test_export_missing_case_raises(store, tmp_path):
+    with pytest.raises(CaseNotInStoreError):
+        await store.export("no-such", None)
+
+
 # -------------------------------------------------------------- orphan absorb
 
 

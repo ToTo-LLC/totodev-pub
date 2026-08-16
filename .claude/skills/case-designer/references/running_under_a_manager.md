@@ -72,6 +72,19 @@ with a datetime-encoded path derived from last activity time. Operators filter
 archives by time bounds on ``iter_terminal()`` / the store; case types do not
 choose archive bucket labels.
 
+**Forgetting old archives.** The keep-manifest / redundant purge only deletes
+unmatched files *inside* a finished folder; the case identity stays. Hosts that
+need to drop old rows from the filespace snapshot ids first, then export or
+destroy — do not walk the iterator while mutating, and do not use
+``eject_from_pool`` (live only)::
+
+    old = [r.case_id for r in manager.iter_terminal(before=cutoff)]
+    for case_id in old:
+        await manager.export_case(case_id, dest=None)  # or dest=a_keep_path
+
+``iter_quarantine(before=...)`` is the same recipe. Prefer ``reopen_case()``
+unless the operator means to discard.
+
 ## Questions worth asking the developer
 
 Raise these only when they plausibly apply, one at a time, the same way as the
