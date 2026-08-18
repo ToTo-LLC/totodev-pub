@@ -1,0 +1,23 @@
+---
+description: Where local PyPI credentials live and how to publish totodev-pub
+alwaysApply: true
+---
+
+# PyPI publish (totodev-pub)
+
+Local API tokens (gitignored) live at:
+
+`volatile/credentials/pypi_token_for_project.sh`
+
+That file exports `PYPI_PROJ_TOKEN` (project-scoped, preferred) and `PYPI_DAVEDESK_TOKEN`. Never copy token values into the repo, rules, commits, or chat.
+
+To publish from this workspace:
+
+```bash
+source volatile/credentials/pypi_token_for_project.sh
+export UV_PUBLISH_TOKEN="$PYPI_PROJ_TOKEN"
+uv build
+uv publish
+```
+
+Do not publish unless the user explicitly asks. CI does not publish.

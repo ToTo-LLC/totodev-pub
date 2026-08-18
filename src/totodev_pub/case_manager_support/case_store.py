@@ -252,18 +252,25 @@ class LocalCaseStore:
         return dest_folder
 
     async def export(
-        self, case_id: str, export_to: Path, *, force_despite_lease: bool = False
-    ) -> Path:
-        """Remove ``case_id`` from managed storage, leaving its folder at ``export_to``.
+        self, case_id: str, export_to: Path | None, *, force_despite_lease: bool = False
+    ) -> Path | None:
+        """Remove ``case_id`` from managed storage.
 
-        The destination is deliberately a path rather than a status: an exported
-        case has left the store, and afterwards ``find()`` reports it as absent.
+        ``export_to`` is a destination path, not a status: afterwards ``find()``
+        reports the case as absent. Pass ``None`` to destroy the folder instead
+        of keeping it.
         """
         entry = self.find(case_id)
         if entry is None:
             raise CaseNotInStoreError(case_id)
         if not force_despite_lease:
             assert_case_folder_movable(entry.case_folder, case_id, "export")
+
+        ref_path = self._ref_path_of(entry)
+        grouping = self._grouping_for(entry.status)
+        if export_to is None:
+            await self._cache.delete_file(ref_path, grouping)
+            return None
 
         export_to = Path(export_to)
         export_to.parent.mkdir(parents=True, exist_ok=True)
@@ -280,9 +287,7 @@ class LocalCaseStore:
         except OSError:
             # Cross-device move; copy and let the entry deletion remove the source.
             shutil.copytree(source, export_to)
-        await self._cache.delete_file(
-            self._ref_path_of(entry), self._grouping_for(entry.status)
-        )
+        await self._cache.delete_file(ref_path, grouping)
         return export_to
 
     # ------------------------------------------------------------------

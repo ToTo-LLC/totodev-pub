@@ -84,14 +84,12 @@ from totodev_pub.case_manager_support.case_store import (
     LocalCaseStore,
 )
 from totodev_pub.case_manager_support.constants import (
-    EJECT_SUBDIR,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     PULSE_INTERVAL_SECS,
-    QUARANTINE_SUBDIR,
     RESULTS_SUBDIR,
-    TERMINATION_SUBDIR,
 )
+from totodev_pub.case_manager_support.namespace_map import provisioned_namespace_dirs
 from totodev_pub.case_manager_support.eject import (
     EjectResult,
     EjectTicket,
@@ -104,6 +102,7 @@ from totodev_pub.case_manager_support.notice import CaseNotice, NoticeRegistry
 from totodev_pub.case_manager_support.exceptions import (
     AmbiguousExternalKeyError,
     CacheRootStateError,
+    CaseNotInStoreError,
     EjectAbandonedError,
     EjectTimeoutError,
     InvalidAddressingError,
@@ -217,8 +216,10 @@ class CaseManager:
     **Terminated.** Cases that finished their lifecycle. When a pooled case
     reaches a terminal FSM state, the manager archives it out of the live
     pool into terminal storage (datetime-encoded under the ``terminated``
-    status). These are kept for retention and inspection; they are not driven
-    again.
+    status). They are not driven again. Folders stay until an operator
+    exports or destroys them: snapshot ``iter_terminal(before=...)`` then
+    ``export_case``. That is distinct from redundant purge, which only
+    strips ephemeral files inside the folder.
 
     **Quarantine.** A holding area for cases the manager has *stopped*
     driving but kept in managed storage. This is not a normal lifecycle
@@ -228,8 +229,10 @@ class CaseManager:
     disk; a ``MANAGER_QUARANTINED`` reason is recorded on the case journal
     when possible. Inspect with ``iter_quarantine()``, fix the underlying
     problem, then ``reopen_case()`` to return the case to the live pool.
-    Repeated transition failures and stalls are surfaced as operator
-    notices; they do not by themselves move a case into quarantine.
+    ``export_case`` can discard a quarantined case the operator does not
+    intend to reopen. Repeated transition failures and stalls are surfaced
+    as operator notices; they do not by themselves move a case into
+    quarantine.
 
     Composes case storage, pool driver, type registry, and the manager's
     control directory under a working directory. See the module docstring
@@ -629,6 +632,33 @@ class CaseManager:
                 stuck = self.collect_stuck_triggers()
                 raise EjectTimeoutError(case_id=case_id, stuck=stuck)
         return await fut
+
+    async def export_case(self, case_id: str, *, dest: Path | None) -> Path | None:
+        """Remove a terminated or quarantined case from managed storage.
+
+        ``dest`` is keyword-only and has no default: omit it and the call is a
+        ``TypeError``. Pass a path to keep the folder there; pass ``None`` to
+        destroy it. Live cases must go through ``eject_from_pool`` instead.
+
+        This is how hosts retire old archives. Redundant purge only deletes
+        unmatched files inside a finished folder; the case identity stays.
+        Snapshot ids from the iterator first — ``iter_terminal`` /
+        ``iter_quarantine`` are point-in-time and must not be walked while
+        entries disappear::
+
+            old = [r.case_id for r in manager.iter_terminal(before=cutoff)]
+            for case_id in old:
+                await manager.export_case(case_id, dest=None)
+        """
+        entry = self._store.find(case_id)
+        if entry is None:
+            raise CaseNotInStoreError(case_id)
+        if entry.status == self._store.live_status:
+            raise ValueError(
+                f"Case {case_id!r} is live; use eject_from_pool() to take it "
+                "out of the pool. export_case() is for terminated or quarantined cases."
+            )
+        return await self._store.export(case_id, dest)
 
     async def quarantine_case(
         self,
@@ -1210,26 +1240,15 @@ class CaseManager:
 
         Storage buckets are created by the case store; this owns only the manager
         control directory (mailboxes, tickets, leases, and related state).
+
+        The directory list is not written here — it comes from
+        ``namespace_map.provisioned_namespace_dirs``, which is also what renders
+        ``docs/case-manager-layout.md``. One declaration serves both so the
+        documented tree cannot drift from the provisioned one.
         """
         mgr_dir.mkdir(parents=True, exist_ok=True)
-        for sub in (
-            policy.staging_subdir,
-            policy.adopt_drop_subdir,
-            policy.fire_mailbox_subdir,
-            policy.adopt_mailbox_subdir,
-            RESULTS_SUBDIR,
-            *(f"{TERMINATION_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
-            *(f"{EJECT_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
-            *(f"{QUARANTINE_SUBDIR}/{leaf}" for leaf in ("pending", "failed")),
-        ):
+        for sub in provisioned_namespace_dirs(policy):
             (mgr_dir / sub).mkdir(parents=True, exist_ok=True)
-        for sub in ("intake", "malformed"):
-            (mgr_dir / policy.fire_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
-        for sub in ("intake", "malformed", "executing"):
-            (mgr_dir / policy.reclassify_mailbox_subdir / sub).mkdir(parents=True, exist_ok=True)
-        (mgr_dir / policy.adopt_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
-        (mgr_dir / policy.adopt_mailbox_subdir / "pending").mkdir(parents=True, exist_ok=True)
-        (mgr_dir / policy.shutdown_mailbox_subdir / "intake").mkdir(parents=True, exist_ok=True)
 
     def _write_manifest(
         self, *, running: bool = False, stopped: bool = False, recovering: bool = False
