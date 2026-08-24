@@ -38,10 +38,13 @@ instead of standing up an empty fleet. Once the filespace exists, a process that
 should never create one can skip the first line and pass the path straight to the
 constructor.
 
-**Omit `adapter=` and the process serves no requests** — no fire mailbox, no
-adopt mailbox, no reclassify mailbox. That is a supported shape, not a degraded
-one: it is what an embedded host looks like, driving the manager through its own
-methods. Shutdown still works, because the host owns it.
+**Omit `adapter=` and the process serves no requests** — nothing drains
+`requests/queued/`. That is a supported shape, not a degraded one: it is what an
+embedded host looks like, driving the manager through its own methods. Shutdown
+still works, because the host owns it and polls `requests/shutdown/` directly.
+
+The on-disk shape those requests travel through is
+[the layout map](case-manager-layout.md), which is generated from the code.
 
 `serve()` requires a freshly constructed manager. Do not call `recover()` or
 `start()` yourself — it sequences those (and the adapter's own recovery), and
@@ -99,7 +102,7 @@ Docker Compose: `restart: unless-stopped`.
 **SIGTERM / SIGINT** — the deliberate stop. `serve()` drains in-flight steps and
 returns, so the process exits 0. This is what an orchestrator sends on scale-down.
 
-**The shutdown mailbox** — an out-of-process request, submitted with
+**A shutdown request** — submitted out-of-process with
 `CaseManagerClient.submit_shutdown()`. Graceful drains first; immediate bounds
 the unwind at ~2s. Either way the process exits 75.
 
@@ -112,6 +115,12 @@ Two properties worth knowing:
   the adapter, so it works with no adapter attached, with `enable_mailbox=False`,
   and with the watchdog off. Asking a process to stop is process control, and
   the layer that owns exit codes owns it.
+
+That ownership is why shutdown keeps its own leaf, `requests/shutdown/`, rather
+than joining `requests/queued/` with every other action. Its protocol is "any
+non-hidden file" rather than a parsed envelope, and routing it through the queue
+would make the host parse messages the adapter owns — breaking exactly the case
+(`enable_mailbox=False`) where stopping the process matters most.
 
 ### Grace periods must nest
 
@@ -140,7 +149,7 @@ as a clean exit.
 | `pulse_stuck` — the event loop stopped pulsing | 5s | exit 70 |
 | `loop_task_dead` — the manager loop task died | immediate | exit 70 |
 | `loop_failure` — 3 consecutive tick failures | immediate | exit 70 |
-| `mailbox_neglect` — oldest request unserved by the adapter | `max(10 × maintenance_interval, 30s)` | exit 70 |
+| `mailbox_neglect` — oldest request left in `requests/queued/` | `max(10 × maintenance_interval, 30s)` | exit 70 |
 | `tick_slow` — a tick is taking too long | `min(lease TTL, manifest_stale_secs) / 2` | **alarm only, always** |
 
 `tick_slow` never kills, regardless of `watchdog_action` — a slow tick is a
@@ -150,8 +159,13 @@ symptom, not a wedge.
 dump) but never exits. Useful when an external supervisor owns remediation.
 
 **`mailbox_neglect` needs an adapter.** With no request transport attached
-nothing owns an intake backlog, so the check is structurally absent rather than
+nothing owns a queue backlog, so the check is structurally absent rather than
 merely disabled — there is nothing that could be neglected.
+
+It measures `requests/queued/` only. A request in `claimed/` is already the
+fleet's problem and may legitimately sit there waiting for a concurrency slot or
+a choke permit, so counting it would turn a healthy backpressure signal into a
+process kill.
 
 **`watchdog_enabled=False`** gives up detection — no pulse, task-death, or
 mailbox-neglect monitoring — but *not* the fail-loud contract: three consecutive

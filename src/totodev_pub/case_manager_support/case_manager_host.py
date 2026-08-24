@@ -90,8 +90,12 @@ def _tracer_downgrade(policy: Any) -> str | None:
 
 def _results_dir(manager: "CaseManager") -> Path:
     """Where results are published. The host writes exactly one — the shutdown
-    ack — and does so whether or not a request transport exists."""
-    return manager._manager_dir / RESULTS_SUBDIR
+    ack — and does so whether or not a request transport exists.
+
+    Composed from policy rather than by holding a transport, for the same reason
+    the host polls the shutdown leaf itself: shutdown must work with
+    ``enable_mailbox=False``, when no adapter and no transport exist at all."""
+    return manager._manager_dir / manager._policy.requests_subdir / RESULTS_SUBDIR
 
 
 def _hard_exit(code: int) -> None:

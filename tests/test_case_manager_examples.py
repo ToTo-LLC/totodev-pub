@@ -16,9 +16,11 @@ import pytest
 from totodev_pub.case_manager import CaseManager
 from totodev_pub.case_manager_support.case_manager_client import CaseManagerClient
 from totodev_pub.case_manager_support.case_manager_host import serve
+from totodev_pub.case_manager_support.mailbox import MailboxTransport
 from totodev_pub.case_manager_support.examples import (
     example_02_bag_runner,
     example_03_request_serving_host,
+    example_04_request_queue_stages,
 )
 from totodev_pub.case_manager_support.examples.example_cases import (
     EscalationCase,
@@ -119,7 +121,7 @@ async def test_the_request_serving_host_completes_the_client_round_trip(tmp_path
         serve(manager, adapter=SignalingAdapter(manager), stop_when=lambda: done["v"])
     )
     try:
-        for _ in range(300):        # wait for the host to come up
+        for _ in range(300):  # wait for the host to come up
             if manager.is_running:
                 break
             await asyncio.sleep(0.02)
@@ -140,6 +142,57 @@ async def test_the_request_serving_host_completes_the_client_round_trip(tmp_path
         done["v"] = True
         await asyncio.wait_for(host, timeout=30.0)
     assert not manager.is_running
+
+
+@pytest.mark.asyncio
+async def test_the_queue_stages_example_drains_every_fire_through_one_choke(tmp_path):
+    """Example 04, end to end: three fires, one permit, all answered.
+
+    The example's value is its printed table, which a test cannot assert on. What
+    it *can* assert is the property the table illustrates — that a one-permit
+    choke serialises three concurrent fires and still answers all of them, with
+    every stage move made by the adapter rather than by the script.
+
+    Run with a short step and a fast tick: the example's own timings exist to make
+    the stages watchable by a human, which is exactly the wrong trade in CI.
+    """
+    example = example_04_request_queue_stages
+    monkey_step = 0.05
+    original = example.STEP_SECS
+    example.STEP_SECS = monkey_step
+    try:
+        await asyncio.wait_for(example.main(tmp_path / "fleet", case_count=3), timeout=60.0)
+    finally:
+        example.STEP_SECS = original
+
+    # Every case reached the terminal state, which for a manual edge is only
+    # reachable by a fire that actually travelled through the queue.
+    client = CaseManagerClient(tmp_path / "fleet")
+    transport = MailboxTransport(client._manager._manager_dir, client._manager._policy)
+    assert len(list(transport.results_dir().glob("*.yaml"))) == 3, "all three answered"
+    assert list(transport.queued().glob("*.yaml")) == [], "queue fully drained"
+    assert list(transport.claimed().rglob("*.yaml")) == [], "nothing stranded in claimed/"
+    assert list(transport.running().rglob("*.yaml")) == [], "nothing stranded in running/"
+
+
+def test_the_stage_counter_sees_per_case_subdirectories(tmp_path):
+    """``claimed/`` and ``running/`` nest one directory per case.
+
+    A flat ``glob`` there would report zero forever, so the example's table would
+    show an empty queue no matter what the fleet was doing — a demo that lies
+    rather than one that fails.
+    """
+    manager = CaseManager(CaseManager.open_local_store(tmp_path / "fleet"))
+    transport = MailboxTransport(manager._manager_dir, manager._policy)
+    transport.ensure_dirs()
+    nested = transport.claimed("some-case")
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "req.yaml").write_text("op: fire\n", encoding="utf-8")
+
+    counts = example_04_request_queue_stages.stage_counts(transport)
+
+    assert counts["claimed"] == 1, "a per-case subdirectory must be counted"
+    assert counts["queued"] == 0
 
 
 def test_the_readme_lists_every_example(tmp_path):
