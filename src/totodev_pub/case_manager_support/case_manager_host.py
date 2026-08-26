@@ -68,6 +68,12 @@ EXIT_WATCHDOG = 70           # EX_SOFTWARE: every in-process liveness failure th
 EXIT_RESTART_REQUESTED = 75  # EX_TEMPFAIL: every mailbox-requested shutdown —
                              # the mailbox has exactly one outcome, "please come back".
 
+#: ``serve()``'s default bound on waiting for ``CaseManager.stop()``. Named rather
+#: than left a literal in the signature because a supervisor's kill timeout must
+#: *exceed* it, and ``supervision.supervisor_requirements()`` publishes that floor —
+#: a bare default could not be referenced by the contract that depends on it.
+DEFAULT_STOP_GRACE_SECS = 30.0
+
 # Bound on how long the immediate (non-graceful) shutdown path lets the current
 # loop iteration unwind before exiting.
 IMMEDIATE_SHUTDOWN_GRACE_SECS = 2.0
@@ -136,7 +142,7 @@ async def serve(
     *,
     adapter: "SignalingAdapter | None" = None,
     fleet_status: "FleetStatusBoard | bool" = True,
-    stop_grace_secs: float = 30.0,
+    stop_grace_secs: float = DEFAULT_STOP_GRACE_SECS,
     stop_when: Callable[[], bool] | None = None,
     stop_when_empty: bool = False,
 ) -> None:

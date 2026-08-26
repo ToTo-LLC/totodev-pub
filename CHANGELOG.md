@@ -67,6 +67,39 @@ not yet depended on in production. Recreate the filespace.
   rendered from the same declaration the manager provisions from
   (`case_manager_support/namespace_map.py`), with tests pinning declaration,
   disk and document together.
+- **The supervisor contract is now importable** —
+  `case_manager_support.supervision.supervisor_requirements()` publishes the two
+  timing floors a supervisor config must clear (restart delay > the case lease
+  TTL; kill timeout > `serve(stop_grace_secs=...)`) along with the exit-code sets,
+  and `SupervisorRequirements.violations()` does the comparison so it cannot be
+  inverted. Both floors previously existed only as prose in
+  `docs/case-manager-deployment.md`, where nothing failed when the constants they
+  derive from moved.
+- `EXIT_WATCHDOG`, `EXIT_RESTART_REQUESTED`, `EXIT_DELIBERATE_STOP`,
+  `EXIT_STARTUP_REFUSED`, `DEFAULT_STOP_GRACE_SECS`, `SupervisorRequirements` and
+  `supervisor_requirements` are exported from `totodev_pub.case_manager_support`.
+  The codes were previously reachable only through
+  `case_manager_support.case_manager_host` — a path that reads as private, and
+  which nothing outside the test suite imported, so a consumer's supervisor config
+  had no option but a literal `70`.
+- `serve()`'s `stop_grace_secs` default is now the named
+  `DEFAULT_STOP_GRACE_SECS` rather than a literal, so the contract that depends on
+  it can reference it. Value unchanged at 30s.
+
+### Fixed
+
+- **`docs/case-manager-deployment.md` recommended restart policies that
+  contradicted its own exit-code table.** It advised Docker Compose
+  `restart: unless-stopped` and Kubernetes `restartPolicy: Always`, both of which
+  restart on exit 0 — three lines below a table stating exit 0 must not be
+  restarted. Compose is now `restart: on-failure`, and the Kubernetes entry states
+  the constraint that forced the error: a Deployment *cannot* honour exit 0, so
+  `stop_when` / `stop_when_empty` silently never terminates under one and belongs
+  in a Job with `restartPolicy: OnFailure`. The section now also covers systemd
+  (the reference setup), supervisord, and a shell loop for hosts with no init.
+  Every snippet in that section is now parsed by the test suite and fed back
+  through `violations()`, so the document cannot drift back into recommending a
+  config the library itself rejects.
 
 ## [0.2.1] - 2026-08-15
 
