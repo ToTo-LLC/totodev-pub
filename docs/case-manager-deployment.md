@@ -94,8 +94,158 @@ shutdown. Do not rely on `atexit` hooks or context-manager teardown running.
 - `totodev-manager-health` (below) is the liveness probe; the exit code is the
   post-mortem.
 
-Kubernetes: `restartPolicy: Always` plus a `livenessProbe` on the health CLI.
-Docker Compose: `restart: unless-stopped`.
+### Two floors, and they are not preferences
+
+Every supervisor below is configuring the same two numbers, both *derived* from
+constants in this library:
+
+| Setting | Must be | Because |
+|---|---|---|
+| Restart delay | **> 30s** (the case lease TTL) | A hard exit leaves its cases' leases held. A replacement cannot reclaim them until they lapse, so restarting sooner spends every cycle waiting and never reaches steady state. |
+| Kill timeout | **> 30s** (`serve(stop_grace_secs=...)`) | A smaller one SIGKILLs the process mid-drain, forfeiting both the clean exit and the lease release that makes the next start fast. |
+
+Exit 75 is the exception to the first: a requested shutdown drains and *releases*
+the filespace lease, so its replacement has nothing to wait for and may start at
+once. Only the hard-exit paths — 70, and 1's competing-manager case — leave a
+lease to lapse.
+
+Do not copy those numbers. Import them, so a change to the lease TTL fails your
+config test instead of silently invalidating your unit file:
+
+```python
+from totodev_pub.case_manager_support import supervisor_requirements
+
+def test_our_unit_file_satisfies_the_contract():
+    reqs = supervisor_requirements()          # pass stop_grace_secs= if you override it
+    assert reqs.violations(restart_delay_secs=35, stop_timeout_secs=45) == ()
+```
+
+`EXIT_WATCHDOG`, `EXIT_RESTART_REQUESTED`, `EXIT_DELIBERATE_STOP` and
+`EXIT_STARTUP_REFUSED` are exported from the same place, so nothing downstream
+needs a literal `70` in it.
+
+### systemd
+
+The reference setup: every row of the exit-code table maps to one directive.
+
+```ini
+[Unit]
+Description=CaseManager fleet
+StartLimitIntervalSec=600
+StartLimitBurst=5           # "a loop of 70s is an incident, not a retry"
+OnFailure=page@%n.service   # fires once the burst limit is reached
+
+[Service]
+Type=exec
+ExecStart=/opt/venv/bin/python -m myapp.host /data/inquiries
+Restart=on-failure          # 0 stays down; 70/75/1 restart
+RestartSec=35               # > the 30s lease TTL
+TimeoutStopSec=45           # > serve(stop_grace_secs)
+KillSignal=SIGTERM          # the documented clean stop -> exit 0
+StandardError=journal       # keeps the watchdog's faulthandler thread dump
+
+[Install]
+WantedBy=multi-user.target  # required for `systemctl enable`, i.e. start at boot
+```
+
+`Restart=on-failure` is the whole contract in one line: systemd treats exit 0 as
+success and every other code as failure, which is exactly the table above.
+
+Two limits to know. `RestartSec` is a single delay for every code, so exit 75 waits
+the full 35s even though it could restart at once — latency, not incorrectness. And
+`StartLimitBurst` counts *starts*, not failures, so a run of operator-requested
+restarts (exit 75) can trip the limit as readily as a crash loop; raise
+`StartLimitIntervalSec` if shutdown requests are a routine operational tool.
+
+Pair it with a timer running `totodev-manager-health` and act on **exit 1 only** —
+2 is a deliberate stop and 3 is a misconfiguration, and a restart helps neither.
+
+### Docker Compose
+
+```yaml
+services:
+  fleet:
+    restart: on-failure        # NOT unless-stopped, which restarts on 0 too
+    stop_grace_period: 45s     # > serve(stop_grace_secs)
+    volumes:
+      - fleet-data:/data/inquiries   # never a container-local layer
+```
+
+Compose has no restart *delay* and no per-exit-code policy, so it cannot express
+the 30s floor. Where a crash loop is a real risk, run systemd or the shell loop
+below as PID 1 inside the container; otherwise accept that repeated 70s each pay
+the full lease wait.
+
+### Kubernetes
+
+A **Deployment cannot honour exit 0**: `restartPolicy: Always` is its only legal
+value, so a pod that exits 0 is restarted regardless. That makes the shape depend
+on whether the fleet is meant to finish.
+
+- **Long-running** → Deployment, `terminationGracePeriodSeconds: 45`, and a
+  `livenessProbe` running `totodev-manager-health`. Do **not** use `stop_when` or
+  `stop_when_empty` here: the process would exit 0 and be restarted immediately,
+  forever, and nothing in the logs would look wrong.
+- **Batch, finishes** → **Job** with `restartPolicy: OnFailure`, the only shape
+  that respects exit 0. This is where `stop_when_empty` belongs.
+
+Set `failureThreshold` × `periodSeconds` comfortably above 120s, or rely on the
+probe's own recovery grace — see "Restarting after a crash takes ~30 seconds".
+Kubernetes back-off is exponential from 10s, which clears the 30s floor from the
+second retry onward but not the first.
+
+### supervisord
+
+Workable, but it fights the contract in two places:
+
+- **No restart delay independent of `startsecs`**, so the 30s floor has to be
+  encoded into a field that means something else.
+- **`FATAL` is permanent.** After `startretries` it stops trying. Exit 1 is
+  documented above as *transient* — the incumbent may be a corpse whose lease has
+  yet to lapse — so a fast loop of 1s can exhaust the retries inside the lease
+  window and leave the program down for good.
+
+```ini
+[program:fleet]
+command=/opt/venv/bin/python -m myapp.host /data/inquiries
+autorestart=unexpected
+exitcodes=0                 ; the only "expected" exit -> the only one not restarted
+startsecs=35                ; the sole lever on retry spacing
+startretries=5
+stopsignal=TERM
+stopwaitsecs=45             ; > serve(stop_grace_secs)
+stderr_logfile=/var/log/fleet.err.log   ; the thread dump lands here
+```
+
+Alert on the program reaching `FATAL`. That state is the failure mode above, not
+a resolved incident.
+
+### No init available
+
+A shell loop — not a Python parent, which would itself need supervising:
+
+```sh
+#!/bin/sh
+fails=0
+while :; do
+  python -m myapp.host /data/inquiries & child=$!
+  trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0' TERM INT
+  wait "$child"; code=$?
+  case "$code" in
+    0)    exit 0 ;;                        # deliberate final stop
+    75)   fails=0; delay=1 ;;              # lease released; restart at once
+    70|1) fails=$((fails+1)); delay=35 ;;  # lease still held; outwait the TTL
+    *)    echo "exit $code is a bug, not a retry" >&2; exit "$code" ;;
+  esac
+  [ "$fails" -ge 5 ] && { echo "5 consecutive failures; giving up" >&2; exit "$code"; }
+  sleep "$delay"
+done
+```
+
+Four things it must get right, and four reasons to prefer systemd, which already
+implements them: break the loop on 0, delay past the lease TTL on 70 and 1 but
+not on 75, forward SIGTERM so the child is not orphaned mid-drain, and give up
+after a burst.
 
 ## Shutdown
 
@@ -130,8 +280,13 @@ mid-teardown is unsafe — so a grace expiry is a process-level hard exit, not a
 cancelled stop. **The orchestrator's kill timeout must be larger**, or it will
 SIGKILL the process mid-drain and you lose the clean exit:
 
+- systemd: `TimeoutStopSec` > `stop_grace_secs`
 - Docker: `stop_grace_period` > `stop_grace_secs`
 - Kubernetes: `terminationGracePeriodSeconds` > `stop_grace_secs`
+
+`supervisor_requirements().stop_timeout_floor_secs` is this number, and
+`violations()` checks it — see "Two floors, and they are not preferences" for
+asserting it in a config test rather than restating it here.
 
 A stop that exceeds `stop_grace_secs` is treated as a liveness failure and exits
 70, not 0.
