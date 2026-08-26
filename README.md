@@ -8,6 +8,19 @@ The project is intended to become the public home for a broad snapshot of the in
 
 This project is maintained by [TomorrowToday LLC](https://tomorrowtoday.com).
 
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/case-manager-deployment.md`](docs/case-manager-deployment.md) | Running a `CaseManager` in production: the three layers, the exit-code contract, supervisor setup (systemd, Compose, Kubernetes, supervisord), shutdown, the watchdog, and container caveats |
+| [`docs/case-manager-layout.md`](docs/case-manager-layout.md) | The on-disk layout a manager provisions — generated from the same declaration the code provisions from, so it cannot drift |
+| [`examples/README-case_manager.md`](src/totodev_pub/case_manager_support/examples/README-case_manager.md) | Five worked, runnable examples for the manager side: embedded fleet, minimal host, batch runner, request-serving host, request-queue stages |
+| [`docs/case-workbench-notebooks.md`](docs/case-workbench-notebooks.md) | The `CaseWorkbench` marimo notebooks |
+| [`docs/dependency-strategy.md`](docs/dependency-strategy.md) | Which imports belong to which optional extra, and the governance policy behind that split |
+
+Designing a case *type* is a separate subject with its own tooling — see the
+`case-designer` skill under `.claude/skills/`.
+
 ## Direction
 
 - Public Python package name: `totodev_pub`
