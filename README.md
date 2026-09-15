@@ -171,6 +171,27 @@ Compare the passed/skipped counts against a cached run from the same tree if you
 to confirm the cache was actually doing something — the difference is exactly the set
 of tests a routine local run would not have exercised.
 
+### Publishing a version to PyPI
+
+**Pushing to git does not publish.** Neither does CI, and a git tag alone does not
+upload anything. PyPI only updates when someone deliberately builds and uploads from
+a machine that has the project token.
+
+1. Bump `version` in `pyproject.toml` and record the release in `CHANGELOG.md`.
+2. Commit and push that change (so the tagged source matches what you upload).
+3. Publish locally:
+
+```bash
+source volatile/credentials/pypi_token_for_project.sh
+export UV_PUBLISH_TOKEN="$PYPI_PROJ_TOKEN"
+uv build
+uv publish
+```
+
+Tokens live only under `volatile/credentials/` (gitignored). Never commit them or paste
+them into chat. Confirm the new version on https://pypi.org/project/totodev-pub/ or with
+`pip index versions totodev-pub`.
+
 ### How optional-feature gating works
 
 - Optional-feature tests are tagged with markers (`pipes`, `connectors`,
