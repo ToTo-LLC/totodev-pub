@@ -6,6 +6,8 @@ this file and are not recorded here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-15
+
 ### Changed — BREAKING: on-disk layout cutover
 
 The four per-action mailboxes became one request queue, and the two scratch docks
@@ -88,6 +90,18 @@ not yet depended on in production. Recreate the filespace.
 
 ### Fixed
 
+- **Finished cases were quarantined for ``active lease present`` after a restart.**
+  ``recover()`` rehydrated every live-status folder — including ones that already
+  carried a terminate / eject / quarantine ticket — which took a lease and blocked
+  the relocation the ticket existed to perform. Recovery now excludes ticketed
+  folders from journal restore; ``begin_termination`` always removes and detaches
+  even when a ticket already exists; a held lease at archive time waits up to one
+  lease TTL instead of burning the retry budget; anomalies (non-terminal /
+  missing ``terminated_at``) quarantine on first observation; ``stop()`` drains
+  pending departures (bounded by ``stop_departures_timeout_secs``); and
+  ``case_detach()`` no longer recreates a folder that has already been relocated.
+  Public surface: ``CaseManager.departures_in_flight`` and
+  ``wait_for_departures(timeout=...)``.
 - **`docs/case-manager-deployment.md` recommended restart policies that
   contradicted its own exit-code table.** It advised Docker Compose
   `restart: unless-stopped` and Kubernetes `restartPolicy: Always`, both of which
