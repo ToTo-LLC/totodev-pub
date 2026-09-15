@@ -252,7 +252,7 @@ async def test_mailbox_neglect_kills_when_intake_goes_unserved(tmp_path):
     manager.subscribe_notices(escalations.append)
 
     transport = transport_for(manager)
-    intake = transport.fire_intake()
+    intake = transport.queued()
     intake.mkdir(parents=True, exist_ok=True)
     stale = intake / "stale.yaml"
     stale.write_text("correlation_id: x\n", encoding="utf-8")
@@ -304,7 +304,7 @@ async def test_fresh_intake_does_not_alarm(tmp_path):
     # short threshold on its own.
     manager = provision_manager(tmp_path, watchdog_mailbox_stale_secs=5.0)
     await manager.recover()
-    intake = transport_for(manager).fire_intake()
+    intake = transport_for(manager).queued()
     intake.mkdir(parents=True, exist_ok=True)
     for i in range(20):
         (intake / f"req{i}.yaml").write_text("correlation_id: x\n", encoding="utf-8")

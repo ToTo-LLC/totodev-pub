@@ -16,7 +16,7 @@ from totodev_pub.folder_backed_case import FolderBackedCase
 
 def test_policy_defaults():
     p = CaseManagerPolicy()
-    assert p.schema_version == 2
+    assert p.schema_version == 3
     assert p.live_bucket == "live"
     assert p.grouping_pattern == "{status}/"
     assert p.concurrency_ceiling == 50
@@ -100,13 +100,26 @@ def test_watchdog_and_shutdown_policy_fields():
     from totodev_pub.case_manager_support.case_manager_policy import CaseManagerPolicy
 
     policy = CaseManagerPolicy()
-    assert policy.shutdown_mailbox_subdir == "shutdown_mailbox"
+    assert policy.requests_subdir == "requests"
+    assert policy.incoming_subdir == "incoming"
     assert policy.watchdog_enabled is True
     assert policy.watchdog_action == "exit"
     assert policy.watchdog_pulse_stuck_secs is None
     assert policy.watchdog_mailbox_stale_secs is None
     assert policy.watchdog_tick_warn_secs is None
-    assert "shutdown_mailbox_subdir" in CaseManagerPolicy.layout_field_names()
+    assert "requests_subdir" in CaseManagerPolicy.layout_field_names()
+    assert "incoming_subdir" in CaseManagerPolicy.layout_field_names()
+    # The four per-action mailboxes and both scratch docks are gone, not renamed.
+    for retired in (
+        "fire_mailbox_subdir",
+        "adopt_mailbox_subdir",
+        "reclassify_mailbox_subdir",
+        "shutdown_mailbox_subdir",
+        "staging_subdir",
+        "adopt_drop_subdir",
+    ):
+        assert not hasattr(policy, retired)
+        assert retired not in CaseManagerPolicy.layout_field_names()
     for name in (
         "watchdog_enabled",
         "watchdog_action",

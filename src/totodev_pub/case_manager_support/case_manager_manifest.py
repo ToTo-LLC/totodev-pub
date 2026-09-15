@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.constants import MANIFEST_PROTOCOL_VERSION
@@ -22,15 +22,21 @@ class ManifestPaths(BaseModel):
     its way into managed storage instead of asking the manager.
     """
 
-    fire_mailbox_intake: str
-    adopt_mailbox_intake: str
-    reclassify_mailbox_intake: str
-    shutdown_mailbox_intake: str
+    #: Where a submitter drops a request. One queue for every action now, so the
+    #: four per-mailbox intakes this replaced are gone rather than renamed — a
+    #: client that still looks for them is reading a layout that no longer exists,
+    #: which the protocol version bump is there to announce.
+    requests_queued: str
     results: str
-    adopt_drop: str
+    #: Both stage roots, so an operator can watch depth without path arithmetic.
+    requests_claimed: str
+    requests_running: str
+    requests_failed: str
+    shutdown_intake: str
+    #: The one loading dock, replacing ``staging`` and ``adopt_drop``.
+    incoming: str
     termination_pending: str
     eject_pending: str
-    staging: str
     fleet_status_board: Optional[str] = None
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from totodev_pub.case_manager_support.case_manager_manifest import CaseManagerManifest
 from totodev_pub.case_manager_support.constants import FLEET_STATUS_FILENAME, MANIFEST_FILENAME
@@ -89,9 +89,9 @@ class CaseManagerClient:
             if self._manager.locate(r.case_id) is not None
         ]
 
-    def allocate_staging_folder(self, *, only_if_fresh: bool = True) -> Path:
+    def allocate_incoming_folder(self, *, only_if_fresh: bool = True) -> Path:
         self._check_fresh(only_if_fresh)
-        return self._manager.allocate_staging_folder()
+        return self._manager.allocate_incoming_folder()
 
     def submit_fire(
         self,

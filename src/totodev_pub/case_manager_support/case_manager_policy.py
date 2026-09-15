@@ -11,15 +11,11 @@ from pydantic import BaseModel, Field
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
 from totodev_pub.case_manager_support.constants import (
-    DEFAULT_ADOPT_DROP_SUBDIR,
-    DEFAULT_ADOPT_MAILBOX_SUBDIR,
-    DEFAULT_FIRE_MAILBOX_SUBDIR,
     DEFAULT_GROUPING_PATTERN,
-    DEFAULT_RECLASSIFY_MAILBOX_SUBDIR,
-    DEFAULT_SHUTDOWN_MAILBOX_SUBDIR,
+    DEFAULT_INCOMING_SUBDIR,
     DEFAULT_LIVE_BUCKET,
     DEFAULT_MANAGER_NAMESPACE,
-    DEFAULT_STAGING_SUBDIR,
+    DEFAULT_REQUESTS_SUBDIR,
     POLICY_SCHEMA_VERSION,
 )
 
@@ -33,23 +29,19 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     grouping_pattern: str = DEFAULT_GROUPING_PATTERN
     live_bucket: str = DEFAULT_LIVE_BUCKET
     manager_namespace: str = DEFAULT_MANAGER_NAMESPACE
-    staging_subdir: str = DEFAULT_STAGING_SUBDIR
-    adopt_drop_subdir: str = DEFAULT_ADOPT_DROP_SUBDIR
-    fire_mailbox_subdir: str = DEFAULT_FIRE_MAILBOX_SUBDIR
-    adopt_mailbox_subdir: str = DEFAULT_ADOPT_MAILBOX_SUBDIR
-    reclassify_mailbox_subdir: str = DEFAULT_RECLASSIFY_MAILBOX_SUBDIR
-    shutdown_mailbox_subdir: str = DEFAULT_SHUTDOWN_MAILBOX_SUBDIR
+    incoming_subdir: str = DEFAULT_INCOMING_SUBDIR
+    requests_subdir: str = DEFAULT_REQUESTS_SUBDIR
 
     # Tunables — operational settings (file holds defaults; process may override)
     concurrency_ceiling: int = 50
     choke_limits: Dict[str, int] = Field(default_factory=dict)
     enable_mailbox: bool = True
-    startup_adopt_scan: bool = False
+    startup_incoming_scan: bool = False
     maintenance_interval_secs: float = 1.0
     result_ttl_secs: int = 86400
     manifest_stale_secs: int = 30
-    staging_min_age_secs: int = 300
-    staging_stale_lease_secs: int = 86400
+    incoming_min_age_secs: int = 300
+    incoming_stale_lease_secs: int = 86400
     termination_max_retries: int = 3
     eject_max_retries: int = 3
     redundant_purge_terminal_after_secs: Optional[int] = 86400
@@ -80,12 +72,8 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "grouping_pattern",
             "live_bucket",
             "manager_namespace",
-            "staging_subdir",
-            "adopt_drop_subdir",
-            "fire_mailbox_subdir",
-            "adopt_mailbox_subdir",
-            "reclassify_mailbox_subdir",
-            "shutdown_mailbox_subdir",
+            "incoming_subdir",
+            "requests_subdir",
         })
 
     @classmethod
@@ -94,12 +82,12 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "concurrency_ceiling",
             "choke_limits",
             "enable_mailbox",
-            "startup_adopt_scan",
+            "startup_incoming_scan",
             "maintenance_interval_secs",
             "result_ttl_secs",
             "manifest_stale_secs",
-            "staging_min_age_secs",
-            "staging_stale_lease_secs",
+            "incoming_min_age_secs",
+            "incoming_stale_lease_secs",
             "termination_max_retries",
             "eject_max_retries",
             "redundant_purge_terminal_after_secs",

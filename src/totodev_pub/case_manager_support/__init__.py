@@ -49,6 +49,16 @@ _LAZY_EXPORTS = {
     "RecoverRequiredError": ".exceptions",
     "StuckTrigger": ".exceptions",
     "UnknownCaseStatusError": ".exceptions",
+    # Supervisor contract — see docs/case-manager-deployment.md. Exported because
+    # a consumer's supervisor config and its config test both need these, and the
+    # alternative is hardcoding 70/75 and a lease TTL into someone else's repo.
+    "EXIT_WATCHDOG": ".case_manager_host",
+    "EXIT_RESTART_REQUESTED": ".case_manager_host",
+    "DEFAULT_STOP_GRACE_SECS": ".case_manager_host",
+    "EXIT_DELIBERATE_STOP": ".supervision",
+    "EXIT_STARTUP_REFUSED": ".supervision",
+    "SupervisorRequirements": ".supervision",
+    "supervisor_requirements": ".supervision",
     # Fleet status board (opt-in observability)
     "FleetStatusRow": ".fleet_status",
     "FleetStatusBoard": ".fleet_status_board",
@@ -106,6 +116,14 @@ __all__ = [
     "RecoverRequiredError",
     "StuckTrigger",
     "UnknownCaseStatusError",
+    # Supervisor contract
+    "EXIT_WATCHDOG",
+    "EXIT_RESTART_REQUESTED",
+    "EXIT_DELIBERATE_STOP",
+    "EXIT_STARTUP_REFUSED",
+    "DEFAULT_STOP_GRACE_SECS",
+    "SupervisorRequirements",
+    "supervisor_requirements",
     # Fleet status board
     "FleetStatusBoard",
     "FleetStatusBoardWatcher",

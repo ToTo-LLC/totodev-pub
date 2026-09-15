@@ -50,21 +50,14 @@ LAYOUT_DOC = Path(__file__).resolve().parents[1] / "docs" / "case-manager-layout
 #: to the declaration has to be restated here as well. A test that recomputed
 #: this from the same source it is checking would pass no matter what happened.
 EXPECTED_NAMESPACE_DIRS = (
-    "staging",
-    "adopt_drop",
-    "fire_mailbox",
-    "fire_mailbox/intake",
-    "fire_mailbox/malformed",
-    "adopt_mailbox",
-    "adopt_mailbox/intake",
-    "adopt_mailbox/pending",
-    "reclassify_mailbox",
-    "reclassify_mailbox/intake",
-    "reclassify_mailbox/malformed",
-    "reclassify_mailbox/executing",
-    "shutdown_mailbox",
-    "shutdown_mailbox/intake",
-    "results",
+    "incoming",
+    "requests",
+    "requests/queued",
+    "requests/claimed",
+    "requests/running",
+    "requests/failed",
+    "requests/results",
+    "requests/shutdown",
     "termination",
     "termination/pending",
     "termination/failed",
@@ -76,10 +69,38 @@ EXPECTED_NAMESPACE_DIRS = (
     "quarantine/failed",
 )
 
+#: The layout this replaced, kept as an explicit negative. The request-queue
+#: cutover is a one-time break with no migration, so a filespace must never come
+#: back carrying a mailbox directory — a stray one would mean some code path still
+#: composes the old paths and is quietly provisioning both layouts at once.
+RETIRED_DIR_PREFIXES = (
+    "staging",
+    "adopt_drop",
+    "fire_mailbox",
+    "adopt_mailbox",
+    "reclassify_mailbox",
+    "shutdown_mailbox",
+)
+
 
 def test_declaration_matches_the_expected_namespace():
-    """The declaration is the 24 directories listed above, in parent-before-child order."""
+    """The declaration is the 17 directories listed above, in parent-before-child order."""
     assert provisioned_namespace_dirs(CaseManagerPolicy()) == EXPECTED_NAMESPACE_DIRS
+
+
+def test_no_retired_mailbox_directory_is_provisioned(tmp_path):
+    """The old per-action mailboxes and both scratch docks are gone, with no migration.
+
+    Asserted as a negative rather than trusted to the set comparison above,
+    because the failure this catches is a *second* code path still composing the
+    old paths — which would provision both layouts side by side and leave an
+    operator reading a tree that half-describes reality.
+    """
+    manager = provision_manager(tmp_path)
+    on_disk = namespace_dirs_on_disk(manager._manager_dir)
+
+    strays = [p for p in on_disk if p.startswith(RETIRED_DIR_PREFIXES)]
+    assert strays == [], f"retired layout directories were provisioned: {strays}"
 
 
 def test_provisioning_creates_exactly_the_declared_directories(tmp_path):
@@ -186,18 +207,18 @@ def test_renaming_a_layout_field_moves_the_whole_subtree(tmp_path):
     hardcoded names anywhere, a rename would provision one tree and document
     another.
     """
-    manager = provision_manager(tmp_path, fire_mailbox_subdir="requests_fire")
+    manager = provision_manager(tmp_path, requests_subdir="mail")
     on_disk = set(namespace_dirs_on_disk(manager._manager_dir))
 
-    assert "requests_fire/intake" in on_disk
-    assert not any(p.startswith("fire_mailbox") for p in on_disk)
-    assert provisioned_namespace_dirs(manager._policy).count("requests_fire/intake") == 1
+    assert "mail/queued" in on_disk
+    assert not any(p.startswith("requests") for p in on_disk)
+    assert provisioned_namespace_dirs(manager._policy).count("mail/queued") == 1
 
     # The tree prints one basename per line, so the renamed root appears on its
     # own line and the old name must be gone from the document entirely.
     tree = render_layout_map(manager._policy)
-    assert "requests_fire/" in tree
-    assert "fire_mailbox" not in tree
+    assert "mail/" in tree
+    assert "requests/" not in tree
 
 
 def test_transport_ensure_dirs_creates_only_declared_directories(tmp_path):
@@ -243,9 +264,9 @@ async def test_a_real_run_creates_no_undeclared_directories(tmp_path):
 
         on_disk = set(namespace_dirs_on_disk(manager._manager_dir))
         assert undeclared_dirs(manager._manager_dir, manager._policy) == ()
-        # The per-case stage dirs must actually have appeared, or this test would
+        # A per-case stage dir must actually have appeared, or this test would
         # pass just as happily against a manager that never ran anything.
-        assert any(p.startswith("fire_mailbox/firing/") for p in on_disk)
+        assert any(p.startswith("requests/running/") for p in on_disk)
     finally:
         await manager.stop()
 

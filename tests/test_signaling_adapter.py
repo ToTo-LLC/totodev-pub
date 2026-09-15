@@ -8,7 +8,6 @@ adapter attached still works, the adapter reaches the manager only through
 public methods, and one bad request cannot take the batch down with it.
 """
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -22,8 +21,7 @@ from case_manager_test_utils import (
     transport_for,
 )
 from totodev_pub.case_manager_support.mailbox import (
-    AdoptRequest,
-    MailboxTransport,
+    RequestEnvelope,
     ReclassifyResult,
     RequestHandle,
 )
@@ -159,15 +157,15 @@ async def test_a_malformed_request_gets_an_error_result_not_silence(tmp_path):
     transport = adapter.transport
 
     corr = "garbage-request"
-    (transport.fire_intake() / f"{corr}.yaml").write_text("{[ not yaml", encoding="utf-8")
+    (transport.queued() / f"{corr}.yaml").write_text("{[ not yaml", encoding="utf-8")
 
     await adapter.maintenance_tick()
 
     result = transport.poll_result(RequestHandle(corr, transport.result_path(corr)))
     assert isinstance(result, AdvanceResultSerializable)
     assert result.status == "error"
-    assert not (transport.fire_intake() / f"{corr}.yaml").exists(), "dead-lettered"
-    assert (transport.fire_stage("malformed") / f"{corr}.yaml").exists()
+    assert not (transport.queued() / f"{corr}.yaml").exists(), "dead-lettered"
+    assert (transport.failed() / f"{corr}.yaml").exists()
 
 
 # ------------------------------------------------------------- correlation ids
@@ -269,9 +267,9 @@ async def test_recovery_dead_letters_a_fire_caught_mid_flight(tmp_path):
     transport.ensure_dirs()
 
     handle = transport.submit_fire(case_id="c-1", trigger="work", correlation_id="mid")
-    firing = transport.fire_stage("firing", "c-1")
+    firing = transport.running("c-1")
     firing.mkdir(parents=True, exist_ok=True)
-    (transport.fire_intake() / "mid.yaml").replace(firing / "mid.yaml")
+    (transport.queued() / "mid.yaml").replace(firing / "mid.yaml")
 
     report = SignalingAdapter(manager).recover()
 
@@ -289,14 +287,17 @@ async def test_recovery_requeues_a_fire_that_never_launched(tmp_path):
     transport.ensure_dirs()
 
     transport.submit_fire(case_id="c-1", trigger="work", correlation_id="queued")
-    pending = transport.fire_stage("pending", "c-1")
+    pending = transport.claimed("c-1")
     pending.mkdir(parents=True, exist_ok=True)
-    (transport.fire_intake() / "queued.yaml").replace(pending / "queued.yaml")
+    (transport.queued() / "queued.yaml").replace(pending / "queued.yaml")
 
     report = SignalingAdapter(manager).recover()
 
-    assert report.fire_replayed == 1
-    assert (transport.fire_intake() / "queued.yaml").exists(), "back in the queue"
+    # Requeueing is op-agnostic now: claiming happens before any work, so a
+    # request caught in claimed/ provably never touched a case whatever its op.
+    # It is counted separately from the per-op settling of running/.
+    assert report.requeued == 1
+    assert (transport.queued() / "queued.yaml").exists(), "back in the queue"
 
 
 @pytest.mark.asyncio
@@ -308,9 +309,9 @@ async def test_recovery_settles_a_reclassify_caught_mid_execution(tmp_path):
     handle = transport.submit_reclassify(
         case_id="c-1", target_type="TicketCase", correlation_id="mid-reclass"
     )
-    executing = transport.reclassify_stage("executing", "c-1")
+    executing = transport.running("c-1")
     executing.mkdir(parents=True, exist_ok=True)
-    (transport.reclassify_intake() / "mid-reclass.yaml").replace(executing / "mid-reclass.yaml")
+    (transport.queued() / "mid-reclass.yaml").replace(executing / "mid-reclass.yaml")
 
     report = SignalingAdapter(manager).recover()
 
@@ -332,10 +333,10 @@ async def test_recovery_settles_a_reclassify_caught_mid_execution(tmp_path):
 def _pending_adopt(transport, corr: str, source_folder: Path, case_id: str | None):
     """A request parked in adopt/pending/, i.e. one a crash caught mid-adopt."""
     handle = transport.submit_adopt(source_folder=source_folder, correlation_id=corr)
-    intake = transport.adopt_intake() / f"{corr}.yaml"
-    req = AdoptRequest.load(str(intake), acquire_lock=False)
+    intake = transport.queued() / f"{corr}.yaml"
+    req = RequestEnvelope.load(str(intake), acquire_lock=False)
     req.case_id = case_id
-    pending = transport.adopt_stage("pending")
+    pending = transport.running()
     pending.mkdir(parents=True, exist_ok=True)
     req.save(str(pending / f"{corr}.yaml"), retain_lock=False)
     intake.unlink()
@@ -363,8 +364,10 @@ async def test_the_source_case_id_is_stamped_before_the_transfer_starts(tmp_path
     seen: dict[str, str | None] = {}
 
     async def spy_adopt(source_folder):
-        parked = transport.adopt_stage("pending") / "stamped.yaml"
-        seen["case_id"] = AdoptRequest.load(str(parked), acquire_lock=False).case_id
+        # Stage folders are keyed by case id, and learning the id is what moves
+        # the request out of _unknown/ — so find it rather than assuming a path.
+        (parked,) = list(transport.running().rglob("stamped.yaml"))
+        seen["case_id"] = RequestEnvelope.load(str(parked), acquire_lock=False).case_id
         return await real_adopt(source_folder)
 
     monkeypatch.setattr(manager, "adopt_case", spy_adopt)
@@ -485,13 +488,13 @@ async def test_recovery_never_leaves_an_adopt_request_in_pending(tmp_path):
 
     _pending_adopt(transport, "a", tmp_path / "gone", case_id="x-1")
     _pending_adopt(transport, "b", tmp_path / "gone", case_id=None)
-    (transport.adopt_stage("pending") / "c.yaml").write_text(
+    (transport.running() / "c.yaml").write_text(
         "this is not yaml: [", encoding="utf-8"
     )
 
     SignalingAdapter(manager, transport).recover()
 
-    assert list(transport.adopt_stage("pending").rglob("*.yaml")) == []
+    assert list(transport.running().rglob("*.yaml")) == []
 
 
 # --------------------------------------------------------------- backlog age

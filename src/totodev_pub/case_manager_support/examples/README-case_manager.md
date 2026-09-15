@@ -83,6 +83,25 @@ uv run python -m ...examples.example_03_request_serving_host submit /tmp/fleet  
 The client half needs no manager and no adapter — it reads the manifest and
 writes files.
 
+### 4. Request queue stages — `example_04_request_queue_stages.py`
+
+Prints a live table of requests moving `queued → claimed → running → results`,
+so the stages are legible from the filesystem alone.
+
+```bash
+uv run python -m ...examples.example_04_request_queue_stages            # throwaway dir
+uv run python -m ...examples.example_04_request_queue_stages /tmp/fleet # keep the fleet
+```
+
+The stages are normally invisible — a request is claimed, run, answered and
+deleted inside one tick. Rather than pausing artificially, this gives the fleet
+real reasons to hold each stage: a slow `perform_` hook for `running/`, a
+one-permit choke for `claimed/`, and a raised `maintenance_interval_secs` for
+`queued/`. Three fires against one permit visibly queue behind each other.
+
+Every transition is the adapter's own; the script never renames a file. The
+rename-only guarantee itself is pinned by `tests/test_signaling_adapter.py`.
+
 ## Testing a fleet
 
 `make_case_bag_fixture()` builds a pytest fixture that loads bags and stops every

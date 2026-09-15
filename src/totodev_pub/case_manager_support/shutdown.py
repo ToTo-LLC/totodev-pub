@@ -27,6 +27,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from totodev_pub.file_mapped_pydantic_mixin import FileMappedPydanticMixin
+from totodev_pub.case_manager_support.constants import SHUTDOWN_STAGE
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,15 @@ class ShutdownDirective:
 
 
 def shutdown_intake_dir(manager_dir: Path, policy) -> Path:
-    return manager_dir / policy.shutdown_mailbox_subdir / "intake"
+    """``requests/shutdown/`` — its own leaf inside the request channel.
+
+    Deliberately *not* ``requests/queued/``. Shutdown is process control owned by
+    the host, polled whether or not an adapter exists, and its protocol is "any
+    non-hidden file" rather than a parsed envelope. Routing it through the queue
+    would make the host parse messages the adapter owns, and would break
+    ``enable_mailbox=False`` — which must still be able to stop a process.
+    """
+    return manager_dir / policy.requests_subdir / SHUTDOWN_STAGE
 
 
 def scan_shutdown_intake(intake: Path) -> ShutdownDirective | None:

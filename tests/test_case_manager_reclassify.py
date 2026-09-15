@@ -228,15 +228,26 @@ async def test_reclassify_mailbox_error_result_for_incompatible_target(tmp_path)
 
 @pytest.mark.asyncio
 async def test_reclassify_mailbox_malformed_request_gets_error_result_not_silence(tmp_path):
-    """A request that fails to even parse must still resolve the caller's wait_result —
+    """A request that fails to parse must still resolve the caller's wait_result —
     the correlation id lives in the filename, so an error result is derivable even when
-    the body is garbage."""
+    the body is garbage.
+
+    The *shape* of that error now depends on how broken the request is, which is a
+    consequence of moving the action out of the folder path and into the file. A
+    body that still parses as YAML has a readable ``op``, so the submitter gets the
+    result type it is polling for. See the companion test below for the case where
+    even that is unreadable.
+    """
     manager = provision(tmp_path, enable_mailbox=True)
     await manager.recover()
     mailbox = transport_for(manager)
     mailbox.ensure_dirs()
     corr = "malformed-corr-id"
-    (mailbox.reclassify_intake() / f"{corr}.yaml").write_text("not: [valid pydantic body\n")
+    # Valid YAML naming its op, but a payload that will not validate.
+    (mailbox.queued() / f"{corr}.yaml").write_text(
+        f"op: reclassify\nid: {corr}\nrequested_at: 'x'\npayload: not-a-mapping\n",
+        encoding="utf-8",
+    )
     attach_adapter(manager)
     await manager.start()
     try:
@@ -246,8 +257,41 @@ async def test_reclassify_mailbox_malformed_request_gets_error_result_not_silenc
         assert isinstance(result, ReclassifyResult)
         assert result.status == "error"
         assert "malformed" in result.error
-        # The bad file was quarantined, not left in intake.
-        assert not (mailbox.reclassify_intake() / f"{corr}.yaml").exists()
+        # The bad file was quarantined, not left in the queue.
+        assert not (mailbox.queued() / f"{corr}.yaml").exists()
+        assert (mailbox.failed() / f"{corr}.yaml").exists()
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_request_gets_the_generic_error_shape(tmp_path):
+    """A file too broken to name its own op is answered generically, on purpose.
+
+    This is the one thing the request queue gives up relative to four mailboxes:
+    the folder used to carry the action, so even total garbage could be answered
+    in the right shape. Now the action lives inside the file, and a file that will
+    not parse as YAML has no readable ``op``.
+
+    Answering generically is the honest outcome — inventing an op would answer a
+    question nobody can prove was asked. What still holds, and matters more, is
+    that the submitter gets a terminal error rather than silence.
+    """
+    manager = provision(tmp_path, enable_mailbox=True)
+    await manager.recover()
+    mailbox = transport_for(manager)
+    mailbox.ensure_dirs()
+    corr = "unparseable-corr-id"
+    (mailbox.queued() / f"{corr}.yaml").write_text("{[ not yaml at all", encoding="utf-8")
+    attach_adapter(manager)
+    await manager.start()
+    try:
+        client = CaseManagerClient(tmp_path / "cache")
+        handle = RequestHandle(corr, mailbox.results_dir() / f"{corr}.yaml")
+        result = await client.wait_result(handle, timeout=5.0)
+        assert result is not None, "silence is the one unacceptable answer"
+        assert result.status == "error"
+        assert (mailbox.failed() / f"{corr}.yaml").exists()
     finally:
         await manager.stop()
 
@@ -261,7 +305,7 @@ async def test_client_preflight_rejects_unknown_case_without_touching_mailbox(tm
         client.submit_reclassify(
             case_id="does-not-exist", target_type="RoutedCase", only_if_fresh=False,
         )
-    assert list(transport_for(manager).reclassify_intake().glob("*.yaml")) == []
+    assert list(transport_for(manager).queued().glob("*.yaml")) == []
 
 
 @pytest.mark.asyncio
@@ -275,7 +319,7 @@ async def test_client_preflight_rejects_incompatible_state_without_touching_mail
             case_id=case.case_id, target_type="UnrelatedCase", only_if_fresh=False,
         )
     # Rejected before ever reaching the mailbox.
-    assert list(transport_for(manager).reclassify_intake().glob("*.yaml")) == []
+    assert list(transport_for(manager).queued().glob("*.yaml")) == []
     reader = client.reader(case_id=case.case_id)
     assert reader.case_object_type == "IntakeCase"
 
@@ -293,7 +337,7 @@ async def test_client_preflight_defers_when_type_unresolvable_in_this_process(tm
     handle = client.submit_reclassify(
         case_id=case.case_id, target_type="UnrelatedCase", only_if_fresh=False,
     )
-    assert list(transport_for(manager).reclassify_intake().glob("*.yaml"))   # queued, not rejected
+    assert list(transport_for(manager).queued().glob("*.yaml"))   # queued, not rejected
     assert handle.correlation_id
 
 
@@ -309,7 +353,7 @@ async def test_client_preflight_strict_rejects_unresolvable_type_locally(tmp_pat
             case_id=case.case_id, target_type="RoutedCase", only_if_fresh=False,
             preflight="strict",
         )
-    assert list(transport_for(manager).reclassify_intake().glob("*.yaml")) == []
+    assert list(transport_for(manager).queued().glob("*.yaml")) == []
 
 
 @pytest.mark.asyncio
@@ -322,5 +366,5 @@ async def test_client_preflight_false_submits_unconditionally(tmp_path):
         case_id=case.case_id, target_type="UnrelatedCase", only_if_fresh=False,
         preflight=False,
     )
-    assert list(transport_for(manager).reclassify_intake().glob("*.yaml"))
+    assert list(transport_for(manager).queued().glob("*.yaml"))
     assert handle.correlation_id
