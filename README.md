@@ -19,7 +19,9 @@ This project is maintained by [TomorrowToday LLC](https://tomorrowtoday.com).
 | [`docs/dependency-strategy.md`](docs/dependency-strategy.md) | Which imports belong to which optional extra, and the governance policy behind that split |
 
 Designing a case *type* is a separate subject with its own tooling — see the
-`case-designer` skill under `.claude/skills/`.
+`case-designer` skill under [`skills/case-designer/`](skills/case-designer/).
+Claude Code and Cursor pick it up via the relative symlink at
+`.claude/skills/case-designer`.
 
 ## Direction
 
