@@ -24,6 +24,8 @@ def test_policy_defaults():
     assert not hasattr(p, "aberrant_bucket")
     assert not hasattr(p, "case_ref_path_template")
     assert "redundant_purge_quarantined_after_secs" in CaseManagerPolicy.tunables_field_names()
+    assert "stop_departures_timeout_secs" in CaseManagerPolicy.tunables_field_names()
+    assert CaseManagerPolicy().stop_departures_timeout_secs == 5.0
 
 
 def test_open_local_store_fresh_root(tmp_path):

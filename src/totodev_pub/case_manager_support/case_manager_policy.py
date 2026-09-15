@@ -44,6 +44,10 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
     incoming_stale_lease_secs: int = 86400
     termination_max_retries: int = 3
     eject_max_retries: int = 3
+    #: How long ``stop()`` may spend draining pending terminate/eject/quarantine
+    #: tickets before releasing the filespace. Leftover tickets are crash-safe for
+    #: the successor (recovery excludes ticketed folders from journal restore).
+    stop_departures_timeout_secs: float = 5.0
     redundant_purge_terminal_after_secs: Optional[int] = 86400
     redundant_purge_quarantined_after_secs: Optional[int] = 86400
     escalation_fail_threshold: Optional[int] = None
@@ -90,6 +94,7 @@ class CaseManagerPolicy(BaseModel, FileMappedPydanticMixin):
             "incoming_stale_lease_secs",
             "termination_max_retries",
             "eject_max_retries",
+            "stop_departures_timeout_secs",
             "redundant_purge_terminal_after_secs",
             "redundant_purge_quarantined_after_secs",
             "escalation_fail_threshold",

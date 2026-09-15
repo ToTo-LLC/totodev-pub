@@ -63,6 +63,19 @@ def eject_ticket_path(manager_dir: Path, case_id: str, *, subdir: str = "pending
     return eject_dir(manager_dir) / subdir / f"{case_id}.yaml"
 
 
+def eject_ticket_exists(manager_dir: Path, case_id: str) -> bool:
+    """True while an eject is in flight or has been given up on.
+
+    A completed eject has no ticket — the case is simply gone from the store.
+    Checking ``failed/`` as well as ``pending/`` keeps a failed eject from being
+    re-admitted as a live orphan.
+    """
+    return any(
+        eject_ticket_path(manager_dir, case_id, subdir=sub).exists()
+        for sub in ("pending", "failed")
+    )
+
+
 def begin_eject(
     case: "FolderBackedCase",
     *,

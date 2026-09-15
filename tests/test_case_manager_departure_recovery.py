@@ -5,22 +5,13 @@
 
 A *departing* case is one the manager has decided to stop driving — it reached a
 terminal state, or it carries a terminate/eject/quarantine ticket. Ticket replay
-owns those; recovery must not take them back. The failure this module pins down is
-the opposite: recovery rehydrates every live-status folder, which takes a lease, and
-a lease on a departing case blocks the very relocation the ticket was written to
-perform. Finished work then fails *archive* and is quarantined for
-``active lease present`` — a repair status applied to a case that needs no repair.
+owns those; recovery must not take them back. These tests pin that rule against
+the real ``recover()`` entry point, plus the supporting pieces: idempotent
+``begin_termination``, capped lease waits on archive, a public departure signal,
+``stop()`` drain, and detach that does not resurrect a relocated folder.
 
-``readmit.py`` states the intended rule ("the departure-ticket check keeps it from
-re-admitting a case already on its way out") and ``quarantine.py`` states the
-intended guarantee ("without it, a restart re-admits a live-status case that
-quarantine had already given up on"). Both are asserted here against the real
-``recover()`` entry point, because that is where they are not yet true.
-
-Every expected-failure test below is ``xfail(strict=True)``: it documents a known
-gap and will *fail loudly the moment the gap closes*, which is the signal to delete
-the marker. Deliberately not wrapped in ``very_lazy_test`` — a test that exists to
-catch a regression in this area should run every time, not be cached as passed.
+Deliberately not wrapped in ``very_lazy_test`` — a test that exists to catch a
+regression in this area should run every time, not be cached as passed.
 """
 
 from __future__ import annotations
@@ -118,11 +109,6 @@ async def _closed_case_awaiting_archive(tmp_path) -> tuple[object, str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gap 1: recover() rehydrates every live folder, so a ticketed terminal "
-    "case is re-pooled and re-leased instead of being left to ticket replay.",
-)
 async def test_recover_does_not_repool_a_terminal_case_awaiting_archive(tmp_path):
     """The mechanism, isolated from its consequence: no pool slot, no lease."""
     _, case_id = await _closed_case_awaiting_archive(tmp_path)
@@ -142,11 +128,6 @@ async def test_recover_does_not_repool_a_terminal_case_awaiting_archive(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gaps 1+3: the lease recovery takes fails verify_termination_peek, and "
-    "'active lease present' spends the retry budget until the case is quarantined.",
-)
 async def test_a_closed_case_is_archived_after_a_restart(tmp_path):
     """The consequence, and the whole point: finished work must reach ``terminated/``."""
     _, case_id = await _closed_case_awaiting_archive(tmp_path)
@@ -169,11 +150,6 @@ async def test_a_closed_case_is_archived_after_a_restart(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gap 1: journal restore runs before readmit_orphans and pools every live "
-    "folder, so readmit's departure-ticket guard never gets a say.",
-)
 async def test_recover_honours_a_pending_quarantine_ticket(tmp_path):
     """Quarantine's durable intent must survive a restart.
 
@@ -213,11 +189,6 @@ async def test_recover_honours_a_pending_quarantine_ticket(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gap 1: _has_departure_ticket checks eject and quarantine but not "
-    "termination, unlike its sibling _departures_in_flight.",
-)
 async def test_a_termination_ticket_counts_as_a_departure_ticket(tmp_path):
     """"Already on its way out" has to mean all three ticket kinds, or it means nothing."""
     manager, case_id = await _closed_case_awaiting_archive(tmp_path)
@@ -226,6 +197,53 @@ async def test_a_termination_ticket_counts_as_a_departure_ticket(tmp_path):
     assert manager._has_departure_ticket(case_id), (
         "a termination ticket is a departure; the docstring already says so"
     )
+
+
+@pytest.mark.asyncio
+async def test_begin_termination_is_idempotent_and_always_detaches(tmp_path):
+    """A second begin_termination must detach even when a ticket already exists.
+
+    The ticket_exists early return used to fire before remove-and-detach, so a
+    recover that re-pooled a ticketed terminal case left it leased forever.
+    """
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TerminalCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+    await manager._driver.fire(case.case_folder, "finish")
+    assert case.case_is_terminal
+
+    assert begin_termination(
+        case,
+        manager_dir=manager._manager_dir,
+        policy=manager._policy,
+        driver_remove=manager._driver.remove,
+    ), "first call writes the ticket"
+    ticket = ticket_path(manager._manager_dir, case_id)
+    assert ticket.exists()
+    first_mtime = ticket.stat().st_mtime
+
+    # Re-attach so we have a live lease again — the state recover left behind
+    # before P3 excluded ticketed folders.
+    case2 = manager._registry.rehydrate(case.case_folder)
+    manager._driver.add(case2)
+    assert FolderBackedCase.is_heartbeat_expired(case2.case_folder) is False
+
+    wrote = begin_termination(
+        case2,
+        manager_dir=manager._manager_dir,
+        policy=manager._policy,
+        driver_remove=manager._driver.remove,
+    )
+    assert wrote is False, "second call must not rewrite the ticket"
+    assert ticket.stat().st_mtime == first_mtime
+    assert case2.case_folder not in manager._driver
+    assert FolderBackedCase.is_heartbeat_expired(case2.case_folder) is not False, (
+        "second call must still detach"
+    )
+    _clean_process_exit(manager)
 
 
 @pytest.mark.asyncio
@@ -278,11 +296,6 @@ async def test_a_crashed_terminal_case_with_no_ticket_is_archived(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gap 3: verify_termination_peek returns a bare False for a held lease, so "
-    "it spends the same retry budget as a genuinely malformed record.",
-)
 async def test_a_held_lease_does_not_spend_the_termination_retry_budget(tmp_path):
     """``quarantine.py`` treats a held lease as "wait, this is the protocol". Termination
     must agree: waiting for a lease is not a failing archive.
@@ -330,6 +343,60 @@ async def test_a_held_lease_does_not_spend_the_termination_retry_budget(tmp_path
         )
         assert manager._store.status_of(case_id) != QUARANTINED
         assert path.exists(), "the ticket should still be pending, waiting on the lease"
+        pending = TerminationTicket.load(str(path), acquire_lock=False)
+        assert pending.retry_count == 0, "a held lease must not spend the retry budget"
+        assert pending.lease_blocked_at is not None
+        assert pending.last_error == "active lease present"
+    finally:
+        case.case_detach()
+        _clean_process_exit(manager)
+
+
+@pytest.mark.asyncio
+async def test_a_lease_wait_past_one_ttl_quarantines(tmp_path):
+    """A lease still held one TTL after first sight is a live-owner conflict."""
+    from datetime import datetime, timedelta, timezone
+
+    from totodev_pub.folder_backed_case_support.constants import DEFAULT_LEASE_TTL_SECS
+
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TerminalCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+    await manager._driver.fire(case.case_folder, "finish")
+    folder = case.case_folder
+    assert FolderBackedCase.is_heartbeat_expired(folder) is False
+
+    blocked_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=DEFAULT_LEASE_TTL_SECS + 1)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path = ticket_path(manager._manager_dir, case_id)
+    write_ticket(
+        TerminationTicket(
+            case_id=case_id,
+            case_folder=str(folder),
+            enqueued_at="2026-09-15T00:00:00Z",
+            lease_blocked_at=blocked_at,
+            last_error="active lease present",
+        ),
+        path,
+    )
+
+    try:
+        await process_pending_ticket(
+            TerminationTicket.load(str(path), acquire_lock=False),
+            path,
+            store=manager._store,
+            policy=manager._policy,
+            manager_dir=manager._manager_dir,
+            quarantine=manager._quarantine,
+        )
+        assert not path.exists(), "ticket should have been retired to failed/"
+        assert quarantine_ticket_exists(manager._manager_dir, case_id) or (
+            manager._store.status_of(case_id) == QUARANTINED
+        ), "past one TTL the wait becomes a quarantine"
     finally:
         case.case_detach()
         _clean_process_exit(manager)
@@ -340,7 +407,8 @@ async def test_a_ticket_for_a_non_terminal_record_is_still_quarantined(tmp_path)
     """Guard rail, not a gap: this passes today and must keep passing.
 
     Softening the held-lease path must not soften this one. A ticket naming a record
-    that is not terminal is a real anomaly — no amount of waiting fixes it.
+    that is not terminal is a real anomaly — no amount of waiting fixes it. Quarantine
+    on the first observation.
     """
     manager = provision_manager(tmp_path)
     await manager.recover()
@@ -362,21 +430,19 @@ async def test_a_ticket_for_a_non_terminal_record_is_still_quarantined(tmp_path)
     )
 
     try:
-        for _ in range(manager._policy.termination_max_retries + 1):
-            if not path.exists():
-                break
-            await process_pending_ticket(
-                TerminationTicket.load(str(path), acquire_lock=False),
-                path,
-                store=manager._store,
-                policy=manager._policy,
-                manager_dir=manager._manager_dir,
-                quarantine=manager._quarantine,
-            )
+        await process_pending_ticket(
+            TerminationTicket.load(str(path), acquire_lock=False),
+            path,
+            store=manager._store,
+            policy=manager._policy,
+            manager_dir=manager._manager_dir,
+            quarantine=manager._quarantine,
+        )
 
         assert manager._store.status_of(case_id) == QUARANTINED, (
             "a ticket naming a non-terminal record must still end in quarantine"
         )
+        assert not path.exists(), "anomaly quarantines on the first observation"
     finally:
         _clean_process_exit(manager)
 
@@ -387,11 +453,6 @@ async def test_a_ticket_for_a_non_terminal_record_is_still_quarantined(tmp_path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gap 4: _departures_in_flight is private and is_idle also demands an empty "
-    "pool, so a host with live work has no way to wait for archive completion.",
-)
 async def test_a_host_can_wait_for_departures_without_an_empty_pool(tmp_path):
     """A fleet that always has live work still needs to know its tickets have filed.
 
@@ -409,9 +470,58 @@ async def test_a_host_can_wait_for_departures_without_an_empty_pool(tmp_path):
     assert hasattr(manager, "wait_for_departures"), "and a way to await it"
     assert manager.departures_in_flight is True, "a ticket is pending"
 
-    await manager._maintenance_tick()       # file the ticket
+    assert await manager.wait_for_departures(timeout=5.0) is True
     assert manager._store.status_of(case_id) == TERMINATED
     assert manager.departures_in_flight is False, "nothing left to archive"
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_pending_departures(tmp_path):
+    """A clean stop() archives finished work without the caller pumping ticks."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TerminalCase, staging)
+    case = await adopt_into_live(manager, staging)
+    case_id = case.case_id
+    await manager._driver.fire(case.case_folder, "finish")
+    assert begin_termination(
+        case,
+        manager_dir=manager._manager_dir,
+        policy=manager._policy,
+        driver_remove=manager._driver.remove,
+    )
+    assert manager._store.status_of(case_id) == LIVE
+    assert manager.departures_in_flight is True
+
+    await manager.stop()
+
+    assert manager._store.status_of(case_id) == TERMINATED
+    assert manager.departures_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_departures_in_flight_ignores_pool_occupancy(tmp_path):
+    """A pending ticket keeps the departure signal true even with live work in the pool."""
+    manager = provision_manager(tmp_path)
+    await manager.recover()
+    staging = tmp_path / "inbound"
+    seed_detached_case(TerminalCase, staging)
+    finished = await adopt_into_live(manager, staging)
+    seed_detached_case(TicketCase, tmp_path / "inbound2")
+    live = await adopt_into_live(manager, tmp_path / "inbound2")
+    await manager._driver.fire(finished.case_folder, "finish")
+    assert begin_termination(
+        finished,
+        manager_dir=manager._manager_dir,
+        policy=manager._policy,
+        driver_remove=manager._driver.remove,
+    )
+    assert len(manager._driver) >= 1
+    assert live.case_id in [c.case_id for c in manager._driver]
+    assert manager.departures_in_flight is True
+    assert manager.is_idle is False
+    _clean_process_exit(manager)
 
 
 # ----------------------------------------------------------------------------
@@ -420,11 +530,6 @@ async def test_a_host_can_wait_for_departures_without_an_empty_pool(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gap 5: write_detach_banner runs before disable_case_file_tee, and the log "
-    "handler mkdir(parents=True)s its target, recreating the vanished folder.",
-)
 async def test_detaching_does_not_recreate_a_folder_that_has_moved(tmp_path):
     """After a status move, a stale in-memory instance must not write at the old path.
 

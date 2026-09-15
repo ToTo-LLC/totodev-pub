@@ -300,18 +300,25 @@ class FolderBackedCase(FolderBackedCaseInterface):
         # again, or mid-reclassify's internal call. Banner + tee-disable happen BEFORE
         # release(): we must still legitimately own the folder to write either.
         #
-        # Always written, even on a terminal case: attach/detach banners are SESSION
-        # markers for this in-memory instance, not a claim about the log FILE's
-        # lifecycle. A terminal case can still be legitimately rehydrated later (nothing
-        # gates __init__ on case_is_terminal), and that rehydrate unconditionally writes
-        # its own attach banner — so pretending detach could "reseal" a purged file was
-        # already false. Keeping both bookends symmetric and unconditional is simpler and
-        # doesn't claim a guarantee ("never touched again") the code can't actually make.
+        # Always written when the folder still exists, even on a terminal case:
+        # attach/detach banners are SESSION markers for this in-memory instance, not a
+        # claim about the log FILE's lifecycle. A terminal case can still be legitimately
+        # rehydrated later (nothing gates __init__ on case_is_terminal), and that
+        # rehydrate unconditionally writes its own attach banner — so pretending detach
+        # could "reseal" a purged file was already false. Keeping both bookends symmetric
+        # and unconditional is simpler and doesn't claim a guarantee ("never touched
+        # again") the code can't actually make.
+        #
+        # Skip the banner when the folder is already gone (relocated out from under a
+        # still-bound instance): writing it would mkdir the stale path via the log
+        # handler and leave a ghost beside the real case. Tee-disable and lease release
+        # still run.
         #
         # Returns the folder path (including on idempotent re-calls) so create→detach→
         # handoff can be fluent without retaining a separate path handle.
         if self._lease is not None and self._lease.is_active():
-            write_detach_banner(self.log)
+            if self._folder.exists():
+                write_detach_banner(self.log)
             disable_case_file_tee(self.log)
             self._lease.release()
         return self._folder

@@ -100,7 +100,7 @@ from totodev_pub.case_manager_support.eject import (
     EjectTicket,
     begin_eject,
     eject_dir,
-    eject_ticket_path,
+    eject_ticket_exists,
     process_eject_ticket,
 )
 from totodev_pub.case_manager_support.notice import CaseNotice, NoticeRegistry
@@ -433,6 +433,37 @@ class CaseManager:
         """
         return len(self._driver) == 0 and not self._departures_in_flight()
 
+    @property
+    def departures_in_flight(self) -> bool:
+        """True while any terminate, eject, or quarantine ticket is still pending.
+
+        Independent of pool occupancy: a busy fleet can still observe whether its
+        own departure tickets have filed.
+        """
+        return self._departures_in_flight()
+
+    async def wait_for_departures(self, timeout: float | None = None) -> bool:
+        """Poll until no departure tickets remain, or ``timeout`` elapses.
+
+        Returns ``True`` if clear, ``False`` on timeout. When the manager loop is
+        not running, drives a maintenance tick (and terminal reconcile) each
+        iteration; when it is running, only sleeps so the loop is not double-driven.
+        ``timeout=None`` waits indefinitely.
+        """
+        deadline = (
+            None if timeout is None else time.monotonic() + timeout
+        )
+        interval = self._policy.maintenance_interval_secs
+        while self._departures_in_flight():
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            if not self._running:
+                await self._maintenance_tick()
+                self._reconcile_terminal_in_pool()
+            else:
+                await asyncio.sleep(interval)
+        return True
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -480,11 +511,17 @@ class CaseManager:
         """Leave run mode, wait until active advances finish, and release the filespace.
 
         Idempotent: a second call after a completed ``stop()`` is a no-op.
-        There is no timeout here — aborting mid-teardown leaves the manager
-        half-stopped with no safe resume short of process restart. Hosts that
-        need a grace bound (``serve``, the watchdog) await this call with their
-        own deadline and hard-exit if it has not finished; see
+        There is no timeout here on advance settle — aborting mid-teardown leaves
+        the manager half-stopped with no safe resume short of process restart.
+        Hosts that need a grace bound (``serve``, the watchdog) await this call
+        with their own deadline and hard-exit if it has not finished; see
         ``case_manager_host.await_manager_stop``.
+
+        After advances settle, pending terminate/eject/quarantine tickets are
+        drained for up to ``stop_departures_timeout_secs`` so a clean ``stop()``
+        hands the successor a filespace without leftover archive work. Leftover
+        tickets past that bound are crash-safe: recovery excludes ticketed
+        folders from journal restore.
         """
         if self._stop_completed:
             return
@@ -497,12 +534,6 @@ class CaseManager:
             except asyncio.CancelledError:
                 pass
             self._pulse_task = None
-        if self._terminated_handle is not None:
-            try:
-                self._driver.case_event_unsubscribe(self._terminated_handle)
-            except KeyError:
-                pass
-            self._terminated_handle = None
         if self._run_task is not None:
             self._run_task.cancel()
             try:
@@ -516,12 +547,35 @@ class CaseManager:
             self._run_task = None
         await self._driver.stop()
         await self._settle_with_diagnostics()
+        # Keep the TERMINATED subscription through settle+drain so a case that
+        # finishes during driver.stop() still gets begin_termination.
+        await self._drain_departures_on_stop()
+        if self._terminated_handle is not None:
+            try:
+                self._driver.case_event_unsubscribe(self._terminated_handle)
+            except KeyError:
+                pass
+            self._terminated_handle = None
         self._write_manifest(running=False, stopped=True)
         # Last, and only after the fleet has settled: releasing earlier would invite a
         # successor in while this one is still writing. A clean release is also what
         # spares that successor the lease-expiry wait a crash would have cost it.
         self._release_filespace()
         self._stop_completed = True
+
+    async def _drain_departures_on_stop(self) -> None:
+        """Drive pending departure tickets until clear or the stop timeout."""
+        timeout = self._policy.stop_departures_timeout_secs
+        deadline = time.monotonic() + timeout
+        while self._departures_in_flight() and time.monotonic() < deadline:
+            await self._maintenance_tick()
+            self._reconcile_terminal_in_pool()
+        if self._departures_in_flight():
+            logger.warning(
+                "stop() timed out after %.1fs with departure tickets still pending; "
+                "successor recovery will leave them to ticket replay",
+                timeout,
+            )
 
     # ------------------------------------------------------------------
     # Case pool API — add & remove
@@ -1632,9 +1686,10 @@ class CaseManager:
         return len(list(pending.glob("*.yaml"))) if pending.exists() else 0
 
     def _has_departure_ticket(self, case_id: str) -> bool:
-        """True when eject or quarantine work for this case is already pending."""
+        """True when terminate, eject, or quarantine work for this case is already pending."""
         return (
-            eject_ticket_path(self._manager_dir, case_id).exists()
+            ticket_exists(self._manager_dir, case_id)
+            or eject_ticket_exists(self._manager_dir, case_id)
             or quarantine_ticket_exists(self._manager_dir, case_id)
         )
 
@@ -1650,12 +1705,12 @@ class CaseManager:
         """Enqueue termination for terminal cases still in the pool.
 
         Isolated per case so a failed ticket write cannot abort the rest of the
-        pass or spend the loop-failure budget.
+        pass or spend the loop-failure budget. A case that already has a ticket
+        still goes through ``begin_termination`` so remove-and-detach is ensured;
+        that call returns False when the ticket already exists.
         """
         count = 0
         for case in self._driver.terminal_cases():
-            if ticket_exists(self._manager_dir, case.case_id):
-                continue
             if self._store.status_of(case.case_id) not in (LIVE, None):
                 continue    # already departed; its stored status is the receipt
             with self._isolated_tick_item("terminal reconcile", case.case_folder):

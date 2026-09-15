@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from totodev_pub.case_manager_support.case_store import LIVE
+from totodev_pub.case_manager_support.constants import (
+    EJECT_SUBDIR,
+    QUARANTINE_SUBDIR,
+    TERMINATION_SUBDIR,
+)
 from totodev_pub.case_manager_support.exceptions import RecoveryIntegrityError
 from totodev_pub.case_manager_support.shutdown import discard_stale_requests, shutdown_intake_dir
 from totodev_pub.folder_backed_case_support.pool_membership_journal import (
@@ -67,7 +72,15 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
 
     # One scan, not two: the store's own status index is the working set, so the
     # manager does not run a second pass of its own over the same folders.
-    live_paths = [entry.case_folder for entry in manager._store.iter_by_status(LIVE)]
+    # Folders that already carry a departure ticket are left to ticket replay —
+    # restoring them would take a lease and block the relocation the ticket
+    # exists to perform.
+    departing = _departure_ticket_case_ids(manager._manager_dir)
+    live_paths = [
+        entry.case_folder
+        for entry in manager._store.iter_by_status(LIVE)
+        if entry.case_id not in departing
+    ]
 
     journal_path = manager._policy.journal_path
     if journal_path:
@@ -116,6 +129,23 @@ async def recover_manager(manager: "CaseManager") -> RecoverReport:
             stale_pool_entries=report.stale_pool_entries,
         )
     return report
+
+
+def _departure_ticket_case_ids(manager_dir: Path) -> set[str]:
+    """Case ids with any terminate / eject / quarantine ticket (pending or failed).
+
+    One readdir per ticket tree leaf — no per-case record reads. Filenames are
+    ``{case_id}.yaml``.
+    """
+    ids: set[str] = set()
+    for subdir in (TERMINATION_SUBDIR, EJECT_SUBDIR, QUARANTINE_SUBDIR):
+        for stage in ("pending", "failed"):
+            folder = manager_dir / subdir / stage
+            if not folder.is_dir():
+                continue
+            for path in folder.glob("*.yaml"):
+                ids.add(path.stem)
+    return ids
 
 
 def _log_report(report: RecoverReport) -> None:

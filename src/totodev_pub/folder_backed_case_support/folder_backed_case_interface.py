@@ -437,12 +437,15 @@ class FolderBackedCaseInterface(ABC):
         Also writes a closing banner to ``self.log`` and disables its per-case file
         tee (records keep propagating to the main log; the case folder is simply no
         longer written to, since we no longer legitimately own it). This is always
-        written, even on an already-terminal case: the banner marks the end of THIS
-        in-memory instance's session, not a claim that the log file itself is done —
-        nothing prevents a terminal case from being reopened later (diagnostics, an
-        audit tool, etc.), and that reopen gets its own attach banner just like any
-        other case, appended right after whatever the termination purge left behind.
-        Idempotent — harmless to call more than once on an already-detached object.
+        written when the folder still exists, even on an already-terminal case: the
+        banner marks the end of THIS in-memory instance's session, not a claim that
+        the log file itself is done — nothing prevents a terminal case from being
+        reopened later (diagnostics, an audit tool, etc.), and that reopen gets its
+        own attach banner just like any other case, appended right after whatever the
+        termination purge left behind. If the folder has already been relocated out
+        from under this instance, the banner is skipped so detach does not recreate
+        the stale path. Idempotent — harmless to call more than once on an
+        already-detached object.
         """
         ...
 
