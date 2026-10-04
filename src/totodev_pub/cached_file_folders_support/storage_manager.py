@@ -808,20 +808,20 @@ class CachedFileStorageManager:
         
         # Extract grouping keys from folder paths
         for folder_path in matching_folders:
-            # Skip hidden directories (starting with .) to avoid versioning system directories like .git/
-            if any(part.startswith('.') for part in folder_path.parts):
+            # Convert absolute path to relative path before inspecting it
+            # This prevents the checks below from matching unintended parts of the absolute path
+            relative_path = folder_path.relative_to(self.category_folders.root_dir)
+            # Skip hidden directories (starting with .) inside the store to avoid versioning
+            # system directories like .git/; dot-directories above the store root don't count
+            if any(part.startswith('.') for part in relative_path.parts):
                 continue
             try:
-                # Convert absolute path to relative path before inferring key
-                # This prevents infer_key() from matching unintended parts of the absolute path
-                relative_path = folder_path.relative_to(self.category_folders.root_dir)
                 key_data = self.category_folders.infer_key(relative_path)
-                # Convert to tuple of field values in order
-                grouping_key = tuple(getattr(key_data, field) for field in self.category_folders.key_names())
-                yield grouping_key
-            except Exception:
+            except ValueError:
                 # Skip folders that don't match the pattern
                 continue
+            # Convert to tuple of field values in order
+            yield tuple(getattr(key_data, field) for field in self.category_folders.key_names())
 
     def existing_cached_files(self,
                              grouping_key_filters: Optional[Union[Dict[str, str], List[str]]] = None,
