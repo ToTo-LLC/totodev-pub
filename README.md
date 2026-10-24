@@ -4,6 +4,11 @@
 
 The project is intended to become the public home for a broad snapshot of the internal `totodev_pub` library, with identifying/internal material removed and examples rewritten to use safe synthetic data where needed.
 
+## Environments
+
+- Test: None
+- Production: None
+
 ## Organization
 
 This project is maintained by [TomorrowToday LLC](https://tomorrowtoday.com).
