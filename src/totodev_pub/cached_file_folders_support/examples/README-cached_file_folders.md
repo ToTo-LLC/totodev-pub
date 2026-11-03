@@ -33,6 +33,23 @@ A complete tutorial that demonstrates CachedFileFolders integration with SharePo
    python sharepoint_tutorial.py
    ```
 
+### Upload / Download Scratch Folders (`upload_download_folders.py`)
+
+An example class that **owns** a `CachedFileFolders` instance and uses it as the
+registry for short-lived upload and download working directories. Each ticket
+gets a long unguessable URL token, optional session binding, availability and
+retention clocks, optional one-shot access, safe unzip-on-seal, and a durable
+`move_out` that empties the scratch payload before unregistering the cache entry.
+
+See the module docstring in `upload_download_folders.py` for purpose, layout,
+and usage. Importable as:
+
+```python
+from totodev_pub.cached_file_folders_support.examples.upload_download_folders import (
+    UploadDownloadFolders,
+)
+```
+
 ### Zoho WorkDrive TRUNCATE Demo (`zoho_workdrive_sync.py`)
 
 A CLI that recursively mirrors a Zoho WorkDrive folder tree and showcases the library's
