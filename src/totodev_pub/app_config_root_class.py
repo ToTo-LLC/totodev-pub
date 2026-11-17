@@ -239,7 +239,7 @@ In deployment environments, set these OS environment variables:
     export ENV_LABEL="PROD01"  # Must start with DEV, TEST, STAGE, or PROD
     export API_KEY="your_api_key"
     export DATABASE_URL="postgresql://prod-server/db"
-    # ... all other variables declared in EXPECTED_KEYS
+    # ... each other EXPECTED_KEYS name that has no plain class attribute
     ```
 
 In your config.py file, you MUST define EXPECTED_KEYS (even if empty):
@@ -271,8 +271,10 @@ How it works:
 - If no confidential environment file is found, the system checks for ENV_LABEL in os.environ
 - ENV_LABEL must be set and start with a valid EnvironmentType (DEV, TEST, STAGE, PROD)
 - config.py must exist and define EXPECTED_KEYS (safety check to prevent accidental OS mode)
-- All variables declared in EXPECTED_KEYS that were not defined in code must be set in the OS environment.
-  Which, with a tool like Dokploy, is done by setting environment variables in the tool.
+- A plain class attribute may supply an EXPECTED_KEYS value when the OS variable is missing or blank.
+  Startup warns and names the class that defines that attribute. An ALL_CAPS method does not count.
+  Keys with neither a non-blank OS value nor a plain class attribute must be set in the OS environment.
+  With a tool like Dokploy, that is done by setting environment variables in the tool.
   
 
   Example: If EXPECTED_KEYS = ["MY_API_KEY"] and you wanted the environment to be "PROD01"
@@ -1347,8 +1349,9 @@ class AppConfigRootClass():
                     "   c. Define EXPECTED_KEYS in your config.py file (even if empty) to explicitly\n"
                     "      declare which environment variables should be loaded from the OS.\n"
                     "      \n"
-                    "   d. Set all environment variables declared in EXPECTED_KEYS in your deployment\n"
-                    "      tool's environment variable configuration.\n\n"
+                    "   d. Set each EXPECTED_KEYS variable that has no plain class-attribute value.\n"
+                    "      A missing or blank OS value uses that class attribute and warns at startup.\n"
+                    "      An ALL_CAPS method does not count as that value.\n\n"
                     "If you are deploying via an automated tool (like Dokploy), copy all the export\n"
                     "statements from your confidential environment file to your deployment tool's\n"
                     "environment variable settings, and ensure ENV_LABEL is set appropriately."
@@ -1403,8 +1406,8 @@ class AppConfigRootClass():
                     "When using OS-based configuration:\n"
                     "  1. You must have a config.py file that defines your configuration classes\n"
                     "  2. Your configuration class must define EXPECTED_KEYS (even if empty)\n"
-                    "  3. All environment variables declared in EXPECTED_KEYS must be set in your\n"
-                    "     deployment tool's environment variable configuration\n\n"
+                    "  3. Each EXPECTED_KEYS name needs a non-blank OS value or a plain class attribute.\n"
+                    "     An ALL_CAPS method does not count as that attribute.\n\n"
                     "If you are using an automated deployment tool (like Dokploy):\n"
                     "  - Ensure your config.py file is checked into Git (it should be, unlike the\n"
                     "    confidential environment file)\n"
@@ -1649,6 +1652,27 @@ class AppConfigRootClass():
         return normalized_kv
 
     @classmethod
+    def _plain_expected_key_owner(cls, config_class: type, key: str) -> Optional[str]:
+        """Return the class that defines key as a plain attribute, if that is the most-derived definition.
+
+        Walks the MRO and stops at the first class whose own __dict__ contains key.
+        A method there does not count, and a plain attribute on a parent behind that
+        method is ignored.
+
+        Returns:
+            Class name when the most-derived definition is a non-callable attribute,
+            otherwise None.
+        """
+        for c in config_class.__mro__:
+            if key not in c.__dict__:
+                continue
+            attr = c.__dict__[key]
+            if callable(attr) and not isinstance(attr, type):
+                return None
+            return c.__name__
+        return None
+
+    @classmethod
     def _load_env_vars_from_os(cls, config_class: type) -> Dict[str, str]:
         """Load environment variables from os.environ for keys declared in EXPECTED_KEYS.
         
@@ -1656,14 +1680,23 @@ class AppConfigRootClass():
         It loads only the keys declared in EXPECTED_KEYS from the operating system
         environment variables.
         
+        A non-blank OS value is loaded from the environment and overrides a class attribute.
+        A missing or blank OS value falls back to a plain class attribute. That fallback
+        warns and names the class that defines the attribute. An ALL_CAPS method does not
+        count as that attribute. Keys with neither a non-blank OS value nor a plain class
+        attribute raise ConfigurationError.
+        
         Args:
             config_class: The config class to get EXPECTED_KEYS from (walk __mro__)
         
         Returns:
-            Dictionary of normalized configuration keys and their values
+            Dictionary of configuration keys loaded from the OS and their values.
+            Keys supplied by a class attribute are omitted so the later merge keeps
+            that attribute.
         
         Raises:
-            ConfigurationError: If any EXPECTED_KEYS are missing from os.environ
+            ConfigurationError: If an EXPECTED_KEYS entry has no non-blank OS value
+                and no plain class attribute
         """
         # Collect EXPECTED_KEYS from class hierarchy
         expected_keys = []
@@ -1684,32 +1717,45 @@ class AppConfigRootClass():
         env_vars_dict = {}
         missing_keys = []
         
+        import warnings
+
         for key in expected_keys:
             # In OS mode, use exact matching only (no normalization).
             # This differs from file mode where variable names are normalized (CamelCase -> CAMEL_CASE).
             # The difference is deliberate: OS mode uses exact matching for simplicity and explicitness,
             # since EXPECTED_KEYS explicitly declares what should be loaded and deployment tools set
             # environment variables with specific names.
-            if key in os.environ:
-                env_vars_dict[key] = os.environ[key]
-            else:
-                missing_keys.append(key)
+            raw = os.environ.get(key)
+            if raw is not None and raw.strip() != "":
+                env_vars_dict[key] = raw
+                continue
+            owner = cls._plain_expected_key_owner(config_class, key)
+            if owner is not None:
+                warnings.warn(
+                    f"No environment setting was provided for '{key}'; "
+                    f"using the value defined on class {owner}.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                continue
+            missing_keys.append(key)
         
         # If any keys are missing, raise ConfigurationError
         if missing_keys:
             error_msg = (
                 "Attempting to source configuration from OS environment variables (OS-based mode,\n"
                 "typically used with automated deployment tools like Dokploy), but the following\n"
-                "required configuration keys are missing from the operating system environment:\n"
+                "required configuration keys have no non-blank operating system value and no plain\n"
+                "class attribute in config.py:\n"
                 f"{missing_keys}\n\n"
-                "These keys are declared in EXPECTED_KEYS in your config.py file but were not\n"
-                "found in os.environ when the application started.\n\n"
+                "These keys are declared in EXPECTED_KEYS. A blank environment value counts as unset.\n"
+                "An ALL_CAPS method does not count as a class attribute for this fallback.\n\n"
                 "If you are using an automated deployment tool (such as Dokploy):\n"
                 "  1. Open your confidential environment file (config._THIS_IS_*_ENV_.sh) from\n"
                 "     your local development setup\n"
                 "  2. Copy each \"export KEY=value\" line to your deployment tool's environment\n"
                 "     variable configuration\n"
-                "  3. Ensure all variables declared in EXPECTED_KEYS are set in the deployment tool\n"
+                "  3. Set each of these keys in the deployment tool, or give it a plain class attribute\n"
                 "  4. Redeploy the application\n\n"
                 f"Missing required keys: {missing_keys}"
             )

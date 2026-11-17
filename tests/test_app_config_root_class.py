@@ -1639,3 +1639,154 @@ class AppConfigPROD01(AppConfigRootClass):
     
     # Verify keys NOT in EXPECTED_KEYS are NOT loaded from OS (use class default)
     assert config["NOT_IN_EXPECTED"] == "default_not_expected"
+
+
+def test_os_mode_class_attribute_satisfies_expected_key(tmp_path, monkeypatch):
+    """A plain class attribute satisfies EXPECTED_KEYS when the env var is unset."""
+    import warnings
+
+    config_file = tmp_path / "config.py"
+    config_file.write_text("""
+from totodev_pub.app_config_root_class import AppConfigRootClass
+
+class AppConfigPROD01(AppConfigRootClass):
+    EXPECTED_KEYS = ["DATABASE_URL"]
+    DATABASE_URL = "postgresql://localhost/app"
+""")
+
+    monkeypatch.setenv("ENV_LABEL", "PROD01")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = AppConfigRootClass.dynaload(str(tmp_path))
+
+    assert config["DATABASE_URL"] == "postgresql://localhost/app"
+    fallback_warnings = [
+        str(w.message) for w in caught
+        if issubclass(w.category, UserWarning) and "DATABASE_URL" in str(w.message)
+    ]
+    assert len(fallback_warnings) == 1
+    assert "AppConfigPROD01" in fallback_warnings[0]
+
+
+def test_os_mode_blank_env_uses_class_attribute(tmp_path, monkeypatch):
+    """A blank environment value is treated as unset and falls back to the class attribute."""
+    config_file = tmp_path / "config.py"
+    config_file.write_text("""
+from totodev_pub.app_config_root_class import AppConfigRootClass
+
+class AppConfigPROD01(AppConfigRootClass):
+    EXPECTED_KEYS = ["SOME_KEY"]
+    SOME_KEY = "from_class"
+""")
+
+    monkeypatch.setenv("ENV_LABEL", "PROD01")
+    monkeypatch.setenv("SOME_KEY", "   ")
+
+    config = AppConfigRootClass.dynaload(str(tmp_path))
+    assert config["SOME_KEY"] == "from_class"
+
+
+def test_os_mode_inherited_class_attribute_names_defining_class(tmp_path, monkeypatch):
+    """The fallback warning names the class that actually defines the value."""
+    import warnings
+
+    config_file = tmp_path / "config.py"
+    config_file.write_text("""
+from totodev_pub.app_config_root_class import AppConfigRootClass
+
+class AppConfigCommon(AppConfigRootClass):
+    DATABASE_URL = "postgresql://localhost/app"
+
+class AppConfigPROD01(AppConfigCommon):
+    EXPECTED_KEYS = ["DATABASE_URL"]
+""")
+
+    monkeypatch.setenv("ENV_LABEL", "PROD01")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = AppConfigRootClass.dynaload(str(tmp_path))
+
+    assert config["DATABASE_URL"] == "postgresql://localhost/app"
+    fallback_warnings = [
+        str(w.message) for w in caught
+        if issubclass(w.category, UserWarning) and "DATABASE_URL" in str(w.message)
+    ]
+    assert len(fallback_warnings) == 1
+    assert "AppConfigCommon" in fallback_warnings[0]
+
+
+def test_os_mode_method_does_not_satisfy_expected_key(tmp_path, monkeypatch):
+    """An ALL_CAPS method is not a default that satisfies EXPECTED_KEYS."""
+    config_file = tmp_path / "config.py"
+    config_file.write_text("""
+from totodev_pub.app_config_root_class import AppConfigRootClass
+
+class AppConfigPROD01(AppConfigRootClass):
+    EXPECTED_KEYS = ["DATABASE_URL"]
+
+    def DATABASE_URL(self):
+        return "from-method"
+""")
+
+    monkeypatch.setenv("ENV_LABEL", "PROD01")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        AppConfigRootClass.dynaload(str(tmp_path))
+    assert "DATABASE_URL" in str(excinfo.value)
+
+
+def test_os_mode_method_hides_parent_attribute(tmp_path, monkeypatch):
+    """A method on the selected class blocks a parent attribute from satisfying the key."""
+    config_file = tmp_path / "config.py"
+    config_file.write_text("""
+from totodev_pub.app_config_root_class import AppConfigRootClass
+
+class AppConfigCommon(AppConfigRootClass):
+    DATABASE_URL = "postgresql://localhost/app"
+
+class AppConfigPROD01(AppConfigCommon):
+    EXPECTED_KEYS = ["DATABASE_URL"]
+
+    def DATABASE_URL(self):
+        return "from-method"
+""")
+
+    monkeypatch.setenv("ENV_LABEL", "PROD01")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        AppConfigRootClass.dynaload(str(tmp_path))
+    assert "DATABASE_URL" in str(excinfo.value)
+
+
+def test_os_mode_env_still_overrides_class_attribute(tmp_path, monkeypatch):
+    """A non-blank environment value still overrides the class attribute, with no fallback warning."""
+    import warnings
+
+    config_file = tmp_path / "config.py"
+    config_file.write_text("""
+from totodev_pub.app_config_root_class import AppConfigRootClass
+
+class AppConfigPROD01(AppConfigRootClass):
+    EXPECTED_KEYS = ["SOME_KEY"]
+    SOME_KEY = "from_class"
+""")
+
+    monkeypatch.setenv("ENV_LABEL", "PROD01")
+    monkeypatch.setenv("SOME_KEY", "from_env")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = AppConfigRootClass.dynaload(str(tmp_path))
+
+    assert config["SOME_KEY"] == "from_env"
+    fallback_warnings = [
+        str(w.message) for w in caught
+        if issubclass(w.category, UserWarning) and "using the value defined" in str(w.message)
+    ]
+    assert fallback_warnings == []
